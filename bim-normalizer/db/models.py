@@ -1,0 +1,153 @@
+from db.connection import get_conn, release_conn
+
+SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
+CREATE TABLE IF NOT EXISTS bim_models (
+    model_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_id    TEXT NOT NULL,
+    commit_id    TEXT NOT NULL,
+    branch_name  TEXT,
+    source       TEXT,
+    author       TEXT,
+    message      TEXT,
+    ingested_at  TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (stream_id, commit_id)
+);
+
+CREATE TABLE IF NOT EXISTS bim_elements (
+    element_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id        UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    application_id  TEXT,
+    speckle_id      TEXT NOT NULL,
+    speckle_type    TEXT,
+    ifc_class       TEXT,
+    category        TEXT,
+    name            TEXT,
+    storey          TEXT,
+    parent_id       UUID,
+    hash            TEXT,
+    UNIQUE (model_id, speckle_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bim_elements_model    ON bim_elements(model_id);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_app_id   ON bim_elements(application_id);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_ifc      ON bim_elements(ifc_class);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_category ON bim_elements(category);
+
+CREATE TABLE IF NOT EXISTS bim_geometry (
+    element_id  UUID PRIMARY KEY REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    bbox_min    FLOAT[],
+    bbox_max    FLOAT[],
+    centroid    FLOAT[],
+    volume_m3   FLOAT,
+    area_m2     FLOAT,
+    mesh        JSONB
+);
+
+CREATE TABLE IF NOT EXISTS bim_parameters (
+    id            BIGSERIAL PRIMARY KEY,
+    element_id    UUID NOT NULL REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    pset          TEXT,
+    key           TEXT NOT NULL,
+    value         TEXT,
+    datatype      TEXT,
+    value_numeric FLOAT,
+    canonical_key TEXT,
+    value_si      FLOAT,
+    unit_si       TEXT
+);
+-- Migrate existing rows: add columns if the table was created without them
+ALTER TABLE bim_parameters ADD COLUMN IF NOT EXISTS value_numeric FLOAT;
+ALTER TABLE bim_parameters ADD COLUMN IF NOT EXISTS canonical_key TEXT;
+-- value_si: value_numeric converted to SI units (m / m2 / m3 / kg) for
+-- length/area/volume/weight canonicals, so charts can compare quantities
+-- across sources that report in mm, ft, lb, etc. unit_si is the SI symbol
+-- ('m', 'm2', 'm3', 'kg'). Both NULL when the source unit is unknown/unconvertible.
+ALTER TABLE bim_parameters ADD COLUMN IF NOT EXISTS value_si FLOAT;
+ALTER TABLE bim_parameters ADD COLUMN IF NOT EXISTS unit_si TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_bim_params_element   ON bim_parameters(element_id);
+CREATE INDEX IF NOT EXISTS idx_bim_params_key       ON bim_parameters(key);
+CREATE INDEX IF NOT EXISTS idx_bim_params_key_val   ON bim_parameters(key, value);
+CREATE INDEX IF NOT EXISTS idx_bim_params_val_trgm  ON bim_parameters USING gin(value gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_bim_params_key_trgm  ON bim_parameters USING gin(key gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_bim_params_numeric   ON bim_parameters(element_id, value_numeric)
+    WHERE value_numeric IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bim_params_canonical ON bim_parameters(element_id, canonical_key)
+    WHERE canonical_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS bim_relationships (
+    id             BIGSERIAL PRIMARY KEY,
+    element_id     UUID NOT NULL REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    related_id     UUID NOT NULL REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    relation_type  TEXT,
+    UNIQUE (element_id, related_id, relation_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bim_rel_element ON bim_relationships(element_id);
+
+CREATE TABLE IF NOT EXISTS bim_tasks (
+    task_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id        UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    application_id  TEXT,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    status          TEXT DEFAULT 'NOTSTARTED',
+    is_milestone    BOOLEAN DEFAULT FALSE,
+    is_critical     BOOLEAN DEFAULT FALSE,
+    planned_start   DATE,
+    planned_finish  DATE,
+    actual_start    DATE,
+    actual_finish   DATE,
+    duration_days   FLOAT,
+    float_days      FLOAT,
+    parent_task_id  UUID REFERENCES bim_tasks(task_id),
+    wbs_code        TEXT,
+    sort_order      INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_bim_tasks_model  ON bim_tasks(model_id);
+CREATE INDEX IF NOT EXISTS idx_bim_tasks_parent ON bim_tasks(parent_task_id);
+
+CREATE TABLE IF NOT EXISTS bim_task_elements (
+    task_id     UUID NOT NULL REFERENCES bim_tasks(task_id) ON DELETE CASCADE,
+    element_id  UUID NOT NULL REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, element_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bim_task_el_task    ON bim_task_elements(task_id);
+CREATE INDEX IF NOT EXISTS idx_bim_task_el_element ON bim_task_elements(element_id);
+
+CREATE TABLE IF NOT EXISTS bim_classification_overrides (
+    override_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id       UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    application_id TEXT,
+    speckle_id     TEXT,
+    ifc_class      TEXT NOT NULL,
+    category       TEXT NOT NULL,
+    note           TEXT,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_overrides_model ON bim_classification_overrides(model_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_appid
+    ON bim_classification_overrides(model_id, application_id)
+    WHERE application_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_speckleid
+    ON bim_classification_overrides(model_id, speckle_id)
+    WHERE speckle_id IS NOT NULL;
+"""
+
+
+def init_schema() -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)

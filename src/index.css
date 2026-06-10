@@ -1,0 +1,601 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Speckle design tokens — dark (default) ────────────────────── */
+:root {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  --speckle-foundation-page:     #101012;
+  --speckle-foundation:          #15161C;
+  --speckle-foundation-2:        #191A22;
+  --speckle-foundation-3:        #52525b;
+  --speckle-foundation-4:        #71717a;
+  --speckle-foundation-5:        #a1a1aa;
+
+  --speckle-foreground:          #ffffff;
+  --speckle-foreground-2:        #B0B1B5;
+  --speckle-foreground-3:        #7E7F82;
+  --speckle-foreground-disabled: #434559;
+  --speckle-foreground-on-primary: #ffffff;
+
+  --speckle-outline-1:           #276FE5;
+  --speckle-outline-2:           #2E313F;
+  --speckle-outline-3:           #282833;
+  --speckle-outline-4:           #4B40C9;
+  --speckle-outline-5:           #434559;
+
+  --speckle-primary-muted:       #292B39;
+
+  --speckle-danger:              #F87171;
+  --speckle-danger-lighter:      #FCA5A5;
+  --speckle-danger-darker:       #EF4444;
+}
+
+/* ── Speckle design tokens — light ─────────────────────────────── */
+.light {
+  --speckle-foundation-page:     #FAFAFA;
+  --speckle-foundation:          #FFFFFF;
+  --speckle-foundation-2:        #F5F5F5;
+  --speckle-foundation-3:        #52525b;
+  --speckle-foundation-4:        #71717a;
+  --speckle-foundation-5:        #a1a1aa;
+
+  --speckle-foreground:          #1A1A1A;
+  --speckle-foreground-2:        #626263;
+  --speckle-foreground-3:        #7C7C7D;
+  --speckle-foreground-disabled: #C4C4C4;
+  --speckle-foreground-on-primary: #ffffff;
+
+  --speckle-outline-1:           #276FE5;
+  --speckle-outline-2:           #DFDFDF;
+  --speckle-outline-3:           #E2E8F0;
+  --speckle-outline-4:           #4B40C9;
+  --speckle-outline-5:           #C4C4C4;
+
+  --speckle-primary-muted:       #EDEDED;
+
+  --speckle-danger:              #C45959;
+  --speckle-danger-lighter:      #E87070;
+  --speckle-danger-darker:       #A33E3E;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+html {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* ── Flat surface utilities (glassmorphism removed) ─────────────── */
+.glass {
+  background: var(--speckle-foundation-2);
+  border: 1px solid var(--speckle-outline-3);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.glass-card {
+  background: var(--speckle-foundation-2);
+  border: 1px solid var(--speckle-outline-3);
+  border-radius: 12px;
+  padding: 16px;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.glass-card:hover {
+  background: var(--speckle-foundation);
+  border-color: var(--speckle-outline-2);
+}
+
+.light .glass {
+  background: #ffffff !important;
+  border: 1px solid rgba(19, 108, 255, 0.12) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.light .glass-card {
+  background: #ffffff !important;
+  border: 1px solid rgba(19, 108, 255, 0.1) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.light .glass-card:hover {
+  background: #f8f9ff !important;
+  border-color: rgba(19, 108, 255, 0.3) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Light mode Tailwind class overrides ────────────────────────── */
+
+/* white/transparent utilities become dark-ink equivalents */
+.light .border-white\/5 {
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .border-white\/10 {
+  border-color: rgba(0, 0, 0, 0.12) !important;
+}
+
+.light .bg-white\/5 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.light .bg-white\/10 {
+  background-color: rgba(0, 0, 0, 0.07) !important;
+}
+
+.light .hover\:bg-white\/5:hover {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.light .hover\:bg-white\/10:hover {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+
+/* Light mode input/select */
+.light select,
+.light input {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  color: #09090b !important;
+  border: 1px solid rgba(0, 0, 0, 0.12) !important;
+}
+
+.light select option {
+  background-color: #ffffff;
+  color: #09090b;
+}
+
+/* Light mode text */
+.light .text-zinc-400 {
+  color: #52525b !important;
+}
+
+.light .text-zinc-500 {
+  color: #3f3f46 !important;
+}
+
+/* ── Thin panel — replaces glass-card for grid canvas panels ───────── */
+.panel-thin {
+  border: 1px solid var(--speckle-outline-3);
+  border-radius: 6px;
+  background: var(--speckle-foundation);
+  position: relative; /* needed so the absolute close button positions correctly */
+}
+
+
+
+.light .panel-thin {
+  background: #ffffff;
+  border-color: var(--speckle-outline-2);
+}
+
+/* ── react-grid-layout ───────────────────────────────────────────────── */
+
+/* Disable pointer events on panel content during drag/resize so the
+   Speckle WebGL canvas cannot steal mousemove/mouseup from the gesture. */
+.react-grid-item.resizing > *:not(.react-resizable-handle),
+.react-grid-item.react-draggable-dragging > *:not(.react-resizable-handle) {
+  pointer-events: none !important;
+}
+
+/* Drag placeholder */
+.react-grid-placeholder {
+  background: rgba(19, 108, 255, 0.15);
+  border: 2px dashed rgba(19, 108, 255, 0.4);
+  border-radius: 6px;
+  opacity: 1 !important;
+}
+
+/* ── Resize handles ─────────────────────────────────────────────────── */
+/* react-resizable/css/styles.css (loaded from the component bundle) sets
+   bottom:0; right:0 on the base .react-resizable-handle rule. If it loads
+   after index.css all positional overrides must use !important to win. */
+
+.react-resizable-handle {
+  position: absolute !important;
+  background: transparent !important;
+  background-image: none !important;
+  opacity: 0.2;
+  transition: opacity 0.15s ease;
+  z-index: 115;
+  /* None at rest so handles never block toolbar/pagination/buttons beneath them.
+     Re-enabled on panel hover so the user can grab them to resize. */
+  pointer-events: none;
+}
+.react-grid-item:hover .react-resizable-handle,
+.react-grid-item.resizing .react-resizable-handle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Corner handles stay visible at rest — the L-bracket is small enough
+   not to clutter but clear enough to signal resizability. */
+.react-resizable-handle-sw,
+.react-resizable-handle-se { opacity: 0.5; }
+
+/* ── Corner handles (24×24 hit area) ────────────────────────────────── */
+/* NE/NW are intentionally omitted: they sit behind the panel header. */
+.react-resizable-handle-sw {
+  bottom: 0 !important; top: auto !important; left: 0 !important; right: auto !important;
+  width: 24px !important; height: 24px !important;
+  cursor: sw-resize !important; transform: none !important;
+}
+.react-resizable-handle-se {
+  bottom: 0 !important; top: auto !important; right: 0 !important; left: auto !important;
+  width: 24px !important; height: 24px !important;
+  cursor: se-resize !important; transform: none !important;
+}
+
+/* L-bracket indicators — explicit per-side borders prevent hairline bleed */
+.react-resizable-handle-sw::after,
+.react-resizable-handle-se::after {
+  content: ''; position: absolute;
+  width: 10px; height: 10px;
+  border-top: none;
+  border-bottom: 2.5px solid rgba(255, 255, 255, 0.55);
+  transition: border-color 0.15s ease, width 0.15s ease, height 0.15s ease;
+}
+.react-resizable-handle-sw::after {
+  bottom: 4px; left: 4px;
+  border-left: 2.5px solid rgba(255, 255, 255, 0.55);
+  border-right: none;
+  border-radius: 0 0 0 2px;
+}
+.react-resizable-handle-se::after {
+  bottom: 4px; right: 4px;
+  border-right: 2.5px solid rgba(255, 255, 255, 0.55);
+  border-left: none;
+  border-radius: 0 0 2px 0;
+}
+
+.react-grid-item:hover .react-resizable-handle-sw::after,
+.react-grid-item:hover .react-resizable-handle-se::after,
+.react-grid-item.resizing .react-resizable-handle-sw::after,
+.react-grid-item.resizing .react-resizable-handle-se::after {
+  border-bottom-color: rgba(19, 108, 255, 1);
+  width: 12px; height: 12px;
+}
+.react-grid-item:hover .react-resizable-handle-sw::after,
+.react-grid-item.resizing .react-resizable-handle-sw::after {
+  border-left-color: rgba(19, 108, 255, 1);
+}
+.react-grid-item:hover .react-resizable-handle-se::after,
+.react-grid-item.resizing .react-resizable-handle-se::after {
+  border-right-color: rgba(19, 108, 255, 1);
+}
+
+/* ── Edge handles — pill indicators ─────────────────────────────────── */
+.react-resizable-handle-s {
+  bottom: 0 !important; top: auto !important; left: 50% !important; right: auto !important;
+  width: 60px !important; height: 14px !important;
+  cursor: s-resize !important; transform: translateX(-50%) !important; margin: 0 !important;
+}
+.react-resizable-handle-n {
+  top: 0 !important; bottom: auto !important; left: 50% !important; right: auto !important;
+  width: 60px !important; height: 14px !important;
+  cursor: n-resize !important; transform: translateX(-50%) !important; margin: 0 !important;
+}
+.react-resizable-handle-e {
+  right: 0 !important; left: auto !important; top: 50% !important; bottom: auto !important;
+  width: 14px !important; height: 60px !important;
+  cursor: e-resize !important; transform: translateY(-50%) !important; margin: 0 !important;
+}
+.react-resizable-handle-w {
+  left: 0 !important; right: auto !important; top: 50% !important; bottom: auto !important;
+  width: 14px !important; height: 60px !important;
+  cursor: w-resize !important; transform: translateY(-50%) !important; margin: 0 !important;
+}
+
+.react-resizable-handle-s::after,
+.react-resizable-handle-n::after {
+  content: ''; position: absolute;
+  width: 32px; height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  left: 50%; transform: translateX(-50%);
+  transition: background 0.15s ease, width 0.15s ease;
+}
+.react-resizable-handle-s::after { bottom: 3px; }
+.react-resizable-handle-n::after { top: 3px; }
+
+.react-resizable-handle-e::after,
+.react-resizable-handle-w::after {
+  content: ''; position: absolute;
+  width: 4px; height: 32px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  top: 50%; transform: translateY(-50%);
+  transition: background 0.15s ease, height 0.15s ease;
+}
+.react-resizable-handle-e::after { right: 3px; }
+.react-resizable-handle-w::after { left: 3px; }
+
+.react-grid-item:hover .react-resizable-handle-s::after,
+.react-grid-item:hover .react-resizable-handle-n::after { background: rgba(19, 108, 255, 0.80); width: 42px; }
+.react-grid-item:hover .react-resizable-handle-e::after,
+.react-grid-item:hover .react-resizable-handle-w::after { background: rgba(19, 108, 255, 0.80); height: 42px; }
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--speckle-outline-3);
+  cursor: default;
+  height: 30px;
+  min-height: 30px;
+  flex-shrink: 0;
+  user-select: none;
+  /* Sits above panel content (handles are z-index 115 but NE/NW are not used,
+     so header buttons are always reachable). */
+  position: relative;
+  z-index: 110;
+}
+
+.drag-zone { cursor: move; }
+.drag-zone:active { cursor: grabbing; }
+
+.light .panel-header {
+  border-bottom-color: var(--speckle-outline-2);
+}
+
+
+/* ── Grid canvas — no background on placeholder ─────────────────────── */
+.react-grid-item.react-grid-placeholder {
+  background: var(--speckle-outline-1);
+  opacity: 0.08;
+  border-radius: 6px;
+}
+
+/* Gradient text — blue → cyan → indigo → violet */
+.gradient-text {
+  background: linear-gradient(90deg, #136CFF 0%, #38BDF8 25%, #818CF8 55%, #A855F7 80%, #C084FC 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Custom scrollbar - Dark */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.45);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.70);
+}
+
+/* Light mode scrollbar */
+.light ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* Named scrollbar class used by panels/widgets — inherits the global rules above
+   but marks the element as a scroll container with visible overflow. */
+.custom-scrollbar {
+  scrollbar-width: thin;             /* Firefox */
+  scrollbar-color: rgba(255,255,255,0.45) rgba(255,255,255,0.06);
+}
+.light .custom-scrollbar {
+  scrollbar-color: rgba(0,0,0,0.35) rgba(0,0,0,0.08);
+}
+
+/* Select styling - dark default */
+select {
+  background-color: rgba(24, 24, 27, 0.8);
+  color: #fafafa;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+select option {
+  background-color: #18181b;
+  color: #fafafa;
+  padding: 8px;
+}
+
+/* Plotly chart container */
+.js-plotly-plot .plotly .modebar {
+  display: none !important;
+}
+
+/* Animations */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg,
+      rgba(255, 255, 255, 0.03) 25%,
+      rgba(255, 255, 255, 0.08) 50%,
+      rgba(255, 255, 255, 0.03) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
+
+/* Light mode shimmer */
+.light .animate-shimmer {
+  background: linear-gradient(90deg,
+      rgba(0, 0, 0, 0.03) 25%,
+      rgba(0, 0, 0, 0.06) 50%,
+      rgba(0, 0, 0, 0.03) 75%);
+  background-size: 200% 100%;
+}
+
+/* Light mode 3D viewer container and panel overrides */
+.light .bg-zinc-900 {
+  background-color: #e2e8f0 !important;
+}
+
+.light .bg-zinc-900\/95 {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.light .bg-zinc-900\/50 {
+  background-color: rgba(255, 255, 255, 0.8) !important;
+}
+
+/* Light mode text */
+.light .text-zinc-200 {
+  color: #18181b !important;
+}
+
+.light .text-zinc-300 {
+  color: #27272a !important;
+}
+
+/* React Grid Layout styles */
+.react-grid-layout {
+  position: relative;
+  transition: height 200ms ease;
+  /* Subtle dot raster — aligns with the 48-col × 8px snap grid */
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.055) 1px, transparent 1px);
+  background-size: 24px 16px;
+}
+
+.react-grid-item {
+  transition: all 200ms ease;
+  transition-property: left, top, width, height;
+}
+
+.react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
+}
+
+.react-grid-item.resizing {
+  z-index: 1;
+  will-change: width, height;
+}
+
+.react-grid-item.react-draggable-dragging {
+  opacity: 0.8;
+  z-index: 100;
+  will-change: transform;
+}
+
+.react-grid-item.dropping {
+  visibility: hidden;
+}
+
+
+/* ── Light mode overrides ───────────────────────────────────────── */
+.light .react-grid-layout {
+  background-image: radial-gradient(circle, rgba(0, 0, 0, 0.07) 1px, transparent 1px);
+}
+
+.light .react-resizable-handle-sw::after,
+.light .react-resizable-handle-se::after { border-color: rgba(0, 0, 0, 0.35); }
+
+.light .react-grid-item:hover .react-resizable-handle-sw::after,
+.light .react-grid-item:hover .react-resizable-handle-se::after { border-color: rgba(19, 108, 255, 0.85); }
+
+.light .react-resizable-handle-s::after,
+.light .react-resizable-handle-n::after,
+.light .react-resizable-handle-e::after,
+.light .react-resizable-handle-w::after { background: rgba(0, 0, 0, 0.14); }
+
+.light .react-grid-item:hover .react-resizable-handle-s::after,
+.light .react-grid-item:hover .react-resizable-handle-n::after,
+.light .react-grid-item:hover .react-resizable-handle-e::after,
+.light .react-grid-item:hover .react-resizable-handle-w::after { background: rgba(19, 108, 255, 0.80); }
+
+/* Grid item placeholder */
+.react-grid-placeholder {
+  background: rgba(19, 108, 255, 0.2);
+  border: 2px dashed rgba(19, 108, 255, 0.5);
+  border-radius: 12px;
+  transition-duration: 100ms;
+  z-index: 2;
+  user-select: none;
+}
+
+/* Drag handle cursor */
+.drag-handle {
+  cursor: grab;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* Panel header for grid layout */
+.panel-header {
+  cursor: grab;
+  user-select: none;
+}
+
+.panel-header:active {
+  cursor: grabbing;
+}
+
+/* Light mode panel header */
+.light .panel-header {
+  background: linear-gradient(to right, var(--speckle-foundation-2), transparent);
+  border-color: var(--speckle-outline-2) !important;
+}
+
+/* Prevent focus/active outlines on charts */
+.glass-card:focus,
+.glass-card:focus-visible,
+.glass-card:active {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* DndKit sortable - only show drag styles when actively dragging */
+[data-dnd-sortable] {
+  outline: none !important;
+}
+
+[data-dnd-sortable]:focus,
+[data-dnd-sortable]:focus-visible {
+  outline: none !important;
+}
+
+/* Plotly chart - no selection outlines */
+.js-plotly-plot,
+.plotly {
+  outline: none !important;
+}
+
+.js-plotly-plot:focus,
+.js-plotly-plot:active {
+  outline: none !important;
+}

@@ -1,0 +1,191 @@
+{
+  "_comment": "Maps canonical IFC-standard parameter names to source-specific key aliases. Edit to add new sources without code changes.",
+
+  "material": {
+    "keys": [
+      "Structural Material", "Material", "Type Material", "Material Name",
+      "material", "BuildingMaterial", "Material 1",
+      "MATERIAL", "MAIN_PART.MATERIAL", "TOP_FLANGE_MATERIAL", "BOT_FLANGE_MATERIAL"
+    ],
+    "psets": [
+      {"pset": "Pset_MaterialCommon",              "key": "Category"},
+      {"pset": "Pset_MaterialCommon",              "key": "Name"},
+      {"pset": "Pset_ConcreteElementGeneral",      "key": "ConcreteStrengthClass"},
+      {"pset": "Pset_ReinforcementBarPitchOfBeam", "key": "MaterialGrade"}
+    ]
+  },
+
+  "grade": {
+    "keys": [
+      "Steel Grade", "Grade Short", "Grade", "grade",
+      "Material Grade", "Reinforcement Grade",
+      "GRADE", "MAIN_PART.GRADE", "grade_short"
+    ],
+    "psets": [
+      {"pset": "Pset_SteelStructuralElementCommon", "key": "Grade"},
+      {"pset": "Pset_ReinforcingElementCommon",     "key": "SteelGrade"}
+    ]
+  },
+
+  "profile": {
+    "keys": [
+      "Type Name", "Family", "Structural Framing Type", "Profile Name",
+      "profile", "profileName", "Section",
+      "PROFILE", "NAME", "MAIN_PART.NAME", "PROFILE_TYPE"
+    ],
+    "psets": [
+      {"pset": "Pset_ProfileDef",                   "key": "ProfileName"},
+      {"pset": "Pset_SteelStructuralElementCommon", "key": "Section"}
+    ]
+  },
+
+  "fire_rating": {
+    "keys": [
+      "Fire Rating", "FireRating", "FIRE_RATING",
+      "Fire resistance rating", "fire_rating"
+    ],
+    "psets": [
+      {"pset": "Pset_WallCommon",                 "key": "FireRating"},
+      {"pset": "Pset_BeamCommon",                 "key": "FireRating"},
+      {"pset": "Pset_ColumnCommon",               "key": "FireRating"},
+      {"pset": "Pset_SlabCommon",                 "key": "FireRating"},
+      {"pset": "Pset_DoorCommon",                 "key": "FireRating"},
+      {"pset": "Pset_WindowCommon",               "key": "FireRating"},
+      {"pset": "Pset_CoveringCommon",             "key": "FireRating"},
+      {"pset": "Pset_BuildingElementProxyCommon", "key": "FireRating"}
+    ]
+  },
+
+  "load_bearing": {
+    "keys": [
+      "Structural", "LoadBearing", "Load Bearing",
+      "LOAD_BEARING", "Is Structural", "IsStructural", "load_bearing"
+    ],
+    "psets": [
+      {"pset": "Pset_WallCommon",   "key": "LoadBearing"},
+      {"pset": "Pset_SlabCommon",   "key": "LoadBearing"},
+      {"pset": "Pset_ColumnCommon", "key": "LoadBearing"},
+      {"pset": "Pset_BeamCommon",   "key": "LoadBearing"}
+    ]
+  },
+
+  "phase": {
+    "_comment": "Project/schedule phase name (when an element was modeled, demolished, etc.) — distinct from 'lifecycle_status' (IFC construction status: NEW/EXISTING/DEMOLISH/...).",
+    "keys": [
+      "Phase Created", "Phase", "PHASE",
+      "phase", "Construction Phase", "Phase Demolished",
+      "MAIN_PART.PHASE"
+    ],
+    "psets": []
+  },
+
+  "lifecycle_status": {
+    "_comment": "IFC construction/lifecycle status (Pset_ConstructionOccurence.Status: NEW, EXISTING, DEMOLISH, TEMPORARY, ...) — distinct from 'phase' (project schedule phase name).",
+    "keys": [],
+    "psets": [
+      {"pset": "Pset_ConstructionOccurence", "key": "Status"}
+    ]
+  },
+
+  "assembly_mark": {
+    "keys": [
+      "Mark", "Type Mark", "ASSEMBLY_POS", "Assembly Position",
+      "AssemblyMark", "assembly_mark", "PRELIM_MARK", "PART_POS"
+    ],
+    "psets": [
+      {"pset": "Pset_ElementAssemblyCommon", "key": "AssemblyPlace"}
+    ]
+  },
+
+  "workset": {
+    "keys": ["Workset", "WORKSET", "workset", "WorkSet", "Workset Name"],
+    "psets": []
+  },
+
+  "family_type": {
+    "keys": [
+      "Family and Type", "Type", "Family", "Element Type",
+      "FAMILY_TYPE", "TYPE_NAME", "Family Name", "Type Name"
+    ],
+    "psets": []
+  },
+
+  "reference_level": {
+    "keys": [
+      "Level", "Base Level", "Reference Level",
+      "Floor", "Building story", "reference_level"
+    ],
+    "psets": []
+  },
+
+  "area": {
+    "keys": ["Area", "AREA", "area", "Net Area", "Gross Area"],
+    "psets": [
+      {"pset": "Qto_WallBaseQuantities",   "key": "NetSideArea"},
+      {"pset": "Qto_SlabBaseQuantities",   "key": "NetArea"},
+      {"pset": "Qto_BeamBaseQuantities",   "key": "CrossSectionArea"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "CrossSectionArea"}
+    ]
+  },
+
+  "volume": {
+    "keys": ["Volume", "VOLUME", "volume", "Net Volume", "Gross Volume"],
+    "psets": [
+      {"pset": "Qto_WallBaseQuantities",   "key": "NetVolume"},
+      {"pset": "Qto_SlabBaseQuantities",   "key": "NetVolume"},
+      {"pset": "Qto_BeamBaseQuantities",   "key": "NetVolume"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "NetVolume"}
+    ]
+  },
+
+  "length": {
+    "keys": ["Length", "MAIN_PART.LENGTH", "LENGTH", "length"],
+    "psets": [
+      {"pset": "Qto_BeamBaseQuantities",   "key": "Length"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "Length"},
+      {"pset": "Qto_MemberBaseQuantities", "key": "Length"}
+    ]
+  },
+
+  "weight": {
+    "keys": ["Weight", "WEIGHT", "weight", "Mass", "NET_WEIGHT"],
+    "psets": []
+  },
+
+  "unit_mass": {
+    "_comment": "Mass per unit length (kg/m) — distinct from total element weight ('weight'). IFC's Pset_SteelStructuralElementCommon.UnitMass is per-length, not total mass.",
+    "keys": ["Unit Mass", "UNIT_WEIGHT", "unit_mass"],
+    "psets": [
+      {"pset": "Pset_SteelStructuralElementCommon", "key": "UnitMass"}
+    ]
+  },
+
+  "ifc_guid": {
+    "_comment": "IFC GlobalId (22-char IFC GUID) — captured from psets/properties when present, or from the Speckle object's top-level globalId/applicationId attributes (set by db/insert.py's _flatten_top_level_attrs).",
+    "keys": [
+      "IfcGUID", "IFC Guid", "GlobalId", "Global Id", "IFCGUID", "IFC_GUID", "globalId"
+    ],
+    "psets": []
+  },
+
+  "material_category": {
+    "_comment": "Derived at ingest time from 'material'/'grade' values via classify_material_category() — not a raw source key. One of: steel, concrete, timber, aluminum, masonry, glass, other.",
+    "keys": [],
+    "psets": []
+  },
+
+  "omniclass": {
+    "keys": ["OmniClass Number", "OmniClass Title", "Assembly Code", "Assembly Description"],
+    "psets": []
+  },
+
+  "thermal_transmittance": {
+    "keys": ["Heat Transfer Coefficient (U)", "U-Value", "Thermal mass", "thermal_transmittance"],
+    "psets": [
+      {"pset": "Pset_WallCommon",   "key": "ThermalTransmittance"},
+      {"pset": "Pset_SlabCommon",   "key": "ThermalTransmittance"},
+      {"pset": "Pset_WindowCommon", "key": "ThermalTransmittance"},
+      {"pset": "Pset_DoorCommon",   "key": "ThermalTransmittance"}
+    ]
+  }
+}

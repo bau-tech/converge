@@ -1,0 +1,89 @@
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: speckle-postgres
+    environment:
+      POSTGRES_USER: ${PG_USER:-speckle}
+      POSTGRES_PASSWORD: ${PG_PASS:-speckle}
+      POSTGRES_DB: ${PG_NAME:-speckle}
+    ports:
+      - "${PG_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-speckle}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
+  # ── BIM Normalizer ───────────────────────────────────────────────────────────
+  bim-normalizer:
+    build:
+      context: ./bim-normalizer
+    container_name: bim-normalizer
+    ports:
+      - "8002:8002"
+    environment:
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      SPECKLE_SKIP_ANALYTICS: "true"
+      OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
+      MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${PG_USER:-speckle}
+      PG_PASS: ${PG_PASS:-speckle}
+      PG_NAME: ${PG_NAME:-speckle}
+      PORT: 8002
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - speckle-net
+
+  # ── Frontend Dashboard (Nginx + built Vite SPA) ──────────────────────────────
+  speckle-dashboard:
+    build:
+      context: .
+      args:
+        VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}
+        VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+        VITE_NORMALIZER_URL: /normalizer
+        VITE_OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
+        VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
+        VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
+        VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
+        VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
+        VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
+        VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
+    container_name: speckle-dashboard
+    ports:
+      - "8080:80"
+    environment:
+      NORMALIZER_URL: http://bim-normalizer:8002/
+    depends_on:
+      bim-normalizer:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
+volumes:
+  pgdata:
+
+networks:
+  speckle-net:
+    driver: bridge

@@ -1,0 +1,11 @@
+fastapi>=0.116.0
+uvicorn[standard]
+pydantic>=2.0
+psycopg2-binary
+specklepy>=3.0.0
+ifcopenshell>=0.7.0
+ifc5d>=0.8.0
+requests
+httpx>=0.28.1
+python-dotenv
+mcp[cli]>=1.0.0
