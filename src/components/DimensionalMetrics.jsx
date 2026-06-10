@@ -2,7 +2,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useMemo, useState, useEffect } from 'react'
 import { Ruler, ArrowUpDown, TrendingUp, Hash, ChevronDown, BarChart3 } from 'lucide-react'
 import { discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
-import Plot from 'react-plotly.js'
+import Plot from './Plot'
 import { MetricsConfig } from './MetricsConfig'
 
 // Format large numbers nicely

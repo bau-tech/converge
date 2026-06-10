@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from './Plot'
 import { Loader2, AlertCircle } from 'lucide-react'
 
 const BAR_COLORS = ['#10B981', '#34D399', '#6EE7B7', '#A7F3D0', '#059669', '#047857', '#065F46']

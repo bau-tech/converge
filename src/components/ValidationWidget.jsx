@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X } from 'lucide-react'
-import Plot from 'react-plotly.js'
+import Plot from './Plot'
 import { discoverProperties, discoverNumericProperties } from '../utils/propertyScanner'
 
 const DEFAULT_RULES = [{ id: 1, property: 'category', operator: 'is_defined', value: '' }]

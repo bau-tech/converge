@@ -1,4 +1,4 @@
-import Plot from 'react-plotly.js'
+import Plot from './Plot'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2 } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
