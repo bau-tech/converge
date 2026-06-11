@@ -1,48 +1,66 @@
-// Shared dark-theme building blocks for ECharts options, mirroring the
-// Plotly dark theme (transparent backgrounds, zinc grid colors, Inter font,
-// monospace hover tooltips) so migrated charts look like-for-like.
+// Shared theme building blocks for ECharts options, mirroring the previous
+// Plotly themes (transparent backgrounds, zinc grid colors in dark mode,
+// Inter font, monospace hover tooltips) so migrated charts look like-for-like.
 
-const GRID_LINE_COLOR = '#27272a'
-const AXIS_LINE_COLOR = '#3f3f46'
-const TEXT_COLOR = '#e4e4e7'
-const TICK_COLOR = '#a1a1aa'
+const DARK = {
+    gridLine: '#27272a',
+    axisLine: '#3f3f46',
+    text: '#e4e4e7',
+    tick: '#a1a1aa',
+    tooltipBg: '#18181b',
+    tooltipBorder: '#3f3f46',
+    tooltipText: '#fafafa',
+}
+
+const LIGHT = {
+    gridLine: '#e4e4e7',
+    axisLine: '#d4d4d8',
+    text: '#18181b',
+    tick: '#52525b',
+    tooltipBg: '#ffffff',
+    tooltipBorder: '#e4e4e7',
+    tooltipText: '#18181b',
+}
 
 // Top-level option fragments shared by every chart: transparent background,
 // font, update-transition animation, and tooltip styling.
-export function baseOption({ fontSize = 11, tooltipFormatter } = {}) {
+export function baseOption({ fontSize = 11, tooltipFormatter, darkMode = true } = {}) {
+    const c = darkMode ? DARK : LIGHT
     return {
         backgroundColor: 'transparent',
-        textStyle: { color: TEXT_COLOR, fontSize, fontFamily: 'Inter, system-ui, sans-serif' },
+        textStyle: { color: c.text, fontSize, fontFamily: 'Inter, system-ui, sans-serif' },
         animationDurationUpdate: 650,
         animationEasingUpdate: 'cubicInOut',
         tooltip: {
-            backgroundColor: '#18181b',
-            borderColor: AXIS_LINE_COLOR,
-            textStyle: { color: '#fafafa', fontFamily: 'monospace', fontSize: 11 },
+            backgroundColor: c.tooltipBg,
+            borderColor: c.tooltipBorder,
+            textStyle: { color: c.tooltipText, fontFamily: 'monospace', fontSize: 11 },
             ...(tooltipFormatter ? { formatter: tooltipFormatter } : {}),
         },
     }
 }
 
 // Category axis (e.g. the label axis of a horizontal bar chart).
-export function categoryAxisStyle({ axisLabel, ...extra } = {}) {
+export function categoryAxisStyle({ axisLabel, darkMode = true, ...extra } = {}) {
+    const c = darkMode ? DARK : LIGHT
     return {
         type: 'category',
-        axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
+        axisLine: { lineStyle: { color: c.axisLine } },
         axisTick: { show: false },
-        axisLabel: { color: TICK_COLOR, ...axisLabel },
+        axisLabel: { color: c.tick, ...axisLabel },
         splitLine: { show: false },
         ...extra,
     }
 }
 
 // Value axis (e.g. the numeric axis of a horizontal bar chart).
-export function valueAxisStyle({ axisLabel, ...extra } = {}) {
+export function valueAxisStyle({ axisLabel, darkMode = true, ...extra } = {}) {
+    const c = darkMode ? DARK : LIGHT
     return {
         type: 'value',
         axisLine: { show: false },
-        axisLabel: { color: TICK_COLOR, ...axisLabel },
-        splitLine: { lineStyle: { color: GRID_LINE_COLOR } },
+        axisLabel: { color: c.tick, ...axisLabel },
+        splitLine: { lineStyle: { color: c.gridLine } },
         ...extra,
     }
 }

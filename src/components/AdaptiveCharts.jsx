@@ -1,9 +1,10 @@
-import Plot from './Plot'
+import EChart from './EChart'
+import { baseOption, categoryAxisStyle, valueAxisStyle } from '../lib/echartsTheme'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2 } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { ChartBuilder } from './ChartBuilder'
-import { discoverProperties, aggregateProperty, discoverNumericProperties, aggregateNumericProperty, createHistogramBins } from '../utils/propertyScanner'
+import { discoverProperties, aggregateProperty, discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -62,36 +63,6 @@ export const CHART_CONFIG = {
 
 // Default config for unknown fields
 const DEFAULT_CONFIG = { type: 'bar', orientation: 'h', clickable: false }
-
-// Plotly layout base with animations and Dark Theme
-const getPlotlyLayout = (height = 300, darkMode = true) => ({
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: 'rgba(0,0,0,0)',
-    font: { color: darkMode ? '#e4e4e7' : '#18181b', size: 11, family: 'Inter, system-ui, sans-serif' },
-    margin: { l: 60, r: 20, t: 30, b: 40 },
-    hoverlabel: {
-        bgcolor: darkMode ? '#18181b' : '#ffffff',
-        bordercolor: darkMode ? '#3f3f46' : '#e4e4e7',
-        font: { color: darkMode ? '#fafafa' : '#18181b', family: 'monospace' }
-    },
-    height,
-    autosize: true,
-    xaxis: {
-        gridcolor: darkMode ? '#27272a' : '#e4e4e7',
-        zerolinecolor: darkMode ? '#3f3f46' : '#d4d4d8',
-        tickfont: { color: darkMode ? '#e4e4e7' : '#18181b' }
-    },
-    yaxis: {
-        gridcolor: darkMode ? '#27272a' : '#e4e4e7',
-        zerolinecolor: darkMode ? '#3f3f46' : '#d4d4d8',
-        tickfont: { color: darkMode ? '#e4e4e7' : '#18181b' }
-    },
-    transition: {
-        duration: 650,
-        easing: 'cubic-in-out',
-        ordering: 'traces first',
-    },
-})
 
 // ... (discoverChartFields and formatFieldName remain the same)
 export function discoverChartFields(summary) {
@@ -166,7 +137,8 @@ function sortEntries(entries, sortOrder) {
     }
 }
 
-function prepareBarData(data, config, highlightedValue) {
+// Build a complete ECharts option for a (horizontal or vertical) bar chart
+function prepareBarOption(data, config, highlightedValue, { darkMode = true, standalone = false, isResizing = false } = {}) {
     const minCount = config.minCount || 0
     const entries = Object.entries(data).filter(([key]) => !isEmptyKey(key) && (minCount === 0 || Number(data[key]) >= minCount))
     const sorted = sortEntries(entries, config.sortOrder).slice(0, config.maxItems || 15)
@@ -174,65 +146,113 @@ function prepareBarData(data, config, highlightedValue) {
     const isHorizontal = config.orientation !== 'v'
     const unit = config.unit || null
     const valueLabel = unit === 'm³' ? 'Volume' : unit === 'm²' ? 'Area' : 'Count'
-    const formatVal = v => unit ? v.toFixed(2) : v
+    const formatVal = v => unit ? Number(v).toFixed(2) : v
     const palette = resolveColors(config.colorScheme)
     const showLabels = config.showLabels !== false
 
+    const tickFontSize   = config.tickFontSize   || 11
+    const tickFontColor  = config.tickFontColor  || (darkMode ? '#e4e4e7' : '#18181b')
+    const tickAngle      = config.tickAngle      ?? (isHorizontal ? 0 : -45)
+    const valueFontSize  = config.valueFontSize  || 11
+    const valueFontColor = config.valueFontColor || (darkMode ? '#e4e4e7' : '#18181b')
+
+    const seriesData = sorted.map((d, idx) => {
+        const base = palette[idx % palette.length]
+        const isHighlighted = d[0] === highlightedValue
+        const color = !highlightedValue ? base : isHighlighted ? COLOR_PALETTES.highlight : hexToRgba(base, 0.25)
+        return {
+            name: d[0],
+            value: d[1],
+            itemStyle: {
+                color,
+                borderColor: isHighlighted ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.1)',
+                borderWidth: isHighlighted ? 2 : 1,
+            },
+        }
+    })
+
+    const categoryAxisOpt = categoryAxisStyle({
+        data: sorted.map(d => d[0]),
+        darkMode,
+        axisLabel: { color: tickFontColor, fontSize: tickFontSize, rotate: tickAngle },
+    })
+    const valueAxisOpt = valueAxisStyle({ darkMode })
+
+    const grid = standalone
+        ? (isHorizontal
+            ? { left: 50, right: 8, top: 8, bottom: 28, containLabel: true }
+            : { left: 40, right: 8, top: 8, bottom: 70, containLabel: true })
+        : (isHorizontal
+            ? { left: 60, right: 20, top: 30, bottom: 40, containLabel: true }
+            : { left: 40, right: 20, top: 30, bottom: tickAngle === 0 ? 40 : Math.abs(tickAngle) >= 45 ? 80 : 60, containLabel: true })
+
     return {
-        type: 'bar',
-        x: isHorizontal ? sorted.map(d => d[1]) : sorted.map(d => d[0]),
-        y: isHorizontal ? sorted.map(d => d[0]) : sorted.map(d => d[1]),
-        orientation: isHorizontal ? 'h' : 'v',
-        marker: {
-            color: sorted.map((d, idx) => {
-                const base = palette[idx % palette.length]
-                if (!highlightedValue) return base
-                if (d[0] === highlightedValue) return COLOR_PALETTES.highlight
-                return hexToRgba(base, 0.25)
-            }),
-            line: {
-                color: sorted.map(d => d[0] === highlightedValue ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.1)'),
-                width: sorted.map(d => d[0] === highlightedValue ? 2 : 1)
-            }
-        },
-        text: showLabels ? sorted.map(d => unit ? `${formatVal(d[1])} ${unit}` : d[1]) : [],
-        textposition: showLabels ? 'auto' : 'none',
-        textfont: { size: config.valueFontSize || 11, color: config.valueFontColor || '#e4e4e7' },
-        hovertemplate: isHorizontal
-            ? `<b>%{y}</b><br>${valueLabel}: %{x}${unit ? ' ' + unit : ''}<extra></extra>`
-            : `<b>%{x}</b><br>${valueLabel}: %{y}${unit ? ' ' + unit : ''}<extra></extra>`
+        ...baseOption({
+            darkMode,
+            tooltipFormatter: (params) => {
+                const p = Array.isArray(params) ? params[0] : params
+                return `<b>${p.name}</b><br/>${valueLabel}: ${formatVal(p.value)}${unit ? ' ' + unit : ''}`
+            },
+        }),
+        animationDurationUpdate: isResizing ? 0 : 650,
+        grid,
+        xAxis: isHorizontal ? valueAxisOpt : categoryAxisOpt,
+        yAxis: isHorizontal ? categoryAxisOpt : valueAxisOpt,
+        series: [{
+            type: 'bar',
+            data: seriesData,
+            label: {
+                show: showLabels,
+                position: isHorizontal ? 'right' : 'top',
+                color: valueFontColor,
+                fontSize: valueFontSize,
+                formatter: (params) => unit ? `${formatVal(params.value)} ${unit}` : params.value,
+            },
+        }],
     }
 }
 
-// Prepare data for pie chart
-function preparePieData(data, config, highlightedValue) {
+// Build a complete ECharts option for a donut/pie chart
+function preparePieOption(data, config, highlightedValue, { darkMode = true, standalone = false, isResizing = false } = {}) {
     const minCount = config.minCount || 0
     const entries = Object.entries(data).filter(([key]) => !isEmptyKey(key) && (minCount === 0 || Number(data[key]) >= minCount))
     const sorted = sortEntries(entries, config.sortOrder).slice(0, config.maxItems || 8)
     const palette = resolveColors(config.colorScheme)
     const showLabels = config.showLabels !== false
     const donut = config.donut !== false  // default true (donut style)
+    const labelFontSize = config.labelFontSize || 11
+    const labelFontColor = config.labelFontColor || (darkMode ? '#e4e4e7' : '#18181b')
+
+    const seriesData = sorted.map((d, idx) => {
+        const base = palette[idx % palette.length]
+        const isHighlighted = d[0] === highlightedValue
+        const color = !highlightedValue ? base : isHighlighted ? COLOR_PALETTES.highlight : hexToRgba(base, 0.35)
+        return {
+            name: d[0],
+            value: d[1],
+            itemStyle: {
+                color,
+                borderColor: isHighlighted ? '#fff' : (darkMode ? '#18181b' : '#ffffff'),
+                borderWidth: isHighlighted ? 3 : 2,
+            },
+        }
+    })
 
     return {
-        type: 'pie',
-        labels: sorted.map(d => d[0]),
-        values: sorted.map(d => d[1]),
-        marker: {
-            colors: sorted.map((d, idx) => {
-                const base = palette[idx % palette.length]
-                if (!highlightedValue) return base
-                if (d[0] === highlightedValue) return COLOR_PALETTES.highlight
-                return hexToRgba(base, 0.35)
-            }),
-            line: { color: '#18181b', width: 2 }
-        },
-        pull: sorted.map(d => d[0] === highlightedValue ? 0.2 : 0),
-        hole: donut ? 0.5 : 0,
-        textposition: showLabels ? 'outside' : 'none',
-        textinfo: showLabels ? 'label+percent' : 'none',
-        textfont: { size: config.labelFontSize || 11, color: config.labelFontColor || '#e4e4e7' },
-        automargin: true,
-        hovertemplate: '<b>%{label}</b><br>Count: %{value}<br>%{percent}<extra></extra>'
+        ...baseOption({
+            darkMode,
+            tooltipFormatter: (params) => `<b>${params.name}</b><br/>Count: ${params.value}<br/>${params.percent}%`,
+        }),
+        animationDurationUpdate: isResizing ? 0 : 650,
+        series: [{
+            type: 'pie',
+            radius: donut ? ['50%', '75%'] : '75%',
+            data: seriesData,
+            label: standalone
+                ? { show: showLabels, position: 'inside', formatter: '{d}%', fontSize: labelFontSize, color: '#fff' }
+                : { show: showLabels, position: 'outside', formatter: '{b}: {d}%', fontSize: labelFontSize, color: labelFontColor },
+            labelLine: { show: !standalone && showLabels },
+        }],
     }
 }
 
@@ -259,80 +279,153 @@ function getRawValues(fullData, path) {
     return values
 }
 
-function prepareHierarchicalData(data, config, highlightedValue) {
+// Build a complete ECharts option for a sunburst/treemap chart. Both source
+// fields are flat (no real hierarchy), so a single-level `series.data` array
+// renders the same "ring of slices" / "grid of tiles" Plotly produced with
+// `parents: ''` for every entry.
+function prepareHierarchicalOption(data, config, highlightedValue, { darkMode = true } = {}) {
     const entries = Object.entries(data)
         .filter(([key]) => !isEmptyKey(key))
         .sort((a, b) => b[1] - a[1])
         .slice(0, 20)
 
-    return {
-        type: config.type,
-        labels: entries.map(d => d[0]),
-        parents: entries.map(() => ''),
-        values: entries.map(d => d[1]),
-        textinfo: 'label+value',
-        branchvalues: 'total',
-        marker: {
-            colors: entries.map((d, idx) =>
-                d[0] === highlightedValue ? COLOR_PALETTES.highlight : COLOR_PALETTES.pie[idx % COLOR_PALETTES.pie.length]
-            )
+    const seriesData = entries.map((d, idx) => ({
+        name: d[0],
+        value: d[1],
+        itemStyle: {
+            color: d[0] === highlightedValue ? COLOR_PALETTES.highlight : COLOR_PALETTES.pie[idx % COLOR_PALETTES.pie.length],
         },
-        hovertemplate: '<b>%{label}</b><br>Count: %{value}<extra></extra>'
-    }
-}
+    }))
 
-function prepareHistogramData(data, config) {
-    return {
-        type: 'histogram',
-        x: data,
-        marker: {
-            color: COLOR_PALETTES.bar[0],
-            line: {
-                color: 'rgba(255,255,255,0.2)',
-                width: 1
-            }
-        },
-        opacity: 0.8,
-        hovertemplate: 'Range: %{x}<br>Count: %{y}<extra></extra>'
+    const option = {
+        ...baseOption({
+            darkMode,
+            tooltipFormatter: (params) => `<b>${params.name}</b><br/>Count: ${params.value}`,
+        }),
     }
-}
 
-function prepareStatisticalData(data, config) {
-    return {
-        type: config.type,
-        y: data,
-        boxpoints: 'all',
-        jitter: 0.3,
-        pointpos: -1.8,
-        marker: { color: COLOR_PALETTES.pie[1], size: 2 },
-        line: { color: COLOR_PALETTES.pie[1] },
-        fillcolor: COLOR_PALETTES.pie[1] + '33',
-        hovertemplate: 'Value: %{y}<extra></extra>'
-    }
-}
-
-// Returns zero-valued version of chart data for the fill-up animation start frame
-function buildZeroData(chartData, config) {
-    if (!chartData) return chartData
-    if (config.type === 'bar') {
-        const valueKey = config.orientation === 'h' ? 'x' : 'y'
+    if (config.type === 'sunburst') {
         return {
-            ...chartData,
-            [valueKey]: Array.isArray(chartData[valueKey]) ? chartData[valueKey].map(() => 0) : 0,
-            text: chartData.text?.map?.(() => ''),
+            ...option,
+            series: [{
+                type: 'sunburst',
+                radius: ['0%', '85%'],
+                data: seriesData,
+                label: { color: darkMode ? '#e4e4e7' : '#18181b' },
+            }],
         }
     }
-    if (config.type === 'pie') {
-        return {
-            ...chartData,
-            values: chartData.values?.map(() => 1) ?? [],
-            pull: chartData.pull?.map(() => 0) ?? [],
-        }
+
+    return {
+        ...option,
+        series: [{
+            type: 'treemap',
+            data: seriesData,
+            roam: false,
+            breadcrumb: { show: false },
+            upperLabel: { show: false },
+            label: { color: '#fff' },
+            itemStyle: { borderColor: darkMode ? '#18181b' : '#ffffff', borderWidth: 2, gapWidth: 2 },
+        }],
     }
-    if (config.type === 'sunburst' || config.type === 'treemap') {
-        return { ...chartData, values: chartData.values?.map(() => 0) ?? [] }
+}
+
+// Bin a flat array of numeric values into `numBins` equal-width buckets,
+// mirroring Plotly's automatic histogram binning.
+function binValues(values, numBins = 10) {
+    const finite = (values || []).filter(v => typeof v === 'number' && isFinite(v))
+    if (finite.length === 0) return { labels: [], counts: [] }
+
+    const min = Math.min(...finite)
+    const max = Math.max(...finite)
+    if (min === max) return { labels: [min.toFixed(1)], counts: [finite.length] }
+
+    const binSize = (max - min) / numBins
+    const counts = new Array(numBins).fill(0)
+    finite.forEach(v => {
+        let idx = Math.floor((v - min) / binSize)
+        if (idx >= numBins) idx = numBins - 1
+        counts[idx]++
+    })
+
+    const labels = counts.map((_, i) => {
+        const start = min + i * binSize
+        const end = min + (i + 1) * binSize
+        return `${start.toFixed(1)}–${end.toFixed(1)}`
+    })
+
+    return { labels, counts }
+}
+
+// Build a complete ECharts option for a histogram (pre-binned bar chart) —
+// ECharts has no native histogram series.
+function prepareHistogramOption(values, config, { darkMode = true, standalone = false, isResizing = false } = {}) {
+    const { labels, counts } = binValues(values)
+
+    return {
+        ...baseOption({
+            darkMode,
+            tooltipFormatter: (params) => {
+                const p = Array.isArray(params) ? params[0] : params
+                return `Range: ${p.name}<br/>Count: ${p.value}`
+            },
+        }),
+        animationDurationUpdate: isResizing ? 0 : 650,
+        grid: standalone
+            ? { left: 50, right: 8, top: 8, bottom: 50, containLabel: true }
+            : { left: 40, right: 20, top: 30, bottom: 70, containLabel: true },
+        xAxis: categoryAxisStyle({ data: labels, darkMode, axisLabel: { rotate: -45, fontSize: 10 } }),
+        yAxis: valueAxisStyle({ darkMode }),
+        series: [{
+            type: 'bar',
+            data: counts,
+            barWidth: '99%',
+            itemStyle: {
+                color: COLOR_PALETTES.bar[0],
+                borderColor: 'rgba(255,255,255,0.2)',
+                borderWidth: 1,
+            },
+        }],
     }
-    return chartData
+}
+
+// Compute [min, Q1, median, Q3, max] for ECharts' boxplot series format.
+function computeBoxStats(values) {
+    const sorted = (values || []).filter(v => typeof v === 'number' && isFinite(v)).sort((a, b) => a - b)
+    if (sorted.length === 0) return [0, 0, 0, 0, 0]
+
+    const quantile = (q) => {
+        const pos = (sorted.length - 1) * q
+        const base = Math.floor(pos)
+        const rest = pos - base
+        return sorted[base + 1] !== undefined
+            ? sorted[base] + rest * (sorted[base + 1] - sorted[base])
+            : sorted[base]
+    }
+
+    return [sorted[0], quantile(0.25), quantile(0.5), quantile(0.75), sorted[sorted.length - 1]]
+}
+
+// Build a complete ECharts option for a box plot. Violin charts render as a
+// box plot too — ECharts has no native violin series (documented UI change).
+function prepareStatisticalOption(values, config, { darkMode = true, standalone = false, isResizing = false } = {}) {
+    const stats = computeBoxStats(values)
+    const color = COLOR_PALETTES.pie[1]
+
+    return {
+        ...baseOption({ darkMode }),
+        animationDurationUpdate: isResizing ? 0 : 650,
+        grid: standalone
+            ? { left: 50, right: 8, top: 8, bottom: 28, containLabel: true }
+            : { left: 50, right: 20, top: 30, bottom: 30, containLabel: true },
+        xAxis: categoryAxisStyle({ data: [config.title || 'Value'], darkMode }),
+        yAxis: valueAxisStyle({ darkMode }),
+        series: [{
+            type: 'boxplot',
+            data: [stats],
+            itemStyle: { color: hexToRgba(color, 0.2), borderColor: color },
+        }],
+    }
 }
 
 // Dynamic Chart Component with Remove Button
@@ -369,95 +462,35 @@ export function DynamicChart({
         : null
     const effectiveHighlightedValue = highlightedValue || viewerDerivedValue
 
-    // Fill-up animation: revision drives Plotly.react(); filled controls zero→real data swap.
-    const [filled, setFilled] = useState(false)
-    const [rev, setRev] = useState(0)
-
-    useEffect(() => {
-        setFilled(false)
-        setRev(r => r + 1)
-        // Double-RAF guarantees the browser painted the zero state before animating
-        let raf1, raf2
-        raf1 = requestAnimationFrame(() => {
-            raf2 = requestAnimationFrame(() => {
-                setFilled(true)
-                setRev(r => r + 1)
-            })
-        })
-        return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2) }
-    }, [fieldKey])
-
-    // Bump revision when highlight changes so Plotly transitions the colour swap
-    useEffect(() => {
-        if (filled) setRev(r => r + 1)
-    }, [effectiveHighlightedValue])
-
-
-    let chartData
-    let layoutHeight = height || 250 // Use passed height or default
-    const [isResizing, setIsResizing] = useState(false)
-
-    switch (effectiveConfig.type) {
-        case 'pie':
-            chartData = preparePieData(data, effectiveConfig, effectiveHighlightedValue)
-            layoutHeight = 300
-            break
-        case 'sunburst':
-        case 'treemap':
-            chartData = prepareHierarchicalData(data, effectiveConfig, effectiveHighlightedValue)
-            layoutHeight = 300
-            break
-        case 'histogram':
-            chartData = prepareHistogramData(data, effectiveConfig)
-            break
-        case 'box':
-        case 'violin':
-            chartData = prepareStatisticalData(data, effectiveConfig)
-            break
-        case 'bar':
-        default:
-            chartData = prepareBarData(data, effectiveConfig, effectiveHighlightedValue)
-            break
-    }
-
     const isPieLike    = ['pie', 'sunburst', 'treemap'].includes(effectiveConfig.type)
     const isStatistical= ['box', 'violin', 'histogram'].includes(effectiveConfig.type)
     const isVerticalBar= effectiveConfig.type === 'bar' && effectiveConfig.orientation === 'v'
 
-    // Typography settings from chart properties panel
-    const tickFontSize   = effectiveConfig.tickFontSize   || 11
-    const tickFontColor  = effectiveConfig.tickFontColor  || (darkMode ? '#e4e4e7' : '#18181b')
-    const tickAngle      = effectiveConfig.tickAngle      ?? (isVerticalBar ? -45 : 0)
-    const valueFontSize  = effectiveConfig.valueFontSize  || 11
-    const valueFontColor = effectiveConfig.valueFontColor || (darkMode ? '#e4e4e7' : '#18181b')
-    const labelFontSize  = effectiveConfig.labelFontSize  || 11
-    const labelFontColor = effectiveConfig.labelFontColor || (darkMode ? '#e4e4e7' : '#18181b')
+    const layoutHeight = height || (isPieLike ? 300 : 250)
+    const [isResizing, setIsResizing] = useState(false)
 
-    const tickFont = { color: tickFontColor, size: tickFontSize }
+    const optionContext = { darkMode, standalone, isResizing }
 
-    const layout = {
-        ...getPlotlyLayout(layoutHeight, darkMode),
-        margin: isVerticalBar
-            ? { l: 40, r: 20, t: 30, b: tickAngle === 0 ? 40 : tickAngle <= -45 ? 80 : 60 }
-            : { l: 60, r: 20, t: 30, b: 40 },
-        showlegend: false,
-        xaxis: isPieLike ? {} : {
-            ...getPlotlyLayout(300, darkMode).xaxis,
-            title: '',
-            tickangle: isVerticalBar ? tickAngle : 0,
-            automargin: isVerticalBar,
-            tickfont: tickFont,
-        },
-        yaxis: isPieLike ? {} : {
-            ...getPlotlyLayout(300, darkMode).yaxis,
-            title: '',
-            automargin: true,
-            tickfont: tickFont,
-        },
-        // Pie slice label font
-        ...(isPieLike ? { legend: { font: { size: labelFontSize } } } : {}),
-        uniformtext: isPieLike ? { mode: 'hide', minsize: labelFontSize } : undefined,
-        transition: isResizing ? { duration: 0 } : getPlotlyLayout(300, darkMode).transition
+    let option
+    switch (effectiveConfig.type) {
+        case 'pie':
+            option = preparePieOption(data, effectiveConfig, effectiveHighlightedValue, optionContext)
+            break
+        case 'sunburst':
+        case 'treemap':
+            option = prepareHierarchicalOption(data, effectiveConfig, effectiveHighlightedValue, optionContext)
+            break
+        case 'histogram':
+            option = prepareHistogramOption(data, effectiveConfig, optionContext)
+            break
+        case 'box':
+        case 'violin':
+            option = prepareStatisticalOption(data, effectiveConfig, optionContext)
+            break
+        case 'bar':
+        default:
+            option = prepareBarOption(data, effectiveConfig, effectiveHighlightedValue, optionContext)
+            break
     }
 
     // Cleanup ref for any active resize drag — called on unmount to prevent
@@ -505,39 +538,16 @@ export function DynamicChart({
         resizeCleanupRef.current = cleanup
     }
 
-    const handleClick = (plotData) => {
+    const handleClick = (params) => {
         if (!effectiveConfig.clickable || !fullDataReady || !onValueClick || isStatistical) return
-
-        const point = plotData.points[0]
-        const value = isPieLike
-            ? point.label
-            : effectiveConfig.orientation === 'h' ? point.y : point.x
-
-        onValueClick(effectiveConfig.field, value)
+        onValueClick(effectiveConfig.field, params.name)
     }
+
+    const onEvents = { click: handleClick }
+    const cursor = (effectiveConfig.clickable && fullDataReady && !isStatistical) ? 'pointer' : 'default'
 
     // ── Standalone panel mode (individual grid panel) ──────────────────
     if (standalone) {
-        // Strip the fixed `height` value so autosize:true actually fills the container.
-        // Keeping an explicit height overrides autosize and pins the chart at 250px.
-        const { height: _fixedH, ...layoutWithoutHeight } = layout
-        const standaloneLayout = {
-            ...layoutWithoutHeight,
-            autosize: true,
-            height: undefined,
-            margin: isPieLike
-                ? { l: 10, r: 10, t: 10, b: 10 }
-                : isVerticalBar
-                    ? { l: 40, r: 8, t: 8, b: 70 }   // vertical: less left, more bottom for rotated labels
-                    : { l: 50, r: 8, t: 8, b: 28 },   // horizontal: more left for category labels
-        }
-
-        // Pie charts: use inside text to avoid auto-margin thrashing
-        const standaloneChartData = (filled ? chartData : buildZeroData(chartData, effectiveConfig))
-        const standaloneTrace = isPieLike
-            ? { ...standaloneChartData, textposition: 'inside', textinfo: 'percent', automargin: false }
-            : standaloneChartData
-
         return (
             <div className="h-full flex flex-col relative">
                 {/* drag-zone title row — pr reserves space for DashboardGrid's close button */}
@@ -565,22 +575,9 @@ export function DynamicChart({
                         </button>
                     )}
                 </div>
-                {/* Chart fills remaining container height.
-                    No revision prop here — react-plotly.js must re-render on every
-                    data/layout prop change so that switching chart type is instant. */}
-                <div className="flex-1 min-h-0">
-                    <Plot
-                        data={[standaloneTrace]}
-                        layout={standaloneLayout}
-                        config={{ displayModeBar: false, responsive: true }}
-                        useResizeHandler
-                        onClick={handleClick}
-                        style={{
-                            width: '100%',
-                            height: '100%',
-                            cursor: (effectiveConfig.clickable && fullDataReady && !isStatistical) ? 'pointer' : 'default'
-                        }}
-                    />
+                {/* Chart fills remaining container height. */}
+                <div className="flex-1 min-h-0" style={{ cursor }}>
+                    <EChart option={option} onEvents={onEvents} />
                 </div>
             </div>
         )
@@ -647,16 +644,9 @@ export function DynamicChart({
                     )}
                 </div>
             </div>
-            <Plot
-                data={[filled ? chartData : buildZeroData(chartData, effectiveConfig)]}
-                layout={layout}
-                config={{ displayModeBar: false, responsive: true }}
-                useResizeHandler={true}
-                className="w-full"
-                onClick={handleClick}
-                style={{ width: '100%', height: '100%', cursor: (effectiveConfig.clickable && fullDataReady && !isStatistical) ? 'pointer' : 'default' }}
-                revision={rev}
-            />
+            <div style={{ width: '100%', height: layoutHeight, cursor }}>
+                <EChart option={option} onEvents={onEvents} />
+            </div>
 
             {/* Resize Handle */}
             <div
