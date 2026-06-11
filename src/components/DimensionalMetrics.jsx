@@ -2,7 +2,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useMemo, useState, useEffect } from 'react'
 import { Ruler, ArrowUpDown, TrendingUp, Hash, ChevronDown, BarChart3 } from 'lucide-react'
 import { discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
-import Plot from './Plot'
+import EChart from './EChart'
+import { baseOption, categoryAxisStyle, valueAxisStyle } from '../lib/echartsTheme'
 import { MetricsConfig } from './MetricsConfig'
 
 // Format large numbers nicely
@@ -142,30 +143,24 @@ function DimensionChart({ property, fullData }) {
                 <BarChart3 className="w-3.5 h-3.5 text-cyan-500" />
                 {property.name} by Category
             </h4>
-            <Plot
-                data={[{
-                    type: 'bar',
-                    x: chartData.values,
-                    y: chartData.labels,
-                    orientation: 'h',
-                    marker: {
-                        color: '#0ea5e9',
-                        line: { width: 0 }
-                    },
-                    hovertemplate: '<b>%{y}</b><br>Total: %{x:.2f}<extra></extra>'
-                }]}
-                layout={{
-                    paper_bgcolor: 'rgba(0,0,0,0)',
-                    plot_bgcolor: 'rgba(0,0,0,0)',
-                    font: { color: '#a1a1aa', size: 10, family: 'system-ui' },
-                    margin: { l: 80, r: 10, t: 5, b: 25 },
-                    height: 180,
-                    xaxis: { gridcolor: '#27272a', zerolinecolor: '#3f3f46' },
-                    yaxis: { gridcolor: '#27272a', zerolinecolor: '#3f3f46' },
-                    hoverlabel: { bgcolor: '#18181b', bordercolor: '#3f3f46', font: { color: '#fafafa' } }
+            <EChart
+                option={{
+                    ...baseOption({
+                        fontSize: 10,
+                        tooltipFormatter: (params) => `<b>${params.name}</b><br/>Total: ${params.value.toFixed(2)}`,
+                    }),
+                    textStyle: { color: '#a1a1aa', fontSize: 10, fontFamily: 'system-ui' },
+                    grid: { left: 80, right: 10, top: 5, bottom: 25 },
+                    xAxis: valueAxisStyle(),
+                    yAxis: categoryAxisStyle({ data: chartData.labels }),
+                    series: [{
+                        type: 'bar',
+                        data: chartData.values,
+                        itemStyle: { color: '#0ea5e9' },
+                    }],
                 }}
-                config={{ displayModeBar: false, responsive: true }}
                 className="w-full"
+                style={{ width: '100%', height: 180 }}
             />
         </motion.div>
     )

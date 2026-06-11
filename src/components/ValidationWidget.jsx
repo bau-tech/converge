@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X } from 'lucide-react'
-import Plot from './Plot'
+import EChart from './EChart'
+import { baseOption } from '../lib/echartsTheme'
 import { discoverProperties, discoverNumericProperties } from '../utils/propertyScanner'
 
 const DEFAULT_RULES = [{ id: 1, property: 'category', operator: 'is_defined', value: '' }]
@@ -280,30 +281,24 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                 </div>
                             ) : (
                                 <>
-                                    <Plot
-                                        data={[{
-                                            values: [results.passed, results.failed],
-                                            labels: ['Passed', 'Failed'],
-                                            type: 'pie',
-                                            hole: 0.6,
-                                            marker: { colors: ['#22c55e', '#ef4444'] },
-                                            textinfo: 'percent',
-                                            textposition: 'inside',
-                                            hoverinfo: 'label+value',
-                                            showlegend: false,
-                                            automargin: false,
-                                        }]}
-                                        layout={{
-                                            showlegend: false,
-                                            margin: { t: 0, b: 0, l: 0, r: 0 },
-                                            paper_bgcolor: 'rgba(0,0,0,0)',
-                                            plot_bgcolor: 'rgba(0,0,0,0)',
-                                            font: { family: 'system-ui', color: '#a1a1aa' },
-                                            autosize: true,
+                                    <EChart
+                                        option={{
+                                            ...baseOption({
+                                                tooltipFormatter: (params) => `${params.name}: ${params.value}`,
+                                            }),
+                                            textStyle: { fontFamily: 'system-ui', color: '#a1a1aa' },
+                                            series: [{
+                                                type: 'pie',
+                                                radius: ['60%', '80%'],
+                                                data: [
+                                                    { name: 'Passed', value: results.passed, itemStyle: { color: '#22c55e' } },
+                                                    { name: 'Failed', value: results.failed, itemStyle: { color: '#ef4444' } },
+                                                ],
+                                                label: { show: true, position: 'inside', formatter: '{d}%', color: '#fff' },
+                                                labelLine: { show: false },
+                                            }],
                                         }}
-                                        useResizeHandler
                                         style={{ width: '100%', height: '100%' }}
-                                        config={{ displayModeBar: false, responsive: true }}
                                     />
                                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                                         <div className="text-center">

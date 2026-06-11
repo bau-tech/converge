@@ -1,21 +1,10 @@
 import { useState, useEffect } from 'react'
-import Plot from './Plot'
+import EChart from './EChart'
+import { baseOption, categoryAxisStyle, valueAxisStyle } from '../lib/echartsTheme'
 import { Loader2, AlertCircle } from 'lucide-react'
 
 const BAR_COLORS = ['#10B981', '#34D399', '#6EE7B7', '#A7F3D0', '#059669', '#047857', '#065F46']
 const COVERAGE_COLORS = { high: '#10B981', mid: '#F59E0B', low: '#EF4444' }
-
-const PLOTLY_BASE = {
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor:  'rgba(0,0,0,0)',
-    font: { color: '#e4e4e7', size: 11, family: 'Inter, system-ui, sans-serif' },
-    margin: { l: 10, r: 16, t: 10, b: 36 },
-    hoverlabel: { bgcolor: '#18181b', bordercolor: '#3f3f46', font: { color: '#fafafa', family: 'monospace' } },
-    autosize: true,
-    xaxis: { gridcolor: '#27272a', zerolinecolor: '#3f3f46', tickfont: { color: '#a1a1aa' } },
-    yaxis: { gridcolor: '#27272a', zerolinecolor: '#3f3f46', tickfont: { color: '#a1a1aa' }, automargin: true },
-}
-const PLOTLY_CONFIG = { responsive: true, displayModeBar: false }
 
 // Format a number for display: abbreviates large values, uses locale separators
 function fmt(n, decimals = 1) {
@@ -54,24 +43,24 @@ function BarChart({ rows, metric }) {
     const vals   = sorted.map(r => r[valueKey] ?? 0)
     const labels = sorted.map(r => r.group)
     const colors = sorted.map((_, i) => BAR_COLORS[i % BAR_COLORS.length])
+    const hovers = vals.map(v => fmtHover(v, unit))
 
     return (
-        <Plot
-            data={[{
-                type: 'bar',
-                orientation: 'h',
-                x: vals,
-                y: labels,
-                marker: { color: colors },
-                text: vals.map(v => fmt(v)),
-                textposition: 'auto',
-                hovertemplate: `<b>%{y}</b><br>${label}: %{customdata}<extra></extra>`,
-                customdata: vals.map(v => fmtHover(v, unit)),
-            }]}
-            layout={{ ...PLOTLY_BASE }}
-            config={PLOTLY_CONFIG}
+        <EChart
+            option={{
+                ...baseOption({
+                    tooltipFormatter: (params) => `<b>${params.name}</b><br/>${label}: ${hovers[params.dataIndex]}`,
+                }),
+                grid: { left: 10, right: 16, top: 10, bottom: 36, containLabel: true },
+                xAxis: valueAxisStyle(),
+                yAxis: categoryAxisStyle({ data: labels }),
+                series: [{
+                    type: 'bar',
+                    data: vals.map((v, i) => ({ value: v, itemStyle: { color: colors[i] } })),
+                    label: { show: true, position: 'right', color: '#e4e4e7', formatter: (params) => fmt(params.value) },
+                }],
+            }}
             style={{ width: '100%', height: 340 }}
-            useResizeHandler
         />
     )
 }
@@ -95,27 +84,25 @@ function CoverageChart({ rows }) {
     const colors = sorted.map(r =>
         r.pct >= 80 ? COVERAGE_COLORS.high : r.pct >= 40 ? COVERAGE_COLORS.mid : COVERAGE_COLORS.low
     )
+    const labels = sorted.map(r => r.group)
+    const hovers = sorted.map(r => `${r.elements_with_geometry} / ${r.element_count} elements`)
 
     return (
-        <Plot
-            data={[{
-                type: 'bar',
-                orientation: 'h',
-                x: sorted.map(r => r.pct),
-                y: sorted.map(r => r.group),
-                marker: { color: colors },
-                text: sorted.map(r => `${r.pct}%`),
-                textposition: 'auto',
-                hovertemplate: '<b>%{y}</b><br>Coverage: %{x}%<br>%{customdata}<extra></extra>',
-                customdata: sorted.map(r => `${r.elements_with_geometry} / ${r.element_count} elements`),
-            }]}
-            layout={{
-                ...PLOTLY_BASE,
-                xaxis: { ...PLOTLY_BASE.xaxis, range: [0, 100], ticksuffix: '%' },
+        <EChart
+            option={{
+                ...baseOption({
+                    tooltipFormatter: (params) => `<b>${params.name}</b><br/>Coverage: ${params.value}%<br/>${hovers[params.dataIndex]}`,
+                }),
+                grid: { left: 10, right: 16, top: 10, bottom: 36, containLabel: true },
+                xAxis: valueAxisStyle({ max: 100, axisLabel: { formatter: '{value}%' } }),
+                yAxis: categoryAxisStyle({ data: labels }),
+                series: [{
+                    type: 'bar',
+                    data: sorted.map((r, i) => ({ value: r.pct, itemStyle: { color: colors[i] } })),
+                    label: { show: true, position: 'right', color: '#e4e4e7', formatter: '{c}%' },
+                }],
             }}
-            config={PLOTLY_CONFIG}
             style={{ width: '100%', height: 340 }}
-            useResizeHandler
         />
     )
 }
