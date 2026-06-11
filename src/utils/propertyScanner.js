@@ -368,67 +368,6 @@ export function aggregateNumericProperty(fullData, propertyPath, groupByPath = n
     }
 }
 
-// Create histogram bins for a numeric property (for "Elements by Length" charts)
-export function createHistogramBins(fullData, propertyPath, numBins = 8) {
-    if (!fullData?.elements || !Array.isArray(fullData.elements)) {
-        return {}
-    }
-
-    // Collect all values
-    const values = []
-    for (const element of fullData.elements) {
-        const value = getNestedValue(element, propertyPath)
-        if (typeof value === 'number' && isFinite(value) && value > 0) {
-            values.push(value)
-        }
-    }
-
-    if (values.length === 0) return {}
-
-    // Calculate range
-    const min = Math.min(...values)
-    const max = Math.max(...values)
-
-    if (min === max) {
-        // All values are the same
-        return { [`${min.toFixed(1)}`]: values.length }
-    }
-
-    // Create bins
-    const binSize = (max - min) / numBins
-    const bins = {}
-
-    // Initialize bin labels
-    for (let i = 0; i < numBins; i++) {
-        const binStart = min + (i * binSize)
-        const binEnd = min + ((i + 1) * binSize)
-        const label = `${binStart.toFixed(1)}-${binEnd.toFixed(1)}`
-        bins[label] = 0
-    }
-
-    // Count values in each bin
-    for (const value of values) {
-        let binIndex = Math.floor((value - min) / binSize)
-        // Handle edge case where value === max
-        if (binIndex >= numBins) binIndex = numBins - 1
-
-        const binStart = min + (binIndex * binSize)
-        const binEnd = min + ((binIndex + 1) * binSize)
-        const label = `${binStart.toFixed(1)}-${binEnd.toFixed(1)}`
-        bins[label] = (bins[label] || 0) + 1
-    }
-
-    // Remove empty bins
-    const result = {}
-    for (const [label, count] of Object.entries(bins)) {
-        if (count > 0) {
-            result[label] = count
-        }
-    }
-
-    return result
-}
-
 // Generate a summary object from a list of elements
 export function generateSummaryFromElements(elements) {
     if (!elements || !Array.isArray(elements) || elements.length === 0) return null

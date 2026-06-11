@@ -364,8 +364,6 @@ function App() {
         })
     }, [data?.summary])
 
-    // Delay chart panel mount so SpeckleViewer (Three.js) can claim its WebGL
-    // context before Plotly probes/claims slots during chart initialisation.
     const handleToggleChartPanel = useCallback((chartKey) => {
         setVisibleChartPanels(prev => {
             const next = prev.includes(chartKey)
@@ -1443,23 +1441,6 @@ function App() {
         setViewerFilteredIds(null)
         setTableOwnFilterIds(null)
     }
-
-    const plotlyLayout = {
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: '#a1a1aa', size: 12, family: 'system-ui' },
-        margin: { l: 120, r: 20, t: 20, b: 40 },
-        hoverlabel: { bgcolor: '#18181b', bordercolor: '#3f3f46', font: { color: '#fafafa' } },
-        xaxis: {
-            gridcolor: '#27272a',
-            zerolinecolor: '#3f3f46'
-        },
-        yaxis: {
-            gridcolor: '#27272a',
-            zerolinecolor: '#3f3f46'
-        }
-    }
-
 
     // ── Viewer panel — memoized independently so chart/filter state changes
     //    don't trigger SpeckleViewer re-initialization via WebGL
