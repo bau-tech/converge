@@ -318,10 +318,12 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
             bmax = [float(bbox.get("x", {}).get("max", 0)),
                     float(bbox.get("y", {}).get("max", 0)),
                     float(bbox.get("z", {}).get("max", 0))]
+            centroid = _centroid(bmin, bmax)
             return {
                 "bbox_min": bmin,
                 "bbox_max": bmax,
-                "centroid": _centroid(bmin, bmax),
+                "centroid": centroid,
+                "centroid_si": [length_to_m(c, units) for c in centroid],
                 "volume_m3": _bbox_volume_m3(bmin, bmax, units),
                 "area_m2": None,
                 "mesh": None,
@@ -355,6 +357,7 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
             "bbox_min": bbox_min,
             "bbox_max": bbox_max,
             "centroid": centroid,
+            "centroid_si": [length_to_m(c, units) for c in centroid],
             "volume_m3": volume_m3,
             "area_m2": area_m2,
             "mesh": mesh_json,

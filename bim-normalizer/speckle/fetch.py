@@ -125,14 +125,212 @@ def fetch_commit(stream_id: str, commit_id: str, token: str = None,
 
     client = get_client(server_url=srv, token=tok)
     transport = ServerTransport(client=client, stream_id=stream_id)
-    root = operations.receive(
-        obj_id=obj_id,
-        remote_transport=transport,
-        local_transport=_make_sqlite_transport(),
-    )
+    try:
+        root = operations.receive(
+            obj_id=obj_id,
+            remote_transport=transport,
+            local_transport=_make_sqlite_transport(),
+        )
+    except Exception as exc:
+        # A stale/partial local SQLite cache entry (e.g. from a previously
+        # interrupted fetch) can corrupt specklepy's closure-table decoding
+        # for objects shared across commits, surfacing as opaque errors like
+        # "not enough values to unpack". Retry once against the server only —
+        # slower, but immune to local cache corruption.
+        logger.warning(
+            "operations.receive failed with local cache for commit %s (%s) — retrying without cache",
+            commit_id, exc,
+        )
+        root = operations.receive(
+            obj_id=obj_id,
+            remote_transport=transport,
+            local_transport=None,
+        )
     logger.info("Received commit %s from stream %s (%d bytes referenced)",
                 commit_id, stream_id, len(obj_id))
     return root, meta
+
+
+def find_original_ifc_blob(
+    stream_id: str,
+    token: str | None = None,
+    server_url: str | None = None,
+) -> dict | None:
+    """
+    Query the Speckle server for IFC file blobs attached to a stream and return
+    metadata for the largest successfully-uploaded .ifc blob, or None if no such
+    blob exists. Use iter_original_ifc_blob() to stream its bytes.
+    """
+    tok = token or settings.SPECKLE_TOKEN
+    srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
+    if not tok:
+        return None
+
+    resp = requests.post(
+        f"{srv}/graphql",
+        json={
+            "query": """
+                query($id: String!) {
+                    stream(id: $id) {
+                        blobs(limit: 25) {
+                            items { id fileName fileSize uploadStatus }
+                        }
+                    }
+                }
+            """,
+            "variables": {"id": stream_id},
+        },
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if "errors" in body:
+        raise ValueError(f"GraphQL error: {body['errors'][0]['message']}")
+
+    items = ((body.get("data") or {}).get("stream") or {}).get("blobs", {}).get("items") or []
+    blobs = sorted(
+        (b for b in items if b.get("uploadStatus") == 1 and b.get("fileName", "").lower().endswith(".ifc")),
+        key=lambda b: b.get("fileSize", 0),
+        reverse=True,  # largest file first — most likely the complete original IFC
+    )
+    if not blobs:
+        return None
+
+    blob = blobs[0]
+    return {
+        "server_url": srv,
+        "token": tok,
+        "blob_id": blob["id"],
+        "filename": blob["fileName"],
+        "file_size": blob.get("fileSize"),
+    }
+
+
+def find_original_ifc_blob_for_commit(
+    stream_id: str,
+    commit_id: str,
+    token: str | None = None,
+    server_url: str | None = None,
+) -> dict | None:
+    """
+    Return metadata for the IFC file upload that was actually converted into
+    this exact commit, via the server's file-upload history (Stream.fileUploads
+    → convertedCommitId) — precise per-commit, unlike find_original_ifc_blob()
+    which just guesses the largest .ifc blob anywhere on the stream.
+
+    Falls back to find_original_ifc_blob() when:
+      - the server's schema doesn't expose fileUploads (older/newer Speckle
+        server versions vary here), or
+      - no upload converted into this commit (e.g. the commit came from a
+        connector push rather than a web-UI "upload file" import).
+    """
+    tok = token or settings.SPECKLE_TOKEN
+    srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
+    if not tok:
+        return None
+
+    try:
+        resp = requests.post(
+            f"{srv}/graphql",
+            json={
+                "query": """
+                    query($id: String!) {
+                        stream(id: $id) {
+                            fileUploads {
+                                id
+                                fileName
+                                fileSize
+                                uploadComplete
+                                convertedCommitId
+                            }
+                        }
+                    }
+                """,
+                "variables": {"id": stream_id},
+            },
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if "errors" in body:
+            raise ValueError(f"GraphQL error: {body['errors'][0]['message']}")
+
+        uploads = ((body.get("data") or {}).get("stream") or {}).get("fileUploads") or []
+        match = next(
+            (
+                u for u in uploads
+                if u.get("convertedCommitId") == commit_id
+                and u.get("uploadComplete")
+                and (u.get("fileName") or "").lower().endswith(".ifc")
+            ),
+            None,
+        )
+        if match:
+            return {
+                "server_url": srv,
+                "token": tok,
+                "blob_id": match["id"],
+                "filename": match["fileName"],
+                "file_size": match.get("fileSize"),
+            }
+        logger.info(
+            "No file-upload matched commit %s on stream %s — falling back to stream-wide IFC blob search",
+            commit_id, stream_id,
+        )
+    except Exception as exc:
+        logger.info(
+            "fileUploads lookup unavailable for stream %s (%s) — falling back to stream-wide IFC blob search",
+            stream_id, exc,
+        )
+
+    return find_original_ifc_blob(stream_id, tok, srv)
+
+
+def iter_original_ifc_blob(stream_id: str, blob: dict, chunk_size: int = 1024 * 1024):
+    """
+    Stream the bytes of a blob located via find_original_ifc_blob(), without
+    buffering the whole file in memory. timeout=(connect, read) applies per
+    socket read, not to the whole transfer, so it stays valid for large files.
+    """
+    with requests.get(
+        f"{blob['server_url']}/api/stream/{stream_id}/blob/{blob['blob_id']}",
+        headers={"Authorization": f"Bearer {blob['token']}"},
+        stream=True,
+        timeout=(10, 120),
+    ) as dl:
+        dl.raise_for_status()
+        for chunk in dl.iter_content(chunk_size=chunk_size):
+            if chunk:
+                yield chunk
+
+
+def fetch_original_ifc_bytes(
+    stream_id: str,
+    token: str | None = None,
+    server_url: str | None = None,
+    commit_id: str | None = None,
+) -> bytes | None:
+    """
+    Return the full bytes of the original IFC file blob attached to a stream,
+    or None if no such blob exists. Convenience wrapper around
+    find_original_ifc_blob()/iter_original_ifc_blob() for callers that need
+    the whole file in memory (e.g. running an IDS check against the real
+    exporter output) rather than streaming it straight to an HTTP response.
+
+    Pass commit_id to scope the lookup to the exact upload that produced that
+    commit (find_original_ifc_blob_for_commit) instead of just grabbing the
+    largest .ifc blob anywhere on the stream.
+    """
+    blob = (
+        find_original_ifc_blob_for_commit(stream_id, commit_id, token, server_url)
+        if commit_id
+        else find_original_ifc_blob(stream_id, token, server_url)
+    )
+    if blob is None:
+        return None
+    return b"".join(iter_original_ifc_blob(stream_id, blob))
 
 
 def flatten_elements(

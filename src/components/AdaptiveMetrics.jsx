@@ -3,22 +3,6 @@ import { motion } from 'framer-motion'
 import { Tag } from 'lucide-react'
 import { MetricsConfig } from './MetricsConfig'
 
-// ─── Color mapping ────────────────────────────────────────────────────────────
-const METRIC_COLORS = {
-    total_elements:     { bg: 'bg-green-500/20',   text: 'text-green-400' },
-    detected_source:    { bg: 'bg-blue-500/20',    text: 'text-blue-400' },
-    total_weight:       { bg: 'bg-orange-500/20',  text: 'text-orange-400' },
-    total_volume:       { bg: 'bg-violet-500/20',  text: 'text-violet-400' },
-    total_area:         { bg: 'bg-sky-500/20',     text: 'text-sky-400' },
-    total_length:       { bg: 'bg-teal-500/20',    text: 'text-teal-400' },
-    unique_categories:  { bg: 'bg-cyan-500/20',    text: 'text-cyan-400' },
-    unique_levels:      { bg: 'bg-pink-500/20',    text: 'text-pink-400' },
-    unique_disciplines: { bg: 'bg-amber-500/20',   text: 'text-amber-400' },
-    unique_ifc_types:   { bg: 'bg-indigo-500/20',  text: 'text-indigo-400' },
-    geo_coverage:       { bg: 'bg-emerald-500/20', text: 'text-emerald-400' },
-    default:            { bg: 'bg-zinc-500/20',    text: 'text-zinc-400' },
-}
-
 // ─── Metadata: display names, units, decimal precision ───────────────────────
 const METRIC_META = {
     // Scalar totals
@@ -32,6 +16,9 @@ const METRIC_META = {
     unique_levels:      { displayName: 'Levels',        unit: null,  decimals: 0 },
     unique_disciplines: { displayName: 'Disciplines',   unit: null,  decimals: 0 },
     unique_ifc_types:   { displayName: 'IFC Types',     unit: null,  decimals: 0 },
+    // Material-scoped volume / weight
+    total_concrete_volume_m3: { displayName: 'Concrete Vol', unit: 'm³', decimals: 1 },
+    total_steel_weight_kg:    { displayName: 'Steel Weight',  unit: 'kg', decimals: 0 },
     // Source identifier
     detected_source:    { displayName: 'Source',        unit: null,  decimals: 0 },
     // Geometry coverage — stored as 0–1 decimal, displayed as percentage
@@ -51,6 +38,7 @@ const CHART_OBJECT_KEYS = new Set([
     'by_category', 'by_discipline', 'by_family', 'by_type', 'by_level',
     'by_material', 'by_phase', 'by_status', 'by_profile', 'by_class', 'by_assembly',
     'by_ifc_type', 'by_grade', 'by_section_class', 'by_workset', 'by_validation_issues',
+    'by_ifc_class_vol', 'by_storey_vol', 'by_category_area',
     'steel_summary', 'data_quality',
 ])
 
@@ -63,6 +51,7 @@ const EXCLUDE_ROOT_KEYS = new Set([
 const DISPLAY_PRIORITY = [
     'total_elements', 'detected_source',
     'total_weight', 'total_length', 'total_volume', 'total_area',
+    'total_concrete_volume_m3', 'total_steel_weight_kg',
     'geo_coverage',
     'unique_categories', 'unique_levels', 'unique_disciplines', 'unique_ifc_types',
 ]
@@ -137,8 +126,7 @@ export function discoverMetrics(data) {
 
 // ─── Single metric card ───────────────────────────────────────────────────────
 function MetricCard({ metricKey, value, index, metric, config = {} }) {
-    const colors = METRIC_COLORS[metricKey] || METRIC_COLORS.default
-    const meta   = METRIC_META[metricKey]
+    const meta = METRIC_META[metricKey]
 
     const metricConfig  = config[metricKey] || {}
     const displayName   = metricConfig.displayName || metric.displayKey || meta?.displayName || metricKey.replace(/_/g, ' ')
@@ -165,7 +153,7 @@ function MetricCard({ metricKey, value, index, metric, config = {} }) {
         >
             <p className="text-[var(--speckle-foreground-2)] text-[10px] truncate leading-none mb-0.5">{displayName}</p>
             <div className="flex items-baseline gap-1 min-w-0">
-                <p className={`font-bold ${colors.text} truncate ${isText ? 'text-xs' : 'text-sm'} leading-none`}>
+                <p className={`font-bold text-[var(--speckle-foreground)] truncate ${isText ? 'text-xs' : 'text-sm'} leading-none`}>
                     {formattedValue}
                 </p>
                 {unit && (
@@ -204,8 +192,7 @@ export function AdaptiveMetrics({ data, horizontal = false, strip = false }) {
         return (
             <div className="flex items-center gap-x-5 gap-y-0 flex-wrap">
                 {visibleMetrics.map((metric) => {
-                    const colors = METRIC_COLORS[metric.key] || METRIC_COLORS.default
-                    const meta   = METRIC_META[metric.key]
+                    const meta = METRIC_META[metric.key]
                     const metricConfig = metricsConfig[metric.key] || {}
                     const displayName  = metricConfig.displayName || meta?.displayName || metric.key.replace(/_/g, ' ')
                     const unit = meta?.unit || null
@@ -220,7 +207,7 @@ export function AdaptiveMetrics({ data, horizontal = false, strip = false }) {
                         <div key={metric.key} className="flex flex-col leading-none">
                             <span className="text-[9px] text-[var(--speckle-foreground-2)] uppercase tracking-wide whitespace-nowrap">{displayName}</span>
                             <div className="flex items-baseline gap-0.5 mt-0.5">
-                                <span className={`text-lg font-bold ${colors.text} leading-none`}>{formattedValue}</span>
+                                <span className="text-lg font-bold text-[var(--speckle-foreground)] leading-none">{formattedValue}</span>
                                 {unit && <span className="text-[10px] text-[var(--speckle-foreground-3)]">{unit}</span>}
                             </div>
                         </div>

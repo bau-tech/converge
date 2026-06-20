@@ -34,19 +34,19 @@ export function CompareVersionToggle({
         return (
             <div ref={ref} className="flex items-center gap-1">
                 <div
-                    className="glass-card p-2 bg-amber-500/10 border-amber-500/30 text-amber-400"
+                    className="glass-card icon-btn bg-amber-500/10 border-amber-500/30 text-amber-400"
                     title={comparingVersion
                         ? `Comparing vs ${new Date(comparingVersion.createdAt).toLocaleDateString()}`
                         : 'Comparing'}
                 >
-                    <GitCompare className="w-4 h-4" />
+                    <GitCompare className="w-6 h-6" />
                 </div>
                 <button
                     onClick={onExit}
-                    className="glass-card p-2 hover:bg-red-500/10 hover:text-red-400 text-zinc-500 transition-colors"
+                    className="glass-card icon-btn hover:bg-red-500/10 hover:text-red-400 text-zinc-500 transition-colors"
                     title="Exit compare mode"
                 >
-                    <X className="w-4 h-4" />
+                    <X className="w-6 h-6" />
                 </button>
             </div>
         )
@@ -59,13 +59,13 @@ export function CompareVersionToggle({
                 whileTap={{ scale: disabled ? 1 : 0.95 }}
                 onClick={() => !disabled && !compareLoading && setOpen(v => !v)}
                 disabled={disabled || compareLoading || versions.length < 2}
-                className={`glass-card p-2 hover:bg-white/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed
+                className={`glass-card icon-btn hover:bg-white/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed
                     ${open ? 'bg-white/10' : ''}`}
                 title="Compare versions"
             >
                 {compareLoading
-                    ? <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
-                    : <GitCompare className="w-4 h-4" />
+                    ? <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
+                    : <GitCompare className="w-6 h-6" />
                 }
             </motion.button>
 

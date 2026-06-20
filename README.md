@@ -10,7 +10,7 @@ A React dashboard for BIM analysis connected to a self-hosted [Speckle](https://
 ┌─────────────────────────────────────────────────────────┐
 │  Browser                                                │
 │  React + Vite   ──► @speckle/viewer (3D)               │
-│                 ──► Plotly.js (charts)                  │
+│                 ──► ECharts (charts)                    │
 └───────────────────────┬─────────────────────────────────┘
                         │ REST
           ┌─────────────▼──────────────┐
@@ -366,7 +366,8 @@ npm run lint      # ESLint
 | Component | Description |
 |-----------|-------------|
 | `SpeckleViewer` | 3D model viewer powered by `@speckle/viewer` |
-| `AdaptiveCharts` | Dynamic Plotly charts driven by normalizer summary data |
+| `AdaptiveCharts` | Dynamic ECharts charts driven by normalizer summary data |
+| `EChart` | Thin ECharts/core wrapper — one chart instance per container, resize-aware |
 | `AdaptiveMetrics` | KPI cards with configurable highlight thresholds |
 | `DimensionalMetrics` | Expandable property-dimension cards with inline bar charts |
 | `ElementTable` | Paginated, filterable element list synced with 3D viewer selection |
@@ -423,6 +424,7 @@ speckle-dashboard/
 │   ├── components/
 │   │   ├── SpeckleViewer.jsx
 │   │   ├── AdaptiveCharts.jsx
+│   │   ├── EChart.jsx                 ECharts/core wrapper component
 │   │   ├── AdaptiveMetrics.jsx
 │   │   ├── DimensionalMetrics.jsx     Expandable property-dimension cards
 │   │   ├── ElementTable.jsx
@@ -446,6 +448,9 @@ speckle-dashboard/
 │   │   ├── ErrorBoundary.jsx          Per-widget React error boundary
 │   │   ├── IfcLogoIcon.jsx            IFC logo SVG (used as export button)
 │   │   └── ...
+│   ├── lib/
+│   │   ├── echarts.js                 Central ECharts registration (tree-shaken chart types)
+│   │   └── echartsTheme.js            Shared dark/light theme builders for chart options
 │   └── utils/
 │       ├── speckleContextBuilder.js   Builds AI context from model data
 │       ├── propertyScanner.js         Scans object trees for property keys

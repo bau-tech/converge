@@ -12,9 +12,17 @@ CREATE TABLE IF NOT EXISTS bim_models (
     source       TEXT,
     author       TEXT,
     message      TEXT,
+    server_url   TEXT,
     ingested_at  TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (stream_id, commit_id)
 );
+
+-- Which Speckle server (self-hosted vs. app.speckle.systems, etc.) this model
+-- was actually ingested from — needed so later operations that re-query
+-- Speckle for this stream (e.g. fetching the original IFC blob for IDS/clash
+-- checks) hit the right server instead of always defaulting to the single
+-- env-configured one.
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS server_url TEXT;
 
 CREATE TABLE IF NOT EXISTS bim_elements (
     element_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -45,6 +53,11 @@ CREATE TABLE IF NOT EXISTS bim_geometry (
     area_m2     FLOAT,
     mesh        JSONB
 );
+-- centroid_si: centroid converted to meters (SI) using the source object's
+-- units, so cross-model/cross-source distance queries (e.g. "find elements
+-- within 5m of X") work regardless of whether the source used mm, ft, etc.
+-- NULL for elements ingested before this column was added.
+ALTER TABLE bim_geometry ADD COLUMN IF NOT EXISTS centroid_si FLOAT[];
 
 CREATE TABLE IF NOT EXISTS bim_parameters (
     id            BIGSERIAL PRIMARY KEY,
@@ -103,10 +116,17 @@ CREATE TABLE IF NOT EXISTS bim_tasks (
     actual_finish   DATE,
     duration_days   FLOAT,
     float_days      FLOAT,
-    parent_task_id  UUID REFERENCES bim_tasks(task_id),
+    parent_task_id  UUID REFERENCES bim_tasks(task_id) ON DELETE CASCADE,
     wbs_code        TEXT,
     sort_order      INTEGER DEFAULT 0
 );
+-- Migrate existing databases: the original constraint had no ON DELETE clause,
+-- which defaults to NO ACTION and blocks deleting a task that still has
+-- children instead of cascading the way every other parent/child relationship
+-- in this schema does (bim_elements.model_id, bim_task_elements.task_id, etc).
+ALTER TABLE bim_tasks DROP CONSTRAINT IF EXISTS bim_tasks_parent_task_id_fkey;
+ALTER TABLE bim_tasks ADD CONSTRAINT bim_tasks_parent_task_id_fkey
+    FOREIGN KEY (parent_task_id) REFERENCES bim_tasks(task_id) ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS idx_bim_tasks_model  ON bim_tasks(model_id);
 CREATE INDEX IF NOT EXISTS idx_bim_tasks_parent ON bim_tasks(parent_task_id);
@@ -119,6 +139,15 @@ CREATE TABLE IF NOT EXISTS bim_task_elements (
 
 CREATE INDEX IF NOT EXISTS idx_bim_task_el_task    ON bim_task_elements(task_id);
 CREATE INDEX IF NOT EXISTS idx_bim_task_el_element ON bim_task_elements(element_id);
+
+-- Per-project default dashboard layout: what a first-time visitor sees before
+-- they have any localStorage state of their own. Distinct from the in-memory
+-- /share snapshots (main.py), which are short-lived, explicitly-created links.
+CREATE TABLE IF NOT EXISTS bim_dashboard_layouts (
+    project_id  TEXT PRIMARY KEY,
+    payload     JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS bim_classification_overrides (
     override_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -137,6 +166,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_appid
 CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_speckleid
     ON bim_classification_overrides(model_id, speckle_id)
     WHERE speckle_id IS NOT NULL;
+
+-- Uploaded IDS (Information Delivery Specification) files, kept per model so
+-- a spec can be re-run after re-ingesting a newer commit of the same stream.
+CREATE TABLE IF NOT EXISTS bim_ids_specs (
+    spec_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id    UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    uploaded_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ids_specs_model ON bim_ids_specs(model_id);
+
+-- Speckle servers the backend watches for webhook-driven auto-sync, independent
+-- of any frontend session — a webhook can arrive with nobody's browser open.
+CREATE TABLE IF NOT EXISTS auto_sync_servers (
+    server_url      TEXT PRIMARY KEY,
+    token           TEXT NOT NULL,
+    enabled         BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    last_scanned_at TIMESTAMPTZ
+);
+
+-- One row per stream we've registered a Speckle webhook on. The row id is
+-- used as the webhook's callback URL path segment, so an incoming request
+-- can be routed to the right server/token/secret without trusting anything
+-- in the payload itself.
+CREATE TABLE IF NOT EXISTS stream_webhooks (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    server_url         TEXT NOT NULL,
+    stream_id          TEXT NOT NULL,
+    speckle_webhook_id TEXT,
+    secret             TEXT NOT NULL,
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (server_url, stream_id)
+);
 """
 
 

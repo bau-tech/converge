@@ -105,7 +105,7 @@ def _param_distribution_by_canonical(cur, model_id: str, canonical: str,
               AND p.value IS NOT NULL
               AND p.value <> ''
               {extra_where}
-            ORDER BY p.element_id
+            ORDER BY p.element_id, p.key
         ) ranked
         GROUP BY val
         ORDER BY cnt DESC
@@ -172,21 +172,41 @@ _QTY_ALLOWED_FIELDS = {"category", "ifc_class", "storey"}
 def _qty_by_field(cur, model_id: str, field: str) -> dict:
     """
     Return {value: {count, volume_m3, area_m2}} grouped by an bim_elements column.
+
+    Volume and area fall back to bim_parameters (canonical qto values) when bim_geometry
+    is null — this covers IFC files where mesh geometry is absent but Qto_*BaseQuantities
+    are present and were stored as canonical_key='volume'/'area' during ingest.
     """
     if field not in _QTY_ALLOWED_FIELDS:
         raise ValueError(f"field must be one of {_QTY_ALLOWED_FIELDS!r}, got {field!r}")
     cur.execute(f"""
+        WITH pv AS (
+            SELECT p.element_id, MAX(p.value_si) AS value_si
+            FROM bim_parameters p
+            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+            WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
+            GROUP BY p.element_id
+        ),
+        pa AS (
+            SELECT p.element_id, MAX(p.value_si) AS value_si
+            FROM bim_parameters p
+            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+            WHERE p.canonical_key = 'area'   AND p.unit_si = 'm2' AND p.value_si IS NOT NULL
+            GROUP BY p.element_id
+        )
         SELECT
-            COALESCE(e.{field}, 'Unknown') AS grp,
-            COUNT(*)                        AS cnt,
-            COALESCE(SUM(g.volume_m3), 0)  AS vol,
-            COALESCE(SUM(g.area_m2), 0)    AS area
+            COALESCE(e.{field}, 'Unknown')                    AS grp,
+            COUNT(*)                                          AS cnt,
+            COALESCE(SUM(COALESCE(g.volume_m3, pv.value_si)), 0) AS vol,
+            COALESCE(SUM(COALESCE(g.area_m2,   pa.value_si)), 0) AS area
         FROM bim_elements e
-        LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+        LEFT JOIN bim_geometry g  ON g.element_id  = e.element_id
+        LEFT JOIN pv              ON pv.element_id = e.element_id
+        LEFT JOIN pa              ON pa.element_id = e.element_id
         WHERE e.model_id = %s
         GROUP BY grp
         ORDER BY cnt DESC
-    """, (model_id,))
+    """, (model_id, model_id, model_id))
     return {
         row[0]: {"count": row[1], "volume_m3": round(row[2], 4), "area_m2": round(row[3], 4)}
         for row in cur.fetchall()
@@ -222,17 +242,35 @@ def get_model_summary(conn, model_id: str) -> dict:
                 "commit_id":   meta_row[6] or "",
             }
 
-        # Totals
+        # Totals — volume and area COALESCE bim_geometry (mesh) with bim_parameters
+        # (IFC Qto canonical values) so IFC files without tessellated geometry still
+        # report correct quantities from their Qto_*BaseQuantities property sets.
         cur.execute("""
+            WITH pv AS (
+                SELECT p.element_id, MAX(p.value_si) AS value_si
+                FROM bim_parameters p
+                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
+                WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
+                GROUP BY p.element_id
+            ),
+            pa AS (
+                SELECT p.element_id, MAX(p.value_si) AS value_si
+                FROM bim_parameters p
+                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
+                WHERE p.canonical_key = 'area' AND p.unit_si = 'm2' AND p.value_si IS NOT NULL
+                GROUP BY p.element_id
+            )
             SELECT
-                COUNT(*)                           AS total,
-                COALESCE(SUM(g.volume_m3), 0)      AS vol,
-                COALESCE(SUM(g.area_m2), 0)        AS area,
-                COUNT(g.element_id)                AS geo_count
+                COUNT(*)                                              AS total,
+                COALESCE(SUM(COALESCE(g.volume_m3, pv.value_si)), 0) AS vol,
+                COALESCE(SUM(COALESCE(g.area_m2,   pa.value_si)), 0) AS area,
+                COUNT(g.element_id)                                   AS geo_count
             FROM bim_elements e
-            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+            LEFT JOIN bim_geometry g  ON g.element_id  = e.element_id
+            LEFT JOIN pv              ON pv.element_id = e.element_id
+            LEFT JOIN pa              ON pa.element_id = e.element_id
             WHERE e.model_id = %s
-        """, (model_id,))
+        """, (model_id, model_id, model_id))
         row = cur.fetchone()
         total, vol, area, geo_count = row
         geo_coverage = round(geo_count / total, 4) if total else 0
@@ -240,6 +278,37 @@ def get_model_summary(conn, model_id: str) -> dict:
         by_category  = _qty_by_field(cur, model_id, "category")
         by_ifc_class = _qty_by_field(cur, model_id, "ifc_class")
         by_storey    = _qty_by_field(cur, model_id, "storey")
+
+        # Concrete volume (m³) and steel weight (kg) — material-scoped aggregations.
+        # Both rely on canonical_key='material_category' derived at ingest time.
+        # Joined via LEFT JOIN so elements without material_category are excluded
+        # rather than duplicated.
+        cur.execute("""
+            WITH pv AS (
+                SELECT p.element_id, MAX(p.value_si) AS value_si
+                FROM bim_parameters p
+                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
+                WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
+                GROUP BY p.element_id
+            )
+            SELECT
+                COALESCE(SUM(CASE WHEN mat.value = 'concrete'
+                    THEN COALESCE(g.volume_m3, pv.value_si) END), 0),
+                COALESCE(SUM(CASE WHEN mat.value = 'steel' AND w.value_si IS NOT NULL
+                    THEN w.value_si END), 0)
+            FROM bim_elements e
+            LEFT JOIN bim_geometry   g   ON g.element_id   = e.element_id
+            LEFT JOIN pv                 ON pv.element_id  = e.element_id
+            LEFT JOIN bim_parameters mat ON mat.element_id = e.element_id
+                AND mat.canonical_key = 'material_category'
+            LEFT JOIN bim_parameters w   ON w.element_id   = e.element_id
+                AND w.canonical_key = 'weight'
+                AND w.value_si IS NOT NULL
+            WHERE e.model_id = %s
+        """, (model_id, model_id))
+        _mat_row = cur.fetchone()
+        concrete_volume_m3 = round(float(_mat_row[0] or 0), 3)
+        steel_weight_kg    = round(float(_mat_row[1] or 0), 1)
 
         by_material  = _param_distribution(cur, model_id, _MATERIAL_KEYS,  canonical="material")
         by_grade     = _param_distribution(cur, model_id, _GRADE_KEYS,    canonical="grade")
@@ -263,6 +332,8 @@ def get_model_summary(conn, model_id: str) -> dict:
         "total_count":     total,
         "total_volume_m3": round(float(vol), 4),
         "total_area_m2":   round(float(area), 4),
+        "total_concrete_volume_m3": concrete_volume_m3,
+        "total_steel_weight_kg":    steel_weight_kg,
         "geo_coverage":    geo_coverage,
         "by_category":     by_category,
         "by_ifc_class":    by_ifc_class,
@@ -592,3 +663,341 @@ def get_quantity_takeoff(conn, model_id: str, group_by: str = "ifc_class") -> di
             for row in rows
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# QA element drill-down — returns actual element rows for a specific issue
+# ---------------------------------------------------------------------------
+
+def get_qa_elements(conn, model_id: str, issue: str, limit: int = 50) -> list:
+    """
+    Return elements affected by a specific QA issue.
+    issue: unclassified | no_geometry | no_name | no_storey | no_material | duplicate_ids
+    """
+    def _cols(row):
+        return {
+            "element_id": str(row[0]),
+            "speckle_id": row[1],
+            "ifc_class":  row[2],
+            "category":   row[3],
+            "name":       row[4],
+            "storey":     row[5],
+        }
+
+    with conn.cursor() as cur:
+        if issue == "unclassified":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                WHERE e.model_id = %s
+                  AND (e.category IS NULL OR e.category ILIKE 'Generic Models' OR e.category ILIKE 'Unknown')
+                ORDER BY e.ifc_class NULLS LAST, e.name
+                LIMIT %s
+            """, (model_id, limit))
+        elif issue == "no_geometry":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                WHERE e.model_id = %s AND g.element_id IS NULL
+                ORDER BY e.category, e.name
+                LIMIT %s
+            """, (model_id, limit))
+        elif issue == "no_name":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                WHERE e.model_id = %s
+                  AND (e.name IS NULL OR TRIM(e.name) = '' OR e.name = 'None')
+                ORDER BY e.ifc_class, e.storey
+                LIMIT %s
+            """, (model_id, limit))
+        elif issue == "no_storey":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                WHERE e.model_id = %s
+                  AND (e.storey IS NULL OR TRIM(e.storey) = '')
+                ORDER BY e.category, e.name
+                LIMIT %s
+            """, (model_id, limit))
+        elif issue == "no_material":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                WHERE e.model_id = %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM bim_parameters p
+                    WHERE p.element_id = e.element_id
+                      AND (p.canonical_key = 'material' OR p.key = ANY(%s))
+                      AND p.value IS NOT NULL AND p.value <> ''
+                  )
+                ORDER BY e.category, e.name
+                LIMIT %s
+            """, (model_id, _MATERIAL_KEYS, limit))
+        elif issue == "duplicate_ids":
+            cur.execute("""
+                SELECT e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey
+                FROM bim_elements e
+                WHERE e.model_id = %s
+                  AND e.application_id IN (
+                    SELECT application_id FROM bim_elements
+                    WHERE model_id = %s
+                      AND application_id IS NOT NULL AND application_id <> ''
+                    GROUP BY application_id HAVING COUNT(*) > 1
+                  )
+                ORDER BY e.application_id, e.speckle_id
+                LIMIT %s
+            """, (model_id, model_id, limit))
+        else:
+            return []
+
+        return [_cols(r) for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Single-element detail lookup by Speckle ID or name (chat agent + viewer
+# selection use Speckle IDs, not the internal element_id UUID)
+# ---------------------------------------------------------------------------
+
+def get_element_details(conn, model_id: str, reference: str) -> dict | None:
+    """
+    Look up one element within model_id by exact Speckle ID or partial name
+    match, returning its core fields, bbox/centroid/volume/area, and full
+    parameter list. Returns None if no element matches.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.element_id, e.speckle_id, e.application_id, e.speckle_type,
+                   e.ifc_class, e.category, e.name, e.storey,
+                   g.bbox_min, g.bbox_max, g.centroid, g.volume_m3, g.area_m2
+            FROM bim_elements e
+            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+            WHERE e.model_id = %s AND (e.speckle_id = %s OR e.name ILIKE %s)
+            ORDER BY (e.speckle_id = %s) DESC
+            LIMIT 1
+        """, (model_id, reference, f"%{reference}%", reference))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        element = dict(zip(cols, row))
+        element["element_id"] = str(element["element_id"])
+
+        cur.execute("""
+            SELECT pset, key, value, datatype
+            FROM bim_parameters
+            WHERE element_id = %s
+            ORDER BY pset, key
+        """, (row[0],))
+        element["parameters"] = [
+            dict(zip(["pset", "key", "value", "datatype"], r))
+            for r in cur.fetchall()
+        ]
+    return element
+
+
+# ---------------------------------------------------------------------------
+# Parameter completeness — fill-rate per parameter, worst-covered first
+# ---------------------------------------------------------------------------
+
+def get_parameter_completeness(conn, model_id: str, category: str = None,
+                                ifc_class: str = None, min_coverage: float = 0.0) -> dict:
+    """
+    Parameter fill-rate report for a model.
+    Returns {model_id, total_elements, parameters: [{canonical_key, key, pset, total, filled, missing, fill_pct}]}
+    sorted by coverage ascending (worst first).
+
+    Optional filters:
+      category   — restrict to elements of this category (ILIKE)
+      ifc_class  — restrict to elements of this IFC class
+      min_coverage — only return parameters at or above this fill % (e.g. 99.0 to see near-complete)
+    """
+    with conn.cursor() as cur:
+        elem_where = ["e.model_id = %s"]
+        elem_params: list = [model_id]
+        if category:
+            elem_where.append("e.category ILIKE %s")
+            elem_params.append(f"%{category}%")
+        if ifc_class:
+            elem_where.append("e.ifc_class = %s")
+            elem_params.append(ifc_class)
+        elem_sql = " AND ".join(elem_where)
+
+        cur.execute(f"SELECT COUNT(*) FROM bim_elements e WHERE {elem_sql}", elem_params)
+        total = int(cur.fetchone()[0] or 0)
+        if total == 0:
+            return {"model_id": model_id, "total_elements": 0, "parameters": []}
+
+        cur.execute(f"""
+            SELECT
+                COALESCE(p.canonical_key, p.key) AS display_key,
+                p.canonical_key,
+                p.key,
+                p.pset,
+                COUNT(DISTINCT p.element_id) AS filled
+            FROM bim_parameters p
+            JOIN bim_elements e ON e.element_id = p.element_id
+            WHERE {elem_sql}
+            GROUP BY COALESCE(p.canonical_key, p.key), p.canonical_key, p.key, p.pset
+            ORDER BY filled DESC
+        """, elem_params)
+        rows = cur.fetchall()
+
+    grouped: dict[str, dict] = {}
+    for display_key, canon, raw_key, pset, filled in rows:
+        if display_key not in grouped:
+            grouped[display_key] = {
+                "canonical_key": canon,
+                "key":           display_key,
+                "pset":          pset,
+                "filled":        0,
+            }
+        # Take max fill across raw keys mapping to same canonical
+        grouped[display_key]["filled"] = max(grouped[display_key]["filled"], filled)
+
+    result = []
+    for entry in grouped.values():
+        filled = entry["filled"]
+        missing = total - filled
+        fill_pct = round(filled / total * 100, 1)
+        if fill_pct >= min_coverage:
+            result.append({
+                "canonical_key": entry["canonical_key"],
+                "key":           entry["key"],
+                "pset":          entry["pset"],
+                "total":         total,
+                "filled":        filled,
+                "missing":       missing,
+                "fill_pct":      fill_pct,
+            })
+
+    result.sort(key=lambda x: x["fill_pct"])
+    return {"model_id": model_id, "total_elements": total, "parameters": result}
+
+
+# ---------------------------------------------------------------------------
+# Version history / trend
+# ---------------------------------------------------------------------------
+
+def get_model_stream_id(conn, model_id: str) -> str | None:
+    """Return the stream_id for a model, or None if the model doesn't exist."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def get_model_trend(conn, stream_id: str) -> list[dict]:
+    """
+    Version history for a stream.
+    Returns [{model_id, commit_id, branch_name, ingested_at, source, message,
+              total_elements, by_category: {cat: count}}]
+    ordered oldest -> newest.
+    """
+    from collections import OrderedDict
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT m.model_id::text, m.commit_id, m.branch_name,
+                   m.ingested_at, m.source, m.message,
+                   e.category, COUNT(*) AS cnt
+            FROM bim_models m
+            JOIN bim_elements e ON e.model_id = m.model_id
+            WHERE m.stream_id = %s
+            GROUP BY m.model_id, m.commit_id, m.branch_name,
+                     m.ingested_at, m.source, m.message, e.category
+            ORDER BY m.ingested_at ASC
+        """, (stream_id,))
+        rows = cur.fetchall()
+
+    versions: dict = OrderedDict()
+    for model_id, commit_id, branch, ingested_at, source, message, cat, cnt in rows:
+        if model_id not in versions:
+            versions[model_id] = {
+                "model_id":       model_id,
+                "commit_id":      commit_id,
+                "branch_name":    branch or "",
+                "ingested_at":    ingested_at.isoformat() if ingested_at else None,
+                "source":         source or "",
+                "message":        message or "",
+                "total_elements": 0,
+                "by_category":    {},
+            }
+        v = versions[model_id]
+        v["by_category"][cat or "Unknown"] = int(cnt)
+        v["total_elements"] += int(cnt)
+
+    return list(versions.values())
+
+
+# ---------------------------------------------------------------------------
+# Spatial / proximity queries
+# ---------------------------------------------------------------------------
+
+def find_nearby_elements(conn, model_id: str, origin, radius_m: float,
+                          category: str = None, exclude_speckle_id: str = None) -> list[dict]:
+    """
+    Find elements within `radius_m` meters of `origin`.
+
+    `origin` is either a literal [x, y, z] coordinate in meters, or a
+    speckle_id / element name used to look up a reference element's
+    centroid_si. Only elements with a populated centroid_si (ingested after
+    the centroid_si column was added) are considered.
+
+    Returns [{speckle_id, name, category, ifc_class, distance_m}] sorted by
+    distance ascending, capped at 200 results.
+    """
+    with conn.cursor() as cur:
+        if isinstance(origin, (list, tuple)) and len(origin) == 3:
+            x0, y0, z0 = (float(v) for v in origin)
+        else:
+            cur.execute("""
+                SELECT g.centroid_si, e.speckle_id
+                FROM bim_elements e
+                JOIN bim_geometry g ON g.element_id = e.element_id
+                WHERE e.model_id = %s AND g.centroid_si IS NOT NULL
+                  AND (e.speckle_id = %s OR e.name ILIKE %s)
+                LIMIT 1
+            """, (model_id, origin, f"%{origin}%"))
+            row = cur.fetchone()
+            if not row:
+                return []
+            x0, y0, z0 = row[0]
+            exclude_speckle_id = exclude_speckle_id or row[1]
+
+        where = ["e.model_id = %s", "g.centroid_si IS NOT NULL"]
+        where_params: list = [model_id]
+        if exclude_speckle_id:
+            where.append("e.speckle_id <> %s")
+            where_params.append(exclude_speckle_id)
+        if category:
+            where.append("e.category ILIKE %s")
+            where_params.append(f"%{category}%")
+        where.append(
+            "sqrt(power(g.centroid_si[1]-%s,2) + power(g.centroid_si[2]-%s,2)"
+            " + power(g.centroid_si[3]-%s,2)) <= %s"
+        )
+        where_params.extend([x0, y0, z0, radius_m])
+
+        cur.execute(f"""
+            SELECT e.speckle_id, e.name, e.category, e.ifc_class,
+                   sqrt(power(g.centroid_si[1]-%s,2) + power(g.centroid_si[2]-%s,2)
+                        + power(g.centroid_si[3]-%s,2)) AS distance_m
+            FROM bim_elements e
+            JOIN bim_geometry g ON g.element_id = e.element_id
+            WHERE {" AND ".join(where)}
+            ORDER BY distance_m ASC
+            LIMIT 200
+        """, [x0, y0, z0] + where_params)
+
+        return [
+            {
+                "speckle_id": r[0],
+                "name":       r[1],
+                "category":   r[2],
+                "ifc_class":  r[3],
+                "distance_m": round(float(r[4]), 3),
+            }
+            for r in cur.fetchall()
+        ]

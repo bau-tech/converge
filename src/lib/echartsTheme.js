@@ -1,25 +1,27 @@
-// Shared theme building blocks for ECharts options, mirroring the previous
-// Plotly themes (transparent backgrounds, zinc grid colors in dark mode,
-// Inter font, monospace hover tooltips) so migrated charts look like-for-like.
+// Shared theme building blocks for ECharts options. Colors are taken from
+// Speckle's own design tokens (--speckle-* in src/index.css, mirrored from
+// @speckle/tailwind-theme) so charts match the rest of the dashboard chrome
+// instead of the generic zinc palette left over from the Plotly era.
 
 const DARK = {
-    gridLine: '#27272a',
-    axisLine: '#3f3f46',
-    text: '#e4e4e7',
-    tick: '#a1a1aa',
-    tooltipBg: '#18181b',
-    tooltipBorder: '#3f3f46',
-    tooltipText: '#fafafa',
+    gridLine: '#282833',    // --speckle-outline-3
+    axisLine: '#2E313F',    // --speckle-outline-2
+    text: '#B0B1B5',        // --speckle-foreground-2
+    tick: '#7E7F82',        // --speckle-foreground-3
+    tooltipBg: '#191A22',   // --speckle-foundation-2
+    tooltipBorder: '#2E313F', // --speckle-outline-2
+    tooltipText: '#ffffff', // --speckle-foreground
 }
 
 const LIGHT = {
-    gridLine: '#e4e4e7',
-    axisLine: '#d4d4d8',
-    text: '#18181b',
-    tick: '#52525b',
-    tooltipBg: '#ffffff',
-    tooltipBorder: '#e4e4e7',
-    tooltipText: '#18181b',
+    gridLine: '#C4C4C4',    // --speckle-outline-5 — bumped from outline-3 (#E2E8F0), which was
+                            // nearly invisible against a white panel background
+    axisLine: '#DFDFDF',    // --speckle-outline-2
+    text: '#1A1A1A',        // --speckle-foreground
+    tick: '#1A1A1A',        // --speckle-foreground
+    tooltipBg: '#FFFFFF',   // --speckle-foundation
+    tooltipBorder: '#E2E8F0', // --speckle-outline-3
+    tooltipText: '#1A1A1A', // --speckle-foreground
 }
 
 // Top-level option fragments shared by every chart: transparent background,
@@ -54,13 +56,23 @@ export function categoryAxisStyle({ axisLabel, darkMode = true, ...extra } = {})
 }
 
 // Value axis (e.g. the numeric axis of a horizontal bar chart).
-export function valueAxisStyle({ axisLabel, darkMode = true, ...extra } = {}) {
+export function valueAxisStyle({ axisLabel, darkMode = true, showGridLines = true, ...extra } = {}) {
     const c = darkMode ? DARK : LIGHT
     return {
         type: 'value',
         axisLine: { show: false },
         axisLabel: { color: c.tick, ...axisLabel },
-        splitLine: { lineStyle: { color: c.gridLine } },
+        splitLine: { show: showGridLines, lineStyle: { color: c.gridLine } },
+        ...extra,
+    }
+}
+
+// Legend — used by pie/sunburst/treemap to list categories with their colors.
+export function legendStyle({ show = false, darkMode = true, ...extra } = {}) {
+    const c = darkMode ? DARK : LIGHT
+    return {
+        show,
+        textStyle: { color: c.text, fontSize: 11 },
         ...extra,
     }
 }

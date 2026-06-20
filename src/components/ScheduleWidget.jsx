@@ -262,14 +262,14 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                 <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading || loading}
-                    aria-label={uploading ? 'Importing schedule file…' : 'Import schedule from IFC or Primavera P6 XML file'}
+                    aria-label={uploading ? 'Importing IFC schedule…' : 'Import IFC file containing IfcWorkSchedule'}
                     aria-busy={uploading}
                     className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 border border-amber-500/20 transition-colors disabled:opacity-50 shrink-0"
                 >
                     {uploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                    {uploading ? 'Importing…' : 'Import IFC / P6 XML'}
+                    {uploading ? 'Importing…' : 'Import IFC'}
                 </button>
-                <input ref={fileInputRef} type="file" accept=".ifc,.xml,.mpp" className="hidden" onChange={handleUpload} />
+                <input ref={fileInputRef} type="file" accept=".ifc" className="hidden" onChange={handleUpload} />
             </div>
 
             {/* Body */}
@@ -282,8 +282,7 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                     <Calendar className="w-12 h-12 text-zinc-700" />
                     <p className="text-sm text-zinc-500 font-medium">No schedule data found</p>
                     <p className="text-xs text-zinc-600 max-w-xs">
-                        Upload an IFC file that contains an <code className="text-zinc-400">IfcWorkSchedule</code>,
-                        or a Primavera P6 XML to enable 4D construction simulation.
+                        Upload an IFC file that contains an <code className="text-zinc-400">IfcWorkSchedule</code> to enable 4D construction simulation.
                     </p>
                 </div>
             ) : (

@@ -32,6 +32,14 @@
   --speckle-danger:              #F87171;
   --speckle-danger-lighter:      #FCA5A5;
   --speckle-danger-darker:       #EF4444;
+
+  --speckle-success:             #34D399;
+  --speckle-success-lighter:     #6EE7B7;
+  --speckle-success-darker:      #10B981;
+
+  --speckle-warning:             #FBBF24;
+  --speckle-warning-lighter:     #FDE68A;
+  --speckle-warning-darker:      #F59E0B;
 }
 
 /* ── Speckle design tokens — light ─────────────────────────────── */
@@ -60,6 +68,14 @@
   --speckle-danger:              #C45959;
   --speckle-danger-lighter:      #E87070;
   --speckle-danger-darker:       #A33E3E;
+
+  --speckle-success:             #15803D;
+  --speckle-success-lighter:     #16A34A;
+  --speckle-success-darker:      #14532D;
+
+  --speckle-warning:             #92400E;
+  --speckle-warning-lighter:     #B45309;
+  --speckle-warning-darker:      #78350F;
 }
 
 * {
@@ -100,22 +116,19 @@ html {
   border-color: var(--speckle-outline-2);
 }
 
-.light .glass {
-  background: #ffffff !important;
-  border: 1px solid rgba(19, 108, 255, 0.12) !important;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
-}
-
-.light .glass-card {
-  background: #ffffff !important;
-  border: 1px solid rgba(19, 108, 255, 0.1) !important;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
-}
-
-.light .glass-card:hover {
-  background: #f8f9ff !important;
-  border-color: rgba(19, 108, 255, 0.3) !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+/* Header toolbar icon buttons — fixed 36px square so these line up exactly
+   with the 36px-tall search input, regardless of .glass-card's 16px padding.
+   Background stays transparent at rest (just the border reads as a button);
+   .glass-card:hover still fills it in on hover for affordance. */
+.glass-card.icon-btn {
+  padding: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: transparent;
 }
 
 /* ── Light mode Tailwind class overrides ────────────────────────── */
@@ -143,6 +156,26 @@ html {
 
 .light .hover\:bg-white\/10:hover {
   background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .bg-white\/4 {
+  background-color: rgba(0, 0, 0, 0.03) !important;
+}
+
+.light .hover\:bg-white\/8:hover {
+  background-color: rgba(0, 0, 0, 0.07) !important;
+}
+
+.light .border-white\/8 {
+  border-color: rgba(0, 0, 0, 0.10) !important;
+}
+
+.light .border-white\/15 {
+  border-color: rgba(0, 0, 0, 0.16) !important;
+}
+
+.light .border-white\/20 {
+  border-color: rgba(0, 0, 0, 0.20) !important;
 }
 
 
@@ -240,24 +273,26 @@ html {
   cursor: se-resize !important; transform: none !important;
 }
 
-/* L-bracket indicators — explicit per-side borders prevent hairline bleed */
+/* L-bracket indicators — explicit per-side borders prevent hairline bleed.
+   Border-width (3px) deliberately matches the edge pills' thickness below —
+   corner and edge handles should read as one consistent affordance weight. */
 .react-resizable-handle-sw::after,
 .react-resizable-handle-se::after {
   content: ''; position: absolute;
   width: 10px; height: 10px;
   border-top: none;
-  border-bottom: 2.5px solid rgba(255, 255, 255, 0.55);
+  border-bottom: 3px solid rgba(255, 255, 255, 0.55);
   transition: border-color 0.15s ease, width 0.15s ease, height 0.15s ease;
 }
 .react-resizable-handle-sw::after {
   bottom: 4px; left: 4px;
-  border-left: 2.5px solid rgba(255, 255, 255, 0.55);
+  border-left: 3px solid rgba(255, 255, 255, 0.55);
   border-right: none;
   border-radius: 0 0 0 2px;
 }
 .react-resizable-handle-se::after {
   bottom: 4px; right: 4px;
-  border-right: 2.5px solid rgba(255, 255, 255, 0.55);
+  border-right: 3px solid rgba(255, 255, 255, 0.55);
   border-left: none;
   border-radius: 0 0 2px 0;
 }
@@ -303,7 +338,7 @@ html {
 .react-resizable-handle-s::after,
 .react-resizable-handle-n::after {
   content: ''; position: absolute;
-  width: 32px; height: 4px;
+  width: 32px; height: 3px;
   background: rgba(255, 255, 255, 0.25);
   border-radius: 2px;
   left: 50%; transform: translateX(-50%);
@@ -315,7 +350,7 @@ html {
 .react-resizable-handle-e::after,
 .react-resizable-handle-w::after {
   content: ''; position: absolute;
-  width: 4px; height: 32px;
+  width: 3px; height: 32px;
   background: rgba(255, 255, 255, 0.25);
   border-radius: 2px;
   top: 50%; transform: translateY(-50%);
@@ -425,11 +460,6 @@ select option {
   padding: 8px;
 }
 
-/* Plotly chart container */
-.js-plotly-plot .plotly .modebar {
-  display: none !important;
-}
-
 /* Animations */
 @keyframes shimmer {
   0% {
@@ -472,13 +502,145 @@ select option {
   background-color: rgba(255, 255, 255, 0.8) !important;
 }
 
+/* Subtle recessed surfaces (search input, panel header strips) — a faint
+   dark tint reads as "inset" on light cards the same way the zinc tint
+   reads as "inset" on dark ones. */
+.light .bg-zinc-900\/20 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.light .bg-zinc-900\/30 {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.light .focus\:bg-zinc-900\/40:focus {
+  background-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+/* bg-zinc-950 — code blocks, sticky table headers. Same "raised surface"
+   role as bg-zinc-800 below. */
+.light .bg-zinc-950 {
+  background-color: var(--speckle-foundation-2) !important;
+}
+
+/* bg-zinc-800 family — input fields, badges, chat bubbles. These sit one
+   step "above" the page background in dark mode, so they map to
+   foundation-2 (the same surface .glass-card uses) in light mode; the
+   translucent variants become faint dark tints instead of dark fills. */
+.light .bg-zinc-800 {
+  background-color: var(--speckle-foundation-2) !important;
+}
+
+.light .bg-zinc-800\/20 {
+  background-color: rgba(0, 0, 0, 0.03) !important;
+}
+
+.light .bg-zinc-800\/30 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.light .bg-zinc-800\/50 {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.light .bg-zinc-800\/60 {
+  background-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+.light .bg-zinc-800\/80 {
+  background-color: rgba(0, 0, 0, 0.07) !important;
+}
+
+.light .hover\:bg-zinc-800:hover {
+  background-color: var(--speckle-outline-3) !important;
+}
+
+.light .group:hover .group-hover\:bg-zinc-800 {
+  background-color: var(--speckle-outline-3) !important;
+}
+
+/* bg-zinc-700 family — toggles, dividers, disabled states. One step more
+   contrast than the zinc-800 family. */
+.light .bg-zinc-700 {
+  background-color: var(--speckle-outline-3) !important;
+}
+
+.light .bg-zinc-700\/30 {
+  background-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+.light .bg-zinc-700\/50 {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .bg-zinc-700\/60 {
+  background-color: rgba(0, 0, 0, 0.10) !important;
+}
+
+.light .hover\:bg-zinc-700:hover,
+.light .hover\:bg-zinc-700\/50:hover {
+  background-color: rgba(0, 0, 0, 0.10) !important;
+}
+
+.light .hover\:bg-zinc-600\/60:hover {
+  background-color: rgba(0, 0, 0, 0.12) !important;
+}
+
+.light .disabled\:bg-zinc-700:disabled {
+  background-color: var(--speckle-outline-3) !important;
+}
+
 /* Light mode text */
+.light .text-zinc-100 {
+  color: #18181b !important;
+}
+
 .light .text-zinc-200 {
   color: #18181b !important;
 }
 
 .light .text-zinc-300 {
   color: #27272a !important;
+}
+
+/* Bright status/feature text (amber=BCF, cyan=AI chat, purple=diff,
+   emerald/green=success, red=danger) is tuned for the near-black dark
+   background and fails contrast on white — darken just the text color
+   in light mode rather than touch every component that uses these. */
+.light .text-amber-300,
+.light .text-amber-400,
+.light .text-amber-500 {
+  color: #92400E !important;
+}
+
+.light .text-cyan-300,
+.light .text-cyan-400,
+.light .text-cyan-500 {
+  color: #0E7490 !important;
+}
+
+.light .text-emerald-300,
+.light .text-emerald-400,
+.light .text-emerald-500 {
+  color: #15803D !important;
+}
+
+.light .text-green-300,
+.light .text-green-400,
+.light .text-green-500 {
+  color: #15803D !important;
+}
+
+.light .text-purple-300,
+.light .text-purple-400,
+.light .text-purple-500 {
+  color: #7E22CE !important;
+}
+
+.light .text-red-300,
+.light .text-red-400,
+.light .text-red-500 {
+  color: #B91C1C !important;
 }
 
 /* React Grid Layout styles */
@@ -520,8 +682,23 @@ select option {
   background-image: radial-gradient(circle, rgba(0, 0, 0, 0.07) 1px, transparent 1px);
 }
 
+/* The 0.5 rest-state opacity above, stacked with this border's own alpha,
+   leaves the bracket almost invisible on a white panel — boost both the
+   handle opacity and the border alpha in light mode to compensate. */
+.light .react-resizable-handle-sw,
+.light .react-resizable-handle-se { opacity: 0.85; }
+
 .light .react-resizable-handle-sw::after,
-.light .react-resizable-handle-se::after { border-color: rgba(0, 0, 0, 0.35); }
+.light .react-resizable-handle-se::after { border-color: rgba(0, 0, 0, 0.55); }
+
+/* Light mode only: bottom-left handle gets a third (right) edge, turning its
+   bracket into a U-shape instead of the L-shape every other corner uses —
+   the hover rule below sets border-color on all sides via the shorthand,
+   so it colors this new edge too without a separate override. */
+.light .react-resizable-handle-sw::after {
+  border-right: 3px solid rgba(0, 0, 0, 0.55);
+  border-radius: 0 0 2px 2px;
+}
 
 .light .react-grid-item:hover .react-resizable-handle-sw::after,
 .light .react-grid-item:hover .react-resizable-handle-se::after { border-color: rgba(19, 108, 255, 0.85); }
@@ -586,16 +763,5 @@ select option {
 
 [data-dnd-sortable]:focus,
 [data-dnd-sortable]:focus-visible {
-  outline: none !important;
-}
-
-/* Plotly chart - no selection outlines */
-.js-plotly-plot,
-.plotly {
-  outline: none !important;
-}
-
-.js-plotly-plot:focus,
-.js-plotly-plot:active {
   outline: none !important;
 }

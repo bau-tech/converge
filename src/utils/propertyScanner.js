@@ -30,7 +30,7 @@ export function formatPropertyName(path) {
 }
 
 // Get nested value from object using path like "properties.Material"
-function getNestedValue(obj, path) {
+export function getNestedValue(obj, path) {
     const parts = path.split('.')
     let current = obj
     for (const part of parts) {

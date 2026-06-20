@@ -10,6 +10,7 @@ import {
     Loader2,
     Clock,
     Share2,
+    Save,
     Check,
     AlertCircle,
     List,
@@ -17,6 +18,7 @@ import {
     Copy,
     ExternalLink,
 } from 'lucide-react'
+import { ClashLogoIcon } from './components/ClashLogoIcon'
 import { CompareVersionToggle } from './components/CompareVersionToggle'
 import SpeckleViewer from './components/SpeckleViewer'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -30,6 +32,7 @@ import { GridDashboard, GridPanel } from './components/DashboardGrid'
 import { ChatWidget } from './components/ChatWidget'
 import PivotTableWidget from './components/PivotTableWidget'
 import ValidationWidget from './components/ValidationWidget'
+import FilterWidget from './components/FilterWidget'
 import ScheduleWidget from './components/ScheduleWidget'
 import QuantityWidget from './components/QuantityWidget'
 import { VideoWidget } from './components/VideoWidget'
@@ -37,10 +40,19 @@ import { StandaloneChartWidget } from './components/StandaloneChartWidget'
 import { IfcLogoIcon } from './components/IfcLogoIcon'
 import { BreadcrumbSelector } from './components/BreadcrumbSelector'
 import { WidgetFAB } from './components/WidgetFAB'
+import { BcfTopicPanel } from './components/BcfTopicPanel'
+import { BcfKanbanBoard } from './components/BcfKanbanBoard'
+import { BcfStatsWidget } from './components/BcfStatsWidget'
+import { BcfLogoIcon } from './components/BcfLogoIcon'
+import { IdsLogoIcon } from './components/IdsLogoIcon'
+import { IdsCheckPanel } from './components/IdsCheckPanel'
+import { ClashCheckPanel } from './components/ClashCheckPanel'
 import PublishSelectionButton from './components/PublishSelectionButton'
 import { IngestProgress } from './components/IngestProgress'
-import { flattenObject } from './utils/propertyScanner'
+import { flattenObject, getNestedValue } from './utils/propertyScanner'
 import { generateSummaryFromElements } from './utils/propertyScanner'
+import { listTopics, listViewpoints } from './utils/bcfClient'
+import { pullFromSpeckle, pushToSpeckle } from './utils/bcfSync'
 
 const CONFIG = {
     normalizerUrl: import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002',
@@ -149,6 +161,8 @@ function adaptNormalizerSummary(norm) {
         total_area:      norm.total_area_m2   || 0,
         total_weight:    0,
         total_length:    0,
+        total_concrete_volume_m3: norm.total_concrete_volume_m3 || 0,
+        total_steel_weight_kg:    norm.total_steel_weight_kg    || 0,
         geo_coverage:    norm.geo_coverage   || 0,
         by_category:     countOnly(norm.by_category),
         by_ifc_type:     countOnly(norm.by_ifc_class),
@@ -183,6 +197,15 @@ function adaptNormalizerSummary(norm) {
 function App() {
     const [darkMode, setDarkMode] = useState(_urlSeed?.ui?.darkMode ?? true)
 
+    // Mirror the theme onto <html> so content portaled to document.body
+    // (3D viewer toolbar, timeline, diff bar) picks up the correct
+    // --speckle-* variable values, since .light/.dark only lives on an
+    // inner div otherwise.
+    useEffect(() => {
+        const root = document.documentElement
+        root.classList.toggle('light', !darkMode)
+        root.classList.toggle('dark', darkMode)
+    }, [darkMode])
 
     // Dropdown states
     const [projects, setProjects] = useState([])
@@ -249,6 +272,9 @@ function App() {
     // Speckle comments
     const [comments, setComments] = useState([])
 
+    // BCF topics — owned/fetched by BcfTopicPanel, mirrored here so SpeckleViewer can render pins
+    const [bcfTopics, setBcfTopics] = useState([])
+
     // Parameter keys available for pivot grouping (populated after model ingestion)
     const [paramKeys, setParamKeys] = useState([])
 
@@ -276,7 +302,7 @@ function App() {
     const [viewerSelectedIds, setViewerSelectedIds] = useState(null) // State for Viewer -> Table sync
     const [viewerSelectedElement, setViewerSelectedElement] = useState(null) // Element clicked in 3D viewer → drives chart cross-highlight
 
-    // Active element subset: viewer selection → chart filters → all elements.
+    // Active element subset: viewer selection → Filter Builder → chart filters → all elements.
     // Used by StandaloneChartWidget to keep discovered/numeric fields in sync.
     const contextElements = useMemo(() => {
         if (!fullData?.elements) return null
@@ -284,17 +310,20 @@ function App() {
             const sel = fullData.elements.filter(el => viewerSelectedIds.includes(el.id))
             if (sel.length > 0) return sel
         }
+        let pool = viewerFilteredIds?.length > 0
+            ? fullData.elements.filter(el => viewerFilteredIds.includes(el.id))
+            : fullData.elements
         if (Object.keys(chartFilters).length > 0) {
-            const filtered = fullData.elements.filter(el =>
+            const filtered = pool.filter(el =>
                 Object.entries(chartFilters).every(([field, value]) => {
                     const elVal = el[field]
                     return elVal != null && String(elVal) === String(value)
                 })
             )
-            if (filtered.length > 0) return filtered
+            if (filtered.length > 0) pool = filtered
         }
-        return fullData.elements
-    }, [viewerSelectedIds, chartFilters, fullData])
+        return pool
+    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData])
 
     // Dynamic Chart Summary Selection
     const chartSummary = useMemo(() => {
@@ -306,26 +335,35 @@ function App() {
             }
         }
 
-        // 2. Active chart filters cross-filter all other charts:
-        //    re-aggregate only the elements that match every active filter.
-        //    This makes every chart react to bar/slice clicks in any other chart.
-        if (Object.keys(chartFilters).length > 0 && fullData?.elements) {
-            const filtered = fullData.elements.filter(el =>
-                Object.entries(chartFilters).every(([field, value]) => {
-                    const elVal = el[field]
-                    return elVal != null && String(elVal) === String(value)
-                })
-            )
-            // If the filter matches nothing fall through to the full summary so
-            // charts still render (avoids a blank dashboard on mis-click)
-            if (filtered.length > 0) {
-                return generateSummaryFromElements(filtered)
+        // 2. Filter Builder's result (viewerFilteredIds) and chart-click cross-filters
+        //    both narrow the same element pool — apply Filter Builder's isolation
+        //    first, then let chart-click filters refine within it, so charts react
+        //    to the Filter Builder the same way they already react to each other.
+        if (fullData?.elements && (viewerFilteredIds?.length > 0 || Object.keys(chartFilters).length > 0)) {
+            let pool = viewerFilteredIds?.length > 0
+                ? fullData.elements.filter(el => viewerFilteredIds.includes(el.id))
+                : fullData.elements
+
+            if (Object.keys(chartFilters).length > 0) {
+                const filtered = pool.filter(el =>
+                    Object.entries(chartFilters).every(([field, value]) => {
+                        const elVal = el[field]
+                        return elVal != null && String(elVal) === String(value)
+                    })
+                )
+                // If the filter matches nothing within the current pool, fall back to
+                // the pool itself (avoids a blank dashboard on mis-click)
+                if (filtered.length > 0) pool = filtered
+            }
+
+            if (pool.length > 0) {
+                return generateSummaryFromElements(pool)
             }
         }
 
         // 3. Full project summary from backend
         return data?.summary
-    }, [viewerSelectedIds, chartFilters, fullData, data?.summary])
+    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData, data?.summary])
 
 
     // Extra widgets (Dynamic)
@@ -392,10 +430,13 @@ function App() {
                                     ? '5D Quantities'
                                     : type === 'video'
                                         ? 'PeerTube Video'
-                                        : 'New Panel',
+                                        : type === 'filter'
+                                            ? 'Filter Builder'
+                                            : type === 'bcf_stats'
+                                                ? 'BCF Issue Stats'
+                                                : 'New Panel',
             content: type === 'text' ? '## New Note\n\nClick edit to add content.' : undefined,
             noPadding: type === 'table' || type === 'text' || type === 'pivot' || type === 'schedule' || type === 'video',
-            autoSize: type === 'chart' || type === 'validation' || type === 'quantities'
         }
         setExtraWidgets(prev => [...prev, newWidget])
     }
@@ -468,6 +509,24 @@ function App() {
     // layoutKey: incrementing this forces GridDashboard to remount, re-reading localStorage
     const [layoutKey, setLayoutKey] = useState(0)
 
+    // Applies a dashboard snapshot (from /share or /dashboard-layout) to local
+    // state: seeds localStorage, then mirrors the relevant keys into the React
+    // state that reads them only once on mount (extra widgets, chart panel
+    // visibility), and forces GridDashboard to remount so it re-reads the rest.
+    const applyDashboardPayload = useCallback((payload) => {
+        const ls = (payload.v === 1 && payload.ls) ? payload.ls : payload
+        Object.entries(ls).forEach(([k, v]) => {
+            try { localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v)) } catch {}
+        })
+        if (payload.ui?.darkMode     !== undefined) setDarkMode(payload.ui.darkMode)
+        if (payload.ui?.showViewer   !== undefined) setShowViewer(payload.ui.showViewer)
+        if (payload.ui?.showTimeline !== undefined) setShowTimeline(payload.ui.showTimeline)
+        if (ls['dashboard-extra-widgets'])        setExtraWidgets(JSON.parse(typeof ls['dashboard-extra-widgets'] === 'string' ? ls['dashboard-extra-widgets'] : JSON.stringify(ls['dashboard-extra-widgets'])))
+        if (ls['dashboard-visible-chart-panels']) setVisibleChartPanels(typeof ls['dashboard-visible-chart-panels'] === 'string' ? JSON.parse(ls['dashboard-visible-chart-panels']) : ls['dashboard-visible-chart-panels'])
+        setLayoutKey(k => k + 1)
+        return ls
+    }, [])
+
     // Resolve share links on mount — supports /share_xxx path and legacy ?share=share_xxx
     useEffect(() => {
         // Detect path-based share (/share_xxx) or legacy query param (?share=share_xxx)
@@ -488,18 +547,7 @@ function App() {
             .then(data => {
                 if (!data?.payload) return
                 const payload = data.payload
-                const ls = (payload.v === 1 && payload.ls) ? payload.ls : payload
-                // Seed localStorage
-                Object.entries(ls).forEach(([k, v]) => {
-                    try { localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v)) } catch {}
-                })
-                // Apply ui state
-                if (payload.ui?.darkMode     !== undefined) setDarkMode(payload.ui.darkMode)
-                if (payload.ui?.showViewer   !== undefined) setShowViewer(payload.ui.showViewer)
-                if (payload.ui?.showTimeline !== undefined) setShowTimeline(payload.ui.showTimeline)
-                // Apply extra widgets + chart panel visibility from ls
-                if (ls['dashboard-extra-widgets'])        setExtraWidgets(JSON.parse(typeof ls['dashboard-extra-widgets'] === 'string' ? ls['dashboard-extra-widgets'] : JSON.stringify(ls['dashboard-extra-widgets'])))
-                if (ls['dashboard-visible-chart-panels']) setVisibleChartPanels(typeof ls['dashboard-visible-chart-panels'] === 'string' ? JSON.parse(ls['dashboard-visible-chart-panels']) : ls['dashboard-visible-chart-panels'])
+                const ls = applyDashboardPayload(payload)
                 // Restore custom servers so allServers memo includes the shared server
                 if (ls['speckle-custom-servers']) {
                     const servers = typeof ls['speckle-custom-servers'] === 'string'
@@ -520,11 +568,30 @@ function App() {
                 } else {
                     loadProjects()
                 }
-                // Force GridDashboard remount so it re-reads freshly seeded localStorage
-                setLayoutKey(k => k + 1)
             })
             .catch(() => {})
     }, [])
+
+    // First-time visitor for this project (no local dashboard-* state yet):
+    // load whatever was last saved via "Save as default" for this project,
+    // instead of leaving them on the bare grid defaults. Runs once per project.
+    const triedDefaultLayoutRef = useRef(new Set())
+    useEffect(() => {
+        const projectId = selectedProject?.id
+        if (!projectId || triedDefaultLayoutRef.current.has(projectId)) return
+        triedDefaultLayoutRef.current.add(projectId)
+
+        let hasLocalLayout = false
+        for (let i = 0; i < localStorage.length; i++) {
+            if (localStorage.key(i)?.startsWith('dashboard-')) { hasLocalLayout = true; break }
+        }
+        if (hasLocalLayout) return
+
+        fetch(`${CONFIG.normalizerUrl}/dashboard-layout/${projectId}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data?.payload) applyDashboardPayload(data.payload) })
+            .catch(() => {})
+    }, [selectedProject, applyDashboardPayload])
 
     // Fetch backend-configured servers on mount (best-effort, UI works without it)
     useEffect(() => {
@@ -645,7 +712,7 @@ function App() {
         }
 
         const ids = fullData.elements
-            .filter(el => filters.every(([field, value]) => String(el[field] ?? '') === String(value)))
+            .filter(el => filters.every(([field, value]) => String(getNestedValue(el, field) ?? '') === String(value)))
             .map(el => el.speckle_id || el.id)
             .filter(Boolean)
 
@@ -903,42 +970,31 @@ function App() {
 
     const isIfcSource = (data?.summary?.source_app || '').toLowerCase().includes('ifc')
 
-    // Attempt to fetch and download the original IFC blob stored on the Speckle server.
-    // Returns true if the download was triggered, false if no IFC blob was found.
+    // Attempt to fetch and download the original IFC blob stored on the Speckle server,
+    // proxied through the normalizer (browsers can't call Speckle's blob REST endpoint
+    // directly due to CORS). Returns true if the download was triggered, false if no
+    // IFC blob was found.
     const _downloadOriginalIfc = async (streamId, modelName) => {
-        const gql = `query($id: String!) {
-            stream(id: $id) {
-                blobs(limit: 25) {
-                    items { id fileName fileSize uploadStatus }
-                }
-            }
-        }`
-        const gqlRes = await fetch(`${CONFIG.speckleServer}/graphql`, {
+        const res = await fetch(`${CONFIG.normalizerUrl}/streams/${streamId}/original-ifc`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${CONFIG.speckleToken}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ query: gql, variables: { id: streamId } }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                server_url: activeServer.url,
+                token: activeServer.token || undefined,
+            }),
         })
-        const gqlBody = await gqlRes.json()
-        const blobs = (gqlBody?.data?.stream?.blobs?.items || [])
-            .filter(b => b.uploadStatus === 1 && /\.ifc$/i.test(b.fileName))
-        if (!blobs.length) return false
+        if (res.status === 404) return false
+        if (!res.ok) throw new Error(`Blob download failed: HTTP ${res.status}`)
 
-        // Use the most recently listed IFC blob (Speckle returns newest first)
-        const { id: blobId, fileName } = blobs[0]
-        const dlRes = await fetch(
-            `${CONFIG.speckleServer}/api/stream/${streamId}/blob/${blobId}`,
-            { headers: { 'Authorization': `Bearer ${CONFIG.speckleToken}` } }
-        )
-        if (!dlRes.ok) throw new Error(`Blob download failed: HTTP ${dlRes.status}`)
+        const disposition = res.headers.get('Content-Disposition') || ''
+        const match = disposition.match(/filename="?([^"]+)"?/)
+        const fileName = match ? match[1] : `${modelName}.ifc`
 
-        const blob = await dlRes.blob()
+        const blob = await res.blob()
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = fileName || `${modelName}.ifc`
+        a.download = fileName
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)
@@ -953,6 +1009,7 @@ function App() {
         if (!streamId || !commitId) return
 
         setExportingIfc(true)
+        setLoadError(null)
         try {
             // IFC source: try to serve the original file stored on the Speckle server first
             if (isIfcSource) {
@@ -1123,6 +1180,92 @@ function App() {
         }
     }
 
+    // Bidirectional BCF<->Speckle comment sync, run automatically and
+    // silently whenever a model finishes loading (per user direction — no
+    // buttons, no UI feedback, console logging only). Both directions are
+    // idempotent via the persistent bcf_speckle_sync table (see bcfSync.js),
+    // so safe to re-run on every load without creating duplicates.
+    const syncBcfWithSpeckle = async (bcfProjectId) => {
+        if (!bcfProjectId) return
+        try {
+            const list = await listTopics(bcfProjectId)
+            const withViewpoints = await Promise.all(
+                list.map(async (t) => {
+                    try {
+                        const vps = await listViewpoints(bcfProjectId, t.guid)
+                        return { ...t, viewpoint: vps[0] || null }
+                    } catch {
+                        return { ...t, viewpoint: null }
+                    }
+                })
+            )
+
+            const elements = fullData?.elements || []
+            const speckleServer = { serverUrl: activeServer.url, token: activeServer.token }
+            const pulled = await pullFromSpeckle(bcfProjectId, comments, elements, speckleServer)
+            let topics = [...withViewpoints, ...pulled]
+
+            const pushed = await pushToSpeckle(bcfProjectId, topics, {
+                streamId: data?.project_id,
+                modelId: data?.model_id,
+                versionId: data?.version_id,
+                elements,
+                ...speckleServer,
+            })
+            if (pushed.length) {
+                const pushedByGuid = new Map(pushed.map((t) => [t.guid, t]))
+                topics = topics.map((t) => pushedByGuid.get(t.guid) || t)
+            }
+
+            setBcfTopics(topics)
+            if (pulled.length || pushed.length) {
+                console.log(`BCF<->Speckle sync: pulled ${pulled.length}, pushed ${pushed.length}`)
+            }
+        } catch (e) {
+            console.warn('BCF<->Speckle sync failed:', e)
+        }
+    }
+
+    // Trigger the sync once per model load — gated on fullData.elements being
+    // populated. `comments` loads via a separate fetch (fetchComments,
+    // triggered off `selectedProject`) with no ordering guarantee relative to
+    // fullData finishing — if it's still empty at this exact instant, pull
+    // would (harmlessly) just find nothing new to pull this one time. A
+    // permanent comments.length-keyed gate was tried here before and caused
+    // a worse bug: since `comments` doesn't change again until a NEW native
+    // Speckle comment appears, push (which rides along in the same
+    // syncBcfWithSpeckle call) silently stopped running on every other
+    // reload/panel reopen too — "only updates when Speckle gets a comment".
+    // Re-syncing is now also triggered directly by user actions (see
+    // triggerBcfSync, wired to the panel opening and to comment/topic
+    // submission) so passive staleness here matters far less; this effect's
+    // job is just "run once when the model itself loads".
+    const lastSyncedModelRef = useRef(null)
+    useEffect(() => {
+        const bcfProjectId = data?.normalizer_model_id
+        if (!bcfProjectId) { lastSyncedModelRef.current = null; setBcfTopics([]); return }
+        if (!fullData?.elements?.length) return
+        if (lastSyncedModelRef.current === bcfProjectId) return
+        lastSyncedModelRef.current = bcfProjectId
+        // Drop the previous model's topics immediately — otherwise there's a
+        // window (while this model's sync is in flight, or if it fails) where
+        // the panel shows topics belonging to a different project_id, and any
+        // action on them (open/delete/comment) 404s against the new project.
+        setBcfTopics([])
+        syncBcfWithSpeckle(bcfProjectId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [data?.normalizer_model_id, fullData])
+
+    // Manual re-sync trigger for action-driven moments (panel opened, a
+    // comment/topic just submitted) — unlike the model-load effect above,
+    // this is NOT gated by lastSyncedModelRef, since pull/push are fully
+    // idempotent and these are infrequent, deliberate calls, not a passive
+    // polling loop.
+    const triggerBcfSync = () => {
+        const bcfProjectId = data?.normalizer_model_id
+        if (bcfProjectId) syncBcfWithSpeckle(bcfProjectId)
+    }
+
     const loadVersions = async (projectId, modelName) => {
         setLoadingVersions(true)
         try {
@@ -1220,7 +1363,7 @@ function App() {
             .catch(() => setParamKeys([]))
 
         fetch(
-            `${CONFIG.normalizerUrl}/models/${normModelId}/elements/flat?limit=10000`,
+            `${CONFIG.normalizerUrl}/models/${normModelId}/elements/flat?limit=50000`,
             { signal: abortSignal }
         )
             .then(res => {
@@ -1295,9 +1438,27 @@ function App() {
         }
     }
 
+    // Chart hover → highlight matching elements in 3D viewer without moving the camera.
+    // Uses a ref for fullData so the callback stays stable across data updates.
+    const fullDataRef = useRef(fullData)
+    useEffect(() => { fullDataRef.current = fullData }, [fullData])
+
+    const handleChartHover = useCallback((field, value) => {
+        const elements = fullDataRef.current?.elements
+        if (!elements || !field || !value) return
+        const ids = elements
+            .filter(el => String(getNestedValue(el, field) ?? '') === String(value))
+            .map(el => el.speckle_id || el.id)
+            .filter(Boolean)
+        if (ids.length) speckleViewerRef.current?.highlightObjects(ids)
+    }, [])
+
+    const handleChartHoverEnd = useCallback(() => {
+        speckleViewerRef.current?.clearHover()
+    }, [])
+
     // Generic handler for adaptive charts - enhanced with bidirectional filtering
     const handleChartValueClick = useCallback((field, value) => {
-        const categoricalFields = ['category', 'family', 'type', 'level', 'material', 'discipline', 'phase', 'status', 'ifc_type', 'grade_short', 'profile_name', 'profile_type', 'workset']
         setHighlightedField(prev => {
             const same = prev === field
             return same ? null : field
@@ -1311,8 +1472,7 @@ function App() {
                 const { [field]: _, ...rest } = prev
                 return rest
             }
-            if (categoricalFields.includes(field)) return { ...prev, [field]: value }
-            return prev
+            return { ...prev, [field]: value }
         })
     }, [])
 
@@ -1471,14 +1631,15 @@ function App() {
                     normalizerModelId={data?.normalizer_model_id}
                     onCloseTimeline={() => setShowTimeline(false)}
                     onTimelineSync={handleTimelineSync}
-                    comments={comments}
+                    bcfTopics={bcfTopics}
+                    darkMode={darkMode}
                 />
             </div>
         </GridPanel>
     // eslint-disable-next-line react-hooks/exhaustive-deps
     ), [activeServer.id, selectedProject?.id, data?.version_id, data?.normalizer_model_id,
         fullData, effectiveFilterIds, diffResult, compareVersionId,
-        comments, showTimeline, handleViewerSelection, handleTimelineSync, deactivateCompare])
+        bcfTopics, showTimeline, handleViewerSelection, handleTimelineSync, deactivateCompare, darkMode])
 
     // ── Canvas panels ─────────────────────────────────────────────────────
     const panels = useMemo(() => {
@@ -1521,13 +1682,24 @@ function App() {
                     minCount:     displayOptions.minCount     ?? 0,
                     showLabels:   displayOptions.showLabels   ?? true,
                     donut:        displayOptions.donut        ?? true,
+                    showLegend:   displayOptions.showLegend   ?? false,
+                    showGridLines: displayOptions.showGridLines ?? true,
                     tickFontSize:   displayOptions.tickFontSize   ?? 11,
-                    tickFontColor:  displayOptions.tickFontColor  ?? (darkMode ? '#e4e4e7' : '#18181b'),
-                    tickAngle:      displayOptions.tickAngle      ?? -45,
+                    tickFontColor:  displayOptions.tickFontColor  ?? (darkMode ? '#e4e4e7' : '#000000'),
+                    tickAngle:      displayOptions.tickAngle      ?? (displayOptions.orientation === 'v' ? -45 : 0),
                     valueFontSize:  displayOptions.valueFontSize  ?? 11,
-                    valueFontColor: displayOptions.valueFontColor ?? (darkMode ? '#e4e4e7' : '#18181b'),
+                    valueFontColor: displayOptions.valueFontColor ?? (darkMode ? '#e4e4e7' : '#000000'),
                     labelFontSize:  displayOptions.labelFontSize  ?? 11,
-                    labelFontColor: displayOptions.labelFontColor ?? (darkMode ? '#e4e4e7' : '#18181b'),
+                    labelFontColor: displayOptions.labelFontColor ?? (darkMode ? '#e4e4e7' : '#000000'),
+                    ...(displayOptions.unit != null && { unit: displayOptions.unit }),
+                    decimals:            displayOptions.decimals            ?? null,
+                    thousandsSeparator:  displayOptions.thousandsSeparator  ?? true,
+                    axisMin:             displayOptions.axisMin             ?? null,
+                    axisMax:             displayOptions.axisMax             ?? null,
+                    pieLabelName:        displayOptions.pieLabelName        ?? true,
+                    pieLabelValue:       displayOptions.pieLabelValue       ?? true,
+                    pieLabelPercent:     displayOptions.pieLabelPercent     ?? true,
+                    pieLeaderLine:       displayOptions.pieLeaderLine       ?? true,
                   }
                 : cfg
             return (
@@ -1540,6 +1712,8 @@ function App() {
                     highlightedValue={highlightedValue}
                     viewerSelectedElement={viewerSelectedElement}
                     onValueClick={handleChartValueClick}
+                    onHoverValue={handleChartHover}
+                    onHoverEnd={handleChartHoverEnd}
                     fullDataReady={!!fullData}
                     darkMode={darkMode}
                 />
@@ -1563,6 +1737,8 @@ function App() {
                     highlightedField={highlightedField}
                     highlightedValue={highlightedValue}
                     onValueClick={handleChartValueClick}
+                    onHoverValue={handleChartHover}
+                    onHoverEnd={handleChartHoverEnd}
                     viewerSelectedElement={viewerSelectedElement}
                     darkMode={darkMode}
                 />
@@ -1573,25 +1749,39 @@ function App() {
             if (w.type === 'text') return <MarkdownWidget content={w.content} onUpdate={c => handleUpdateWidget(w.id, { content: c })} />
             if (w.type === 'table') return <ElementTable fullData={fullData} onElementClick={handleElementClick} viewerSelectedIds={viewerSelectedIds} onFilteredIdsChange={handleTableFilteredIds} chartFilters={chartFilters} filteredIds={viewerFilteredIds} />
             if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
-            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} />
+            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
+            if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
             if (w.type === 'schedule') return <ScheduleWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} onFilterElements={ids => setViewerFilteredIds(ids)} />
-            if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} />
+            if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
+            if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />
             return null
         })()
 
         return (
-            <GridPanel title={w.title || 'Panel'}>
+            <GridPanel title={w.title || 'Panel'} icon={w.type === 'bcf_stats' ? <BcfLogoIcon className="w-4 h-4" /> : undefined}>
                 {content}
             </GridPanel>
         )
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [viewerPanelContent, chartSummary, contextElements, highlightedField, highlightedValue, viewerSelectedElement,
-        fullData, handleChartValueClick, handleElementClick, handleUpdateWidget, handleRemoveWidget,
+        fullData, handleChartValueClick, handleChartHover, handleChartHoverEnd,
+        handleElementClick, handleUpdateWidget, handleRemoveWidget,
         data, searchFilteredIds, viewerSelectedIds, chartFilters, paramKeys,
-        visibleChartPanels, handleToggleChartPanel, darkMode])
+        visibleChartPanels, handleToggleChartPanel, darkMode, bcfTopics])
 
     const [layoutCopied, setLayoutCopied] = useState(false)  // false | true | 'error'
+
+    const [showBcfBoard, setShowBcfBoard] = useState(false)
+    const [showIdsCheck, setShowIdsCheck] = useState(false)
+    const [showClashCheck, setShowClashCheck] = useState(false)
+    // Distinct IFC classes in this model, for ClashCheckPanel's group dropdowns.
+    // Memoized so the array reference is stable across unrelated re-renders
+    // while the panel is open (it's a dependency of an effect in there).
+    const clashIfcClasses = useMemo(
+        () => Object.keys(data?.summary?.by_ifc_type || {}).sort(),
+        [data?.summary?.by_ifc_type]
+    )
 
     const [showShareAdmin, setShowShareAdmin] = useState(false)
     const [sharesList, setSharesList] = useState([])
@@ -1622,8 +1812,9 @@ function App() {
         })
     }, [])
 
-    const shareLayout = useCallback(() => {
-        // Sweep all dashboard-* keys + speckle-custom-servers from localStorage
+    // Sweeps all dashboard-* keys + speckle-custom-servers from localStorage into
+    // the same snapshot shape used by both /share links and the per-project default.
+    const buildDashboardPayload = useCallback(() => {
         const ls = {}
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i)
@@ -1633,7 +1824,7 @@ function App() {
                 catch { ls[key] = localStorage.getItem(key) }
             }
         }
-        const payload = {
+        return {
             v: 1,
             server: activeServer,
             projectId: selectedProject?.id ?? null,
@@ -1642,10 +1833,13 @@ function App() {
             ui: { darkMode, showViewer, showTimeline },
             ls,
         }
+    }, [activeServer, selectedProject, selectedModel, selectedVersion, darkMode, showViewer, showTimeline])
+
+    const shareLayout = useCallback(() => {
         fetch(`${CONFIG.normalizerUrl}/share`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ payload }),
+            body: JSON.stringify({ payload: buildDashboardPayload() }),
         })
             .then(r => r.ok ? r.json() : null)
             .then(data => {
@@ -1662,7 +1856,29 @@ function App() {
             setLayoutCopied('error')
             setTimeout(() => setLayoutCopied(false), 3000)
         })
-    }, [activeServer, selectedProject, selectedModel, selectedVersion, darkMode, showViewer, showTimeline])
+    }, [buildDashboardPayload])
+
+    // Persists the current dashboard as this project's default — what a
+    // first-time visitor (no local dashboard-* state yet) will load instead
+    // of the bare grid defaults.
+    const [defaultSaved, setDefaultSaved] = useState(false)  // false | true | 'error'
+    const saveLayoutAsDefault = useCallback(() => {
+        if (!selectedProject?.id) return
+        fetch(`${CONFIG.normalizerUrl}/dashboard-layout/${selectedProject.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ payload: buildDashboardPayload() }),
+        })
+            .then(r => {
+                if (!r.ok) throw new Error('save failed')
+                setDefaultSaved(true)
+                setTimeout(() => setDefaultSaved(false), 2000)
+            })
+            .catch(() => {
+                setDefaultSaved('error')
+                setTimeout(() => setDefaultSaved(false), 3000)
+            })
+    }, [buildDashboardPayload, selectedProject])
 
     return (
         <div className={`min-h-screen ${darkMode ? 'dark' : 'light'}`}>
@@ -1696,6 +1912,7 @@ function App() {
                                 customServers={customServers}
                                 onAddServer={addCustomServer}
                                 onRemoveServer={removeCustomServer}
+                                normalizerUrl={CONFIG.normalizerUrl}
                                 projects={projects}
                                 selectedProject={selectedProject}
                                 loadingProjects={loadingProjects}
@@ -1724,7 +1941,7 @@ function App() {
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
                                         placeholder="Search… (Ctrl+K)"
-                                        className="w-full glass pl-9 pr-8 py-1.5 rounded-lg text-sm bg-zinc-900/20 focus:bg-zinc-900/40 focus:ring-1 focus:ring-primary/50 transition-all placeholder:text-zinc-600"
+                                        className="w-full h-9 glass pl-9 pr-8 rounded-lg text-sm bg-zinc-900/20 focus:bg-zinc-900/40 focus:ring-1 focus:ring-primary/50 transition-all placeholder:text-zinc-600"
                                     />
                                     {searchQuery && (
                                         <button
@@ -1763,48 +1980,80 @@ function App() {
                                 <motion.button whileHover={{ scale: reIngesting ? 1 : 1.05 }} whileTap={{ scale: reIngesting ? 1 : 0.95 }}
                                     onClick={reIngestModel}
                                     disabled={!data || reIngesting}
-                                    className={`glass-card p-2 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${reIngesting ? 'text-primary' : ''}`}
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${reIngesting ? 'text-primary' : ''}`}
                                     title="Force re-ingest model"
                                 >
-                                    {reIngesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                                    {reIngesting ? <Loader2 className="w-6 h-6 animate-spin" /> : <RotateCcw className="w-6 h-6" />}
                                 </motion.button>
                                 <motion.button whileHover={{ scale: exportingIfc ? 1 : 1.05 }} whileTap={{ scale: exportingIfc ? 1 : 0.95 }}
                                     onClick={exportIfc}
                                     disabled={!data || exportingIfc}
-                                    className={`glass-card p-2 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${exportingIfc ? 'opacity-60' : ''}`}
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${exportingIfc ? 'opacity-60' : ''}`}
                                     title={isIfcSource ? 'Download original IFC from Speckle' : 'Export IFC4X3'}
                                 >
-                                    {exportingIfc ? <Loader2 className="w-4 h-4 animate-spin" /> : <IfcLogoIcon className="w-4 h-4" />}
+                                    {exportingIfc ? <Loader2 className="w-6 h-6 animate-spin" /> : <IfcLogoIcon className="w-6 h-6" />}
                                 </motion.button>
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setShowTimeline(v => !v)}
                                     disabled={!data?.normalizer_model_id}
-                                    className={`glass-card p-2 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${showTimeline ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${showTimeline ? 'text-amber-400 bg-amber-400/10' : ''}`}
                                     title="4D Timeline"
                                 >
-                                    <Clock className="w-4 h-4" />
+                                    <Clock className="w-6 h-6" />
+                                </motion.button>
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => setShowBcfBoard(true)}
+                                    disabled={!data?.normalizer_model_id}
+                                    className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    title="BCF Issue Board (Kanban)"
+                                >
+                                    <BcfLogoIcon className="w-6 h-6" />
+                                </motion.button>
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => setShowIdsCheck(true)}
+                                    disabled={!data?.normalizer_model_id}
+                                    className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    title="IDS Check"
+                                >
+                                    <IdsLogoIcon className="w-6 h-6" />
+                                </motion.button>
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => setShowClashCheck(true)}
+                                    disabled={!data?.normalizer_model_id}
+                                    className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    title="Clash Detection"
+                                >
+                                    <ClashLogoIcon className="w-7 h-7" />
                                 </motion.button>
 
                                 <motion.button whileHover={{ scale: layoutCopied ? 1 : 1.05 }} whileTap={{ scale: layoutCopied ? 1 : 0.95 }}
                                     onClick={shareLayout}
-                                    className={`glass-card p-2 hover:bg-white/10 transition-colors ${layoutCopied === true ? 'text-emerald-400' : layoutCopied === 'error' ? 'text-red-400' : ''}`}
+                                    className={`glass-card icon-btn hover:bg-white/10 transition-colors ${layoutCopied === true ? 'text-emerald-400' : layoutCopied === 'error' ? 'text-red-400' : ''}`}
                                     title={layoutCopied === 'error' ? 'Share failed — is the backend running?' : 'Copy share link'}
                                 >
-                                    {layoutCopied === true ? <Check className="w-4 h-4" /> : layoutCopied === 'error' ? <AlertCircle className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+                                    {layoutCopied === true ? <Check className="w-6 h-6" /> : layoutCopied === 'error' ? <AlertCircle className="w-6 h-6" /> : <Share2 className="w-6 h-6" />}
+                                </motion.button>
+                                <motion.button whileHover={{ scale: defaultSaved ? 1 : 1.05 }} whileTap={{ scale: defaultSaved ? 1 : 0.95 }}
+                                    onClick={saveLayoutAsDefault}
+                                    disabled={!selectedProject}
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${defaultSaved === true ? 'text-emerald-400' : defaultSaved === 'error' ? 'text-red-400' : ''}`}
+                                    title={defaultSaved === 'error' ? 'Save failed — is the backend running?' : 'Save as project default (what first-time visitors see)'}
+                                >
+                                    {defaultSaved === true ? <Check className="w-6 h-6" /> : defaultSaved === 'error' ? <AlertCircle className="w-6 h-6" /> : <Save className="w-6 h-6" />}
                                 </motion.button>
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={openShareAdmin}
-                                    className="glass-card p-2 hover:bg-white/10 transition-colors"
+                                    className="glass-card icon-btn hover:bg-white/10 transition-colors"
                                     title="Manage share links"
                                 >
-                                    <List className="w-4 h-4" />
+                                    <List className="w-6 h-6" />
                                 </motion.button>
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setDarkMode(!darkMode)}
-                                    className="glass-card p-2 hover:bg-white/10"
+                                    className="glass-card icon-btn hover:bg-white/10"
                                     title={darkMode ? 'Light mode' : 'Dark mode'}
                                 >
-                                    {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                                    {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
                                 </motion.button>
                             </div>
                         </div>
@@ -1813,31 +2062,31 @@ function App() {
                     {/* Ingest progress bar */}
                     <IngestProgress phase={ingestPhase} />
 
-                    {/* Row 2 — Metrics strip */}
+                    {/* Row 2 — Metrics strip + active filters share one row so toggling
+                        filters changes its content, not the header's height, and the
+                        viewer below never shifts up/down. */}
                     {data && (
-                        <div className="border-t border-white/5 px-4 lg:px-6 py-1.5">
+                        <div className="border-t border-white/5 px-4 lg:px-6 py-1.5 flex items-center gap-4 flex-wrap">
                             <AdaptiveMetrics data={data} strip />
+                            <AnimatePresence>
+                                {Object.keys(chartFilters).length > 0 && (
+                                    <motion.div
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        exit={{ opacity: 0 }}
+                                        transition={{ duration: 0.2 }}
+                                        className="flex items-center min-w-0 ml-auto"
+                                    >
+                                        <ActiveFilters
+                                            chartFilters={chartFilters}
+                                            onRemoveFilter={handleRemoveChartFilter}
+                                            onClearAll={handleClearAllChartFilters}
+                                        />
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
                         </div>
                     )}
-
-                    {/* Active filter tray — sticky with header */}
-                    <AnimatePresence>
-                        {Object.keys(chartFilters).length > 0 && (
-                            <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                                exit={{ opacity: 0, height: 0 }}
-                                transition={{ duration: 0.2 }}
-                                className="overflow-hidden"
-                            >
-                                <ActiveFilters
-                                    chartFilters={chartFilters}
-                                    onRemoveFilter={handleRemoveChartFilter}
-                                    onClearAll={handleClearAllChartFilters}
-                                />
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
                 </header>
 
                 {/* Main Content */}
@@ -1896,6 +2145,7 @@ function App() {
                             key={layoutKey}
                             panels={panels}
                             renderPanel={renderPanel}
+                            darkMode={darkMode}
                             onClosePanel={(panel) => {
                                 if (panel.type === 'chart' && !panel.widget) handleToggleChartPanel(panel.chartKey)
                                 else if (panel.widget) handleRemoveWidget(panel.widget.id)
@@ -1919,7 +2169,7 @@ function App() {
                 <PublishSelectionButton
                     normalizerUrl={CONFIG.normalizerUrl}
                     modelId={data?.normalizer_model_id}
-                    speckleIds={viewerFilteredIds?.length > 0 ? viewerFilteredIds : viewerSelectedIds}
+                    speckleIds={effectiveFilterIds?.length > 0 ? effectiveFilterIds : viewerSelectedIds}
                 />
 
                 {/* Element Properties Panel */}
@@ -1940,7 +2190,62 @@ function App() {
                     )}
                 </AnimatePresence>
 
+                <BcfTopicPanel
+                    projectId={data?.normalizer_model_id}
+                    viewerRef={speckleViewerRef}
+                    topics={bcfTopics}
+                    fullData={fullData}
+                    streamId={data?.project_id}
+                    onTopicsChange={setBcfTopics}
+                    onRequestSync={triggerBcfSync}
+                    serverUrl={activeServer.url}
+                    serverToken={activeServer.token}
+                />
 
+                <AnimatePresence>
+                    {showBcfBoard && (
+                        <BcfKanbanBoard
+                            projectId={data?.normalizer_model_id}
+                            viewerRef={speckleViewerRef}
+                            topics={bcfTopics}
+                            onTopicsChange={setBcfTopics}
+                            onClose={() => setShowBcfBoard(false)}
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {showIdsCheck && (
+                        <IdsCheckPanel
+                            projectId={data?.normalizer_model_id}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            viewerRef={speckleViewerRef}
+                            topics={bcfTopics}
+                            onTopicsChange={setBcfTopics}
+                            onRequestSync={triggerBcfSync}
+                            serverUrl={activeServer.url}
+                            serverToken={activeServer.token}
+                            onClose={() => setShowIdsCheck(false)}
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {showClashCheck && (
+                        <ClashCheckPanel
+                            projectId={data?.normalizer_model_id}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            viewerRef={speckleViewerRef}
+                            topics={bcfTopics}
+                            onTopicsChange={setBcfTopics}
+                            onRequestSync={triggerBcfSync}
+                            serverUrl={activeServer.url}
+                            serverToken={activeServer.token}
+                            ifcClasses={clashIfcClasses}
+                            onClose={() => setShowClashCheck(false)}
+                        />
+                    )}
+                </AnimatePresence>
 
                 <ChatWidget
                     normalizerUrl={CONFIG.normalizerUrl}
@@ -1964,6 +2269,11 @@ function App() {
                         profiles:      Object.keys(data.summary.by_profile   || {}),
                         grades:        Object.keys(data.summary.by_grade     || {}),
                         ifcClasses:    Object.keys(data.summary.by_ifc_type  || {}),
+                        selectedElement: viewerSelectedElement ? {
+                            name:      viewerSelectedElement.name || null,
+                            speckleId: viewerSelectedElement.id || viewerSelectedElement.speckle_id || null,
+                            category:  viewerSelectedElement.category || null,
+                        } : null,
                     } : null}
                 />
 

@@ -58,20 +58,22 @@ def _resolve_canonical(pset: str | None, key: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
-                 source: str, author: str, message: str) -> str:
+                 source: str, author: str, message: str,
+                 server_url: str | None = None) -> str:
     """Insert or update a bim_model row. Returns model_id (UUID string)."""
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO bim_models (stream_id, commit_id, branch_name, source, author, message)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO bim_models (stream_id, commit_id, branch_name, source, author, message, server_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (stream_id, commit_id) DO UPDATE SET
                 branch_name  = EXCLUDED.branch_name,
                 source       = EXCLUDED.source,
                 author       = EXCLUDED.author,
                 message      = EXCLUDED.message,
+                server_url   = EXCLUDED.server_url,
                 ingested_at  = NOW()
             RETURNING model_id
-        """, (stream_id, commit_id, branch_name, source, author, message))
+        """, (stream_id, commit_id, branch_name, source, author, message, server_url))
         return str(cur.fetchone()[0])
 
 
@@ -114,20 +116,22 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_geometry
-                (element_id, bbox_min, bbox_max, centroid, volume_m3, area_m2, mesh)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                (element_id, bbox_min, bbox_max, centroid, centroid_si, volume_m3, area_m2, mesh)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (element_id) DO UPDATE SET
-                bbox_min  = EXCLUDED.bbox_min,
-                bbox_max  = EXCLUDED.bbox_max,
-                centroid  = EXCLUDED.centroid,
-                volume_m3 = EXCLUDED.volume_m3,
-                area_m2   = EXCLUDED.area_m2,
-                mesh      = EXCLUDED.mesh
+                bbox_min    = EXCLUDED.bbox_min,
+                bbox_max    = EXCLUDED.bbox_max,
+                centroid    = EXCLUDED.centroid,
+                centroid_si = EXCLUDED.centroid_si,
+                volume_m3   = EXCLUDED.volume_m3,
+                area_m2     = EXCLUDED.area_m2,
+                mesh        = EXCLUDED.mesh
         """, (
             element_id,
             geo.get("bbox_min"),
             geo.get("bbox_max"),
             geo.get("centroid"),
+            geo.get("centroid_si"),
             geo.get("volume_m3"),
             geo.get("area_m2"),
             mesh_json,
@@ -137,6 +141,23 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
 # ---------------------------------------------------------------------------
 # Parameters — flatten + upsert
 # ---------------------------------------------------------------------------
+
+def _speckle_obj_to_dict(obj: Any) -> dict | None:
+    """
+    Convert a SpecklePy Base object to a plain dict, filtering internal keys.
+    Returns the object unchanged if it is already a dict, or None otherwise.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "__dict__"):
+        return {
+            k: v for k, v in obj.__dict__.items()
+            if not k.startswith("_") and k not in ("id", "speckle_type", "applicationId")
+        }
+    return None
+
 
 def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None = None) -> list[dict]:
     """
@@ -148,6 +169,7 @@ def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None 
       - Tekla properties dict: {"MATERIAL": "S355", "GRADE": "S355"}
       - IFC property sets dict: {"Pset_WallCommon": {"FireRating": "EI90"}}
       - Plain key→value dicts
+      - SpecklePy Base objects at any level (converted to dict transparently)
 
     `default_unit` is the model/object-level length unit (e.g. obj.units —
     "mm", "m", "ft") used for plain numeric values that don't carry their own
@@ -158,47 +180,58 @@ def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None 
     if raw is None:
         return rows
 
-    if isinstance(raw, dict):
-        for k, v in raw.items():
-            if k.startswith("_") or k in ("id", "speckle_type", "applicationId"):
-                continue
-            if isinstance(v, dict):
-                # Revit parameter object: {"name": "...", "value": ..., "type": ...}
-                if "name" in v and "value" in v and isinstance(v["name"], str):
-                    key      = v["name"]
-                    raw_val  = v["value"]
-                    canonical = _resolve_canonical(pset, key)
-                    value_numeric = _numeric_val(raw_val)
-                    unit = v.get("units") or default_unit
-                    value_si, unit_si = _normalize_numeric(canonical, value_numeric, unit)
-                    rows.append({
-                        "pset":          pset,
-                        "key":           key,
-                        "value":         _str_val(raw_val),
-                        "datatype":      str(v.get("type", "string")),
-                        "value_numeric": value_numeric,
-                        "canonical_key": canonical,
-                        "value_si":      value_si,
-                        "unit_si":       unit_si,
-                    })
-                else:
-                    # Nested dict → recurse with k as new pset name (IFC property sets)
-                    rows.extend(_flatten_params(v, pset=k, default_unit=default_unit))
-            elif isinstance(v, (str, int, float, bool)):
-                key = str(k)
+    # SpecklePy Base objects arrive when IFC connectors serialise psets/qtos as
+    # Speckle dynamic objects rather than plain JSON dicts — normalise them first.
+    if not isinstance(raw, dict):
+        raw = _speckle_obj_to_dict(raw)
+        if not isinstance(raw, dict):
+            return rows
+
+    for k, v in raw.items():
+        if k.startswith("_") or k in ("id", "speckle_type", "applicationId"):
+            continue
+
+        # SpecklePy Base → plain dict so the isinstance checks below work
+        if not isinstance(v, (dict, str, int, float, bool, type(None))):
+            v = _speckle_obj_to_dict(v) or v
+
+        if isinstance(v, dict):
+            # Revit parameter object: {"name": "...", "value": ..., "type": ...}
+            if "name" in v and "value" in v and isinstance(v["name"], str):
+                key      = v["name"]
+                raw_val  = v["value"]
                 canonical = _resolve_canonical(pset, key)
-                value_numeric = _numeric_val(v)
-                value_si, unit_si = _normalize_numeric(canonical, value_numeric, default_unit)
+                value_numeric = _numeric_val(raw_val)
+                unit = v.get("units") or default_unit
+                value_si, unit_si = _normalize_numeric(canonical, value_numeric, unit)
                 rows.append({
                     "pset":          pset,
                     "key":           key,
-                    "value":         str(v),
-                    "datatype":      type(v).__name__,
+                    "value":         _str_val(raw_val),
+                    "datatype":      str(v.get("type", "string")),
                     "value_numeric": value_numeric,
                     "canonical_key": canonical,
                     "value_si":      value_si,
                     "unit_si":       unit_si,
                 })
+            else:
+                # Nested dict → recurse with k as new pset name (IFC property sets)
+                rows.extend(_flatten_params(v, pset=k, default_unit=default_unit))
+        elif isinstance(v, (str, int, float, bool)):
+            key = str(k)
+            canonical = _resolve_canonical(pset, key)
+            value_numeric = _numeric_val(v)
+            value_si, unit_si = _normalize_numeric(canonical, value_numeric, default_unit)
+            rows.append({
+                "pset":          pset,
+                "key":           key,
+                "value":         str(v),
+                "datatype":      type(v).__name__,
+                "value_numeric": value_numeric,
+                "canonical_key": canonical,
+                "value_si":      value_si,
+                "unit_si":       unit_si,
+            })
     return rows
 
 
@@ -410,26 +443,53 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
         all_rows.extend(_flatten_params(udas, pset="udas", default_unit=default_unit))
 
     # ── IFC standard property sets (Pset_WallCommon, Qto_*, etc.) ─────────
+    # psets may be a plain dict OR a SpecklePy Base object (IFC connector sends
+    # psets as dynamic Speckle objects, not plain JSON maps).
     psets = getattr(obj, "psets", None)
-    if isinstance(psets, dict):
-        for pset_name, pset_val in psets.items():
-            all_rows.extend(_flatten_params(pset_val, pset=pset_name, default_unit=default_unit))
-    elif isinstance(psets, list):
+    if isinstance(psets, list):
         for pset_obj in psets:
             pset_name = getattr(pset_obj, "name", None) or "Pset"
             raw = pset_obj.__dict__ if hasattr(pset_obj, "__dict__") else pset_obj
             all_rows.extend(_flatten_params(raw, pset=pset_name, default_unit=default_unit))
+    else:
+        psets_dict = _speckle_obj_to_dict(psets)
+        if psets_dict:
+            for pset_name, pset_val in psets_dict.items():
+                all_rows.extend(_flatten_params(pset_val, pset=pset_name, default_unit=default_unit))
 
     # ── ArchiCAD parameters ────────────────────────────────────────────────
     ac_params = getattr(obj, "archicadParameters", None)
     if isinstance(ac_params, dict):
         all_rows.extend(_flatten_params(ac_params, pset="archicadParameters", default_unit=default_unit))
 
-    # ── IFC quantity sets (exported by Revit/Tekla IFC exporters) ─────────
+    # ── IFC quantity sets (Qto_*BaseQuantities — volume, area, length) ────
+    # qtos may also be a SpecklePy Base object rather than a plain dict.
     qtos = getattr(obj, "qtos", None)
-    if isinstance(qtos, dict):
-        for qto_name, qto_val in qtos.items():
+    qtos_dict = _speckle_obj_to_dict(qtos)
+    if qtos_dict:
+        for qto_name, qto_val in qtos_dict.items():
             all_rows.extend(_flatten_params(qto_val, pset=qto_name, default_unit=default_unit))
+
+    # ── Derived: element weight from UnitMass × Length (IFC steel) ───────
+    # IFC's Pset_SteelStructuralElementCommon.UnitMass is in kg/m (per IFC
+    # standard) but cannot be auto-converted to kg because it is a compound
+    # unit (kg/m). When no explicit weight parameter is present, derive it.
+    if not any(r.get("canonical_key") == "weight" for r in all_rows):
+        um_row  = next((r for r in all_rows if r.get("canonical_key") == "unit_mass"
+                        and r.get("value_numeric") is not None), None)
+        len_row = next((r for r in all_rows if r.get("canonical_key") == "length"
+                        and r.get("value_si") is not None), None)
+        if um_row and len_row:
+            weight_kg = um_row["value_numeric"] * len_row["value_si"]
+            all_rows.append({
+                "pset": None, "key": "Computed Weight",
+                "value": str(round(weight_kg, 3)),
+                "datatype": "float",
+                "value_numeric": weight_kg,
+                "canonical_key": "weight",
+                "value_si": weight_kg,
+                "unit_si": "kg",
+            })
 
     # ── Derived: material_category (steel/concrete/timber/...) ────────────
     material_val = next((r["value"] for r in all_rows if r.get("canonical_key") == "material" and r.get("value")), None)

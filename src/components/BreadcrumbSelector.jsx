@@ -1,6 +1,14 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Globe, FolderOpen, GitBranch, GitCommit, ChevronRight, Check, Plus, X, Search, Loader2 } from 'lucide-react'
+import { Globe, FolderOpen, GitBranch, GitCommit, ChevronRight, Check, Plus, X, Search, Loader2, Zap } from 'lucide-react'
+
+function timeAgo(iso) {
+    if (!iso) return null
+    const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))
+    if (mins < 1) return 'just now'
+    if (mins < 60) return `${mins}m ago`
+    return `${Math.round(mins / 60)}h ago`
+}
 
 function Popover({ open, children }) {
     return (
@@ -21,27 +29,32 @@ function Popover({ open, children }) {
     )
 }
 
-function Segment({ id, icon: Icon, label, sublabel, description, active, loading, disabled, open, onToggle, children }) {
+function Segment({ id, icon: Icon, category, label, sublabel, description, active, loading, disabled, open, onToggle, children }) {
     return (
         <div className="relative">
             <button
                 onClick={() => !disabled && onToggle(id)}
                 disabled={disabled}
                 title={disabled ? 'Select previous step first' : description}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-all select-none
+                className={`flex flex-col items-start gap-0.5 px-2.5 py-1 rounded-lg text-sm transition-all select-none
                     ${open ? 'bg-white/10' : 'hover:bg-white/5'}
                     ${disabled ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'}
                     ${active && !disabled ? 'text-[var(--speckle-foreground)]' : 'text-[var(--speckle-foreground-3)]'}
                 `}
             >
-                {loading
-                    ? <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" />
-                    : <Icon className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
-                }
-                <span className="max-w-[160px] truncate font-medium">{label}</span>
-                {sublabel && (
-                    <span className="text-zinc-600 text-[11px] hidden xl:inline truncate max-w-[80px]">{sublabel}</span>
+                {category && (
+                    <span className="text-[9px] uppercase tracking-wider leading-none text-zinc-600">{category}</span>
                 )}
+                <span className="flex items-center gap-1.5 leading-none">
+                    {loading
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" />
+                        : <Icon className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                    }
+                    <span className="max-w-[160px] truncate font-medium">{label}</span>
+                    {sublabel && (
+                        <span className="text-zinc-600 text-[11px] hidden xl:inline truncate max-w-[80px]">{sublabel}</span>
+                    )}
+                </span>
             </button>
             <Popover open={open}>{children}</Popover>
         </div>
@@ -55,6 +68,7 @@ export function BreadcrumbSelector({
     customServers,
     onAddServer,
     onRemoveServer,
+    normalizerUrl,
     projects,
     selectedProject,
     loadingProjects,
@@ -72,6 +86,8 @@ export function BreadcrumbSelector({
     const [showAddServer, setShowAddServer] = useState(false)
     const [serverForm, setServerForm] = useState({ name: '', url: '', token: '' })
     const [projectSearch, setProjectSearch] = useState('')
+    const [autoSyncStatus, setAutoSyncStatus] = useState({})  // server_url -> {enabled, watched_streams, last_scanned_at}
+    const [autoSyncBusy, setAutoSyncBusy] = useState(null)    // server_url currently being toggled
     const containerRef = useRef(null)
 
     useEffect(() => {
@@ -84,9 +100,45 @@ export function BreadcrumbSelector({
         return () => document.removeEventListener('mousedown', handler)
     }, [openSeg])
 
+    useEffect(() => {
+        if (openSeg !== 'server' || !normalizerUrl) return
+        fetch(`${normalizerUrl}/auto-sync/servers`)
+            .then(r => r.ok ? r.json() : [])
+            .then(rows => {
+                const map = {}
+                for (const row of rows) map[row.server_url] = row
+                setAutoSyncStatus(map)
+            })
+            .catch(() => {})
+    }, [openSeg, normalizerUrl])
+
+    const toggleAutoSync = async (server) => {
+        if (!normalizerUrl) return
+        const current = autoSyncStatus[server.url]
+        const enabled = !current?.enabled
+        setAutoSyncBusy(server.url)
+        try {
+            const resp = await fetch(`${normalizerUrl}/auto-sync/servers`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ server_url: server.url, token: server.token || '', enabled }),
+            })
+            if (!resp.ok) {
+                const body = await resp.json().catch(() => ({}))
+                throw new Error(body.detail || `HTTP ${resp.status}`)
+            }
+            setAutoSyncStatus(prev => ({ ...prev, [server.url]: { ...current, enabled, server_url: server.url } }))
+        } catch (err) {
+            console.error('Auto-sync toggle failed:', err)
+            alert(`Could not update auto-sync: ${err.message}`)
+        } finally {
+            setAutoSyncBusy(null)
+        }
+    }
+
     const toggle = (id) => {
         setOpenSeg(v => v === id ? null : id)
-        if (openSeg !== 'project') setProjectSearch('')
+        if (id !== 'project') setProjectSearch('')
     }
 
     const close = () => setOpenSeg(null)
@@ -108,6 +160,7 @@ export function BreadcrumbSelector({
             {/* Server */}
             <Segment
                 id="server" icon={Globe}
+                category="Server"
                 label={activeServer.name}
                 description="Speckle server — switch or add a connection"
                 active={true}
@@ -117,31 +170,53 @@ export function BreadcrumbSelector({
                 <div className="p-2">
                     <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider px-2 pb-1.5">Speckle Server</p>
                     <div className="space-y-0.5">
-                        {allServers.map(s => (
-                            <button
-                                key={s.id}
-                                onClick={() => { onSwitchServer(s); close() }}
-                                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left
-                                    ${s.id === activeServer.id ? 'bg-primary/15 text-primary' : 'hover:bg-white/5 text-[var(--speckle-foreground-2)]'}`}
-                            >
-                                {s.id === activeServer.id
-                                    ? <Check className="w-3 h-3 shrink-0" />
-                                    : <span className="w-3 shrink-0" />
-                                }
-                                <span className="flex-1 truncate font-medium">{s.name}</span>
-                                <span className="text-[var(--speckle-foreground-3)] text-[10px] font-mono truncate max-w-[100px]">
-                                    {s.url.replace(/^https?:\/\//, '')}
-                                </span>
-                                {customServers.some(c => c.id === s.id) && (
-                                    <button
-                                        onClick={e => { e.stopPropagation(); onRemoveServer(s.id) }}
-                                        className="text-[var(--speckle-foreground-3)] hover:text-red-400 transition-colors shrink-0 p-0.5"
-                                    >
-                                        <X className="w-3 h-3" />
-                                    </button>
+                        {allServers.map(s => {
+                            const sync = autoSyncStatus[s.url]
+                            return (
+                            <div key={s.id} className="group">
+                                <button
+                                    onClick={() => { onSwitchServer(s); close() }}
+                                    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left
+                                        ${s.id === activeServer.id ? 'bg-primary/15 text-primary' : 'hover:bg-white/5 text-[var(--speckle-foreground-2)]'}`}
+                                >
+                                    {s.id === activeServer.id
+                                        ? <Check className="w-3 h-3 shrink-0" />
+                                        : <span className="w-3 shrink-0" />
+                                    }
+                                    <span className="flex-1 truncate font-medium">{s.name}</span>
+                                    <span className="text-[var(--speckle-foreground-3)] text-[10px] font-mono truncate max-w-[100px]">
+                                        {s.url.replace(/^https?:\/\//, '')}
+                                    </span>
+                                    {customServers.some(c => c.id === s.id) && (
+                                        <button
+                                            onClick={e => { e.stopPropagation(); onRemoveServer(s.id) }}
+                                            className="text-[var(--speckle-foreground-3)] hover:text-red-400 transition-colors shrink-0 p-0.5"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
+                                </button>
+                                {normalizerUrl && (
+                                    <div className="flex items-center gap-1.5 px-2 pl-7 pb-1">
+                                        <button
+                                            onClick={e => { e.stopPropagation(); toggleAutoSync(s) }}
+                                            disabled={autoSyncBusy === s.url}
+                                            title="Auto-sync new versions/models from this server via webhook"
+                                            className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded transition-colors disabled:opacity-50
+                                                ${sync?.enabled ? 'text-amber-400 hover:text-amber-300' : 'text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground-2)]'}`}
+                                        >
+                                            <Zap className={`w-2.5 h-2.5 ${sync?.enabled ? 'fill-amber-400' : ''}`} />
+                                            Auto-sync {sync?.enabled ? 'on' : 'off'}
+                                        </button>
+                                        {sync?.enabled && (
+                                            <span className="text-[10px] text-[var(--speckle-foreground-3)]">
+                                                · {sync.watched_streams ?? 0} watched{sync.last_scanned_at ? ` · ${timeAgo(sync.last_scanned_at)}` : ''}
+                                            </span>
+                                        )}
+                                    </div>
                                 )}
-                            </button>
-                        ))}
+                            </div>
+                        )})}
                     </div>
                     <div className="border-t border-white/5 mt-2 pt-2">
                         {!showAddServer ? (
@@ -195,6 +270,7 @@ export function BreadcrumbSelector({
             {/* Project */}
             <Segment
                 id="project" icon={FolderOpen}
+                category="Project"
                 label={selectedProject?.name || (loadingProjects ? 'Loading…' : 'Project')}
                 description="Project — the Speckle project (stream) to work with"
                 active={!!selectedProject}
@@ -243,6 +319,7 @@ export function BreadcrumbSelector({
                 {/* Model */}
                 <Segment
                     id="model" icon={GitBranch}
+                    category="Model"
                     label={selectedModel?.name || (loadingModels ? 'Loading…' : 'Model')}
                     description="Model — the branch/model within the project"
                     active={!!selectedModel}
@@ -284,6 +361,7 @@ export function BreadcrumbSelector({
                 {/* Version */}
                 <Segment
                     id="version" icon={GitCommit}
+                    category="Version"
                     label={selectedVersion ? new Date(selectedVersion.createdAt).toLocaleDateString() : 'Latest'}
                     sublabel={selectedVersion?.message?.slice(0, 25)}
                     description="Version — a specific commit, or the latest"

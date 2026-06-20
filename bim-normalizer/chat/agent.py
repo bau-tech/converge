@@ -10,9 +10,25 @@ Items implemented here:
 import json
 import logging
 from collections import Counter
+from decimal import Decimal
 from typing import Generator
 
 import requests
+
+
+def _jdump(obj) -> str:
+    """json.dumps that converts Decimal (psycopg2 NUMERIC) to float."""
+    return json.dumps(obj, default=lambda v: float(v) if isinstance(v, Decimal) else str(v))
+
+from db.query import (
+    get_model_qa,
+    get_parameter_completeness,
+    get_model_stream_id,
+    get_model_trend,
+    find_nearby_elements,
+    get_qa_elements,
+    get_element_details,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +180,136 @@ _TOOLS = [
                     },
                 },
                 "required": ["compared_to"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_data_quality",
+            "description": (
+                "Run a BIM data-quality assessment on the current model: a 0-1 quality score plus "
+                "issue breakdowns for unclassified elements, missing geometry, missing names, "
+                "missing storeys, missing materials, and duplicate IDs (with sample element IDs). "
+                "Use when the user asks 'what's wrong with this model?', 'how good is the data?', "
+                "'data quality', or 'QA report'."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_parameter_completeness",
+            "description": (
+                "Get the fill-rate (coverage %) of BIM parameters across elements, sorted worst-first. "
+                "Use when the user asks 'which parameters are missing?', 'is fire rating filled in?', "
+                "'how complete is this model's data?', or to find parameters that need cleanup."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Optional: restrict to elements of this category."},
+                    "ifc_class": {"type": "string", "description": "Optional: restrict to elements of this IFC class."},
+                    "min_coverage": {
+                        "type": "number",
+                        "description": "Optional: only return parameters with coverage at or above this percent (0-100). Use 0 (default) to see the worst-covered parameters first.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_version_history",
+            "description": (
+                "Get the version history for the current model's stream: element counts and "
+                "category breakdowns for every ingested version, ordered oldest to newest. "
+                "Use when the user asks 'how has this model evolved?', 'show version history', "
+                "or 'what's the trend over versions?'. For comparing two specific versions in "
+                "detail, use get_model_changes instead."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_nearby_elements",
+            "description": (
+                "Find elements within a radius (in meters) of a reference element or coordinate. "
+                "Use when the user asks 'what's near X?', 'find elements within Nm of...', "
+                "or refers to 'the selected element/object' — use its Speckle ID from the "
+                "Currently Selected Element context as the reference. "
+                "Only works for elements ingested with SI geometry data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "Speckle ID or (partial) name of the reference element to search around.",
+                    },
+                    "radius_m": {
+                        "type": "number",
+                        "description": "Search radius in meters.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional: restrict results to this element category.",
+                    },
+                },
+                "required": ["reference", "radius_m"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_qa_elements",
+            "description": (
+                "Get the actual elements affected by a specific data-quality issue, for highlighting "
+                "in the 3D viewer. Use after check_data_quality when the user wants to see/select the "
+                "problem elements, e.g. 'show me the elements with no name', 'highlight unclassified elements'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue": {
+                        "type": "string",
+                        "enum": ["unclassified", "no_geometry", "no_name", "no_storey", "no_material", "duplicate_ids"],
+                        "description": "Which QA issue to drill into.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max elements to return (default 50).",
+                    },
+                },
+                "required": ["issue"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_element_details",
+            "description": (
+                "Get full details for one specific element — category, IFC class, storey, bounding "
+                "box, centroid, volume, area, and every parameter/value. Use when the user asks about "
+                "'the selected element/object' (use its Speckle ID from context), or names/IDs a "
+                "specific element and wants to know its properties."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "Speckle ID or (partial) name of the element to look up.",
+                    },
+                },
+                "required": ["reference"],
             },
         },
     },
@@ -498,7 +644,7 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
 
     if fn == "get_summary":
         rows = _query_summary(conn, model_id, args.get("group_by", "category"))
-        return json.dumps(rows), None
+        return _jdump(rows), None
 
     if fn == "query_by_parameter":
         ids = _query_by_parameter(
@@ -528,7 +674,7 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
     if fn == "get_materials":
         rows = _query_materials(conn, model_id, category=args.get("category"))
         if rows:
-            return json.dumps(rows), None
+            return _jdump(rows), None
         return (
             "No material data found. Materials may not be stored under a 'material' key — "
             "use query_by_parameter with relevant keys from Available Parameter Keys.", None
@@ -537,7 +683,7 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
     if fn == "get_profiles":
         rows = _query_profiles(conn, model_id)
         if rows:
-            return json.dumps(rows), None
+            return _jdump(rows), None
         return (
             "No profile or grade data found. Check Available Parameter Keys "
             "for steel-related keys.", None
@@ -552,8 +698,77 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
         except Exception as exc:
             return f"Diff failed: {exc}", None
         added_ids = diff.pop("added_speckle_ids", [])
-        result = json.dumps(diff)
+        result = _jdump(diff)
         return result, (added_ids if added_ids else None)
+
+    if fn == "check_data_quality":
+        report = get_model_qa(conn, model_id)
+        return _jdump(report), None
+
+    if fn == "get_parameter_completeness":
+        report = get_parameter_completeness(
+            conn, model_id,
+            category=args.get("category"),
+            ifc_class=args.get("ifc_class"),
+            min_coverage=args.get("min_coverage", 0.0),
+        )
+        report["parameters"] = report["parameters"][:20]
+        return _jdump(report), None
+
+    if fn == "get_version_history":
+        stream_id = get_model_stream_id(conn, model_id)
+        if not stream_id:
+            return "Could not determine the stream for this model.", None
+        versions = get_model_trend(conn, stream_id)
+        for v in versions:
+            v["by_category"] = dict(
+                sorted(v["by_category"].items(), key=lambda kv: kv[1], reverse=True)[:8]
+            )
+        return _jdump(versions), None
+
+    if fn == "find_nearby_elements":
+        reference = args.get("reference", "")
+        radius_m = args.get("radius_m")
+        if not reference or radius_m is None:
+            return "Both 'reference' and 'radius_m' are required.", None
+        try:
+            matches = find_nearby_elements(
+                conn, model_id,
+                origin=reference,
+                radius_m=float(radius_m),
+                category=args.get("category"),
+            )
+        except Exception as exc:
+            return f"Nearby search failed: {exc}", None
+        if not matches:
+            return (
+                f"No elements found within {radius_m}m of '{reference}'. "
+                "Note: proximity search only works for elements ingested with SI "
+                "geometry data — try re-ingesting this model if it predates this feature.", None
+            )
+        ids = [m["speckle_id"] for m in matches if m.get("speckle_id")]
+        return _jdump(matches[:100]), ids
+
+    if fn == "get_qa_elements":
+        issue = args.get("issue", "")
+        valid_issues = {"unclassified", "no_geometry", "no_name", "no_storey", "no_material", "duplicate_ids"}
+        if issue not in valid_issues:
+            return f"'issue' must be one of: {', '.join(sorted(valid_issues))}.", None
+        elements = get_qa_elements(conn, model_id, issue, limit=int(args.get("limit") or 50))
+        if not elements:
+            return f"No elements found with issue '{issue}'.", None
+        ids = [e["speckle_id"] for e in elements if e.get("speckle_id")]
+        return _jdump(elements), ids
+
+    if fn == "get_element_details":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        element = get_element_details(conn, model_id, reference)
+        if not element:
+            return f"No element found matching '{reference}'.", None
+        ids = [element["speckle_id"]] if element.get("speckle_id") else None
+        return _jdump(element), ids
 
     return "Unknown tool.", None
 
@@ -684,6 +899,16 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
             if vals:
                 prompt += f"\n## {label}\n{', '.join(str(v) for v in vals[:20])}\n"
 
+        sel = model_context.get("selectedElement")
+        if sel and (sel.get("speckleId") or sel.get("name")):
+            prompt += (
+                f"\n## Currently Selected Element (in the 3D viewer)\n"
+                f"Name: {sel.get('name') or 'Unnamed'}, Speckle ID: {sel.get('speckleId') or 'unknown'}, "
+                f"Category: {sel.get('category') or 'unknown'}\n"
+                "When the user refers to \"the selected element/object\", \"this element\", \"it\", or "
+                "similar, use this Speckle ID as the `reference` argument for tools like find_nearby_elements.\n"
+            )
+
     prompt += (
         "\n## Tools Available\n"
         "- filter_elements: highlight elements by category, ifc_class, storey, name\n"
@@ -691,7 +916,13 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
         "- query_by_parameter: find elements by any parameter key/value; supports numeric ops (gt/lt/gte/lte)\n"
         "- get_materials: list all materials with element counts and volumes\n"
         "- get_profiles: list structural profiles and steel grades\n"
-        "- get_model_changes: diff current model against another version (show added/removed/changed)\n\n"
+        "- get_model_changes: diff current model against another version (show added/removed/changed)\n"
+        "- check_data_quality: BIM QA score + issues (missing names/storeys/materials/geometry, duplicates)\n"
+        "- get_parameter_completeness: fill-rate % per parameter, worst-covered first\n"
+        "- get_version_history: element-count/category trend across all ingested versions of this model\n"
+        "- find_nearby_elements: find elements within a radius (meters) of a reference element or coordinate\n"
+        "- get_qa_elements: drill into a specific data-quality issue and highlight the affected elements\n"
+        "- get_element_details: full details (geometry, all parameters) for one specific element\n\n"
         "## Reasoning Guidance\n"
         "Before calling tools, briefly state your plan in one sentence (e.g. 'I'll filter beams by "
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "

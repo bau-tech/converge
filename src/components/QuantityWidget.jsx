@@ -26,7 +26,7 @@ const METRICS = [
     { id: 'count',     label: 'Count',  unit: 'el', color: 'text-zinc-300'    },
 ]
 
-function BarChart({ rows, metric }) {
+function BarChart({ rows, metric, darkMode }) {
     const { id: valueKey, unit, label } = metric
 
     const sorted = [...rows]
@@ -44,20 +44,22 @@ function BarChart({ rows, metric }) {
     const labels = sorted.map(r => r.group)
     const colors = sorted.map((_, i) => BAR_COLORS[i % BAR_COLORS.length])
     const hovers = vals.map(v => fmtHover(v, unit))
+    const labelColor = darkMode ? '#e4e4e7' : '#000000'
 
     return (
         <EChart
             option={{
                 ...baseOption({
                     tooltipFormatter: (params) => `<b>${params.name}</b><br/>${label}: ${hovers[params.dataIndex]}`,
+                    darkMode,
                 }),
                 grid: { left: 10, right: 16, top: 10, bottom: 36, containLabel: true },
-                xAxis: valueAxisStyle(),
-                yAxis: categoryAxisStyle({ data: labels }),
+                xAxis: valueAxisStyle({ darkMode }),
+                yAxis: categoryAxisStyle({ data: labels, darkMode }),
                 series: [{
                     type: 'bar',
                     data: vals.map((v, i) => ({ value: v, itemStyle: { color: colors[i] } })),
-                    label: { show: true, position: 'right', color: '#e4e4e7', formatter: (params) => fmt(params.value) },
+                    label: { show: true, position: 'right', color: labelColor, formatter: (params) => fmt(params.value) },
                 }],
             }}
             style={{ width: '100%', height: 340 }}
@@ -65,7 +67,7 @@ function BarChart({ rows, metric }) {
     )
 }
 
-function CoverageChart({ rows }) {
+function CoverageChart({ rows, darkMode }) {
     const sorted = [...rows]
         .filter(r => r.element_count > 0)
         .map(r => ({
@@ -86,20 +88,22 @@ function CoverageChart({ rows }) {
     )
     const labels = sorted.map(r => r.group)
     const hovers = sorted.map(r => `${r.elements_with_geometry} / ${r.element_count} elements`)
+    const labelColor = darkMode ? '#e4e4e7' : '#000000'
 
     return (
         <EChart
             option={{
                 ...baseOption({
                     tooltipFormatter: (params) => `<b>${params.name}</b><br/>Coverage: ${params.value}%<br/>${hovers[params.dataIndex]}`,
+                    darkMode,
                 }),
                 grid: { left: 10, right: 16, top: 10, bottom: 36, containLabel: true },
-                xAxis: valueAxisStyle({ max: 100, axisLabel: { formatter: '{value}%' } }),
-                yAxis: categoryAxisStyle({ data: labels }),
+                xAxis: valueAxisStyle({ max: 100, axisLabel: { formatter: '{value}%' }, darkMode }),
+                yAxis: categoryAxisStyle({ data: labels, darkMode }),
                 series: [{
                     type: 'bar',
                     data: sorted.map((r, i) => ({ value: r.pct, itemStyle: { color: colors[i] } })),
-                    label: { show: true, position: 'right', color: '#e4e4e7', formatter: '{c}%' },
+                    label: { show: true, position: 'right', color: labelColor, formatter: '{c}%' },
                 }],
             }}
             style={{ width: '100%', height: 340 }}
@@ -124,7 +128,7 @@ const TABS = [
     { id: 'coverage', label: 'Coverage' },
 ]
 
-export default function QuantityWidget({ normalizerModelId, normalizerUrl }) {
+export default function QuantityWidget({ normalizerModelId, normalizerUrl, darkMode = true }) {
     const [tab, setTab]         = useState('type')
     const [metric, setMetric]   = useState(METRICS[0])   // volume by default
     const [byType, setByType]   = useState(null)
@@ -203,7 +207,7 @@ export default function QuantityWidget({ normalizerModelId, normalizerUrl }) {
                             onClick={() => setTab(t.id)}
                             className={`px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
                                 tab === t.id
-                                    ? 'bg-white/10 text-white border-b-2 border-emerald-400'
+                                    ? 'bg-white/10 text-[var(--speckle-foreground)] border-b-2 border-emerald-400'
                                     : 'text-zinc-400 hover:text-zinc-200'
                             }`}
                         >
@@ -234,14 +238,14 @@ export default function QuantityWidget({ normalizerModelId, normalizerUrl }) {
 
             {/* Chart area */}
             {tab === 'type' && (
-                <BarChart rows={byType.rows || []} metric={metric} />
+                <BarChart rows={byType.rows || []} metric={metric} darkMode={darkMode} />
             )}
             {tab === 'floor' && (
-                <BarChart rows={byFloor?.rows || []} metric={metric} />
+                <BarChart rows={byFloor?.rows || []} metric={metric} darkMode={darkMode} />
             )}
             {tab === 'coverage' && (
                 <>
-                    <CoverageChart rows={byType.rows || []} />
+                    <CoverageChart rows={byType.rows || []} darkMode={darkMode} />
                     <div className="flex gap-3 text-xs text-zinc-500 px-1">
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500 inline-block" /> ≥ 80%</span>
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500 inline-block" /> 40–79%</span>

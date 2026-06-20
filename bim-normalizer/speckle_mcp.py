@@ -81,15 +81,15 @@ except ImportError:
 _SPECKLE_URL = os.getenv("SPECKLE_SERVER_URL", "https://speckle.example.com").rstrip("/")
 _SPECKLE_TOKEN = os.getenv("SPECKLE_TOKEN", "")
 _NORMALIZER_URL = os.getenv("NORMALIZER_URL", "http://localhost:8002").rstrip("/")
-# Empty string disables auth (safe for stdio; always set a key for SSE/remote)
+# Empty string disables auth (safe for stdio; always set a key for streamable-http/SSE/remote)
 _MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
 mcp = FastMCP("speckle-ifc")
 
 # ── In-memory IFC model state ─────────────────────────────────────────────────
-# NOTE: in SSE/remote mode all clients share a single Python process and therefore
-# share these globals. _model_lock serialises writes to prevent data races, but two
-# clients loading different models will still clobber each other. For multi-user SSE
+# NOTE: in streamable-http/SSE remote mode all clients share a single Python process and
+# therefore share these globals. _model_lock serialises writes to prevent data races, but
+# two clients loading different models will still clobber each other. For multi-user remote
 # deployments, wrap this server behind a session-aware proxy or use stdio mode.
 _model: "ifcopenshell.file | None" = None
 _model_source: str = ""    # path or "speckle:model_id"
@@ -611,6 +611,49 @@ def speckle_ingest(stream_id: str, commit_id: str) -> str:
 
 
 @mcp.tool()
+def _build_ifc_subset(derived_model_id: str) -> str | None:
+    """
+    Build a filtered IFC from the in-memory source model containing only the elements
+    present in derived_model_id. Returns a temp file path or None if not possible.
+
+    Uses application_id (= IFC GlobalId for IFC-sourced models) to identify which
+    IfcElement entities to keep. Falls back to None for Revit sources (no GlobalId match).
+    """
+    with _model_lock:
+        source_model = _model
+    if source_model is None:
+        return None
+
+    resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{derived_model_id}/elements/flat",
+        params={"limit": 999_999},
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        return None
+    elements = resp.json().get("elements", [])
+    keep_ids = {e["application_id"] for e in elements if e.get("application_id")}
+    if not keep_ids:
+        return None
+
+    # Write full source model → temp → reload → remove unwanted elements → save
+    with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
+        tmp_path = f.name
+    source_model.write(tmp_path)
+    filtered = ifcopenshell.open(tmp_path)
+    removed = 0
+    for el in list(filtered.by_type("IfcElement")):
+        if el.GlobalId not in keep_ids:
+            filtered.remove(el)
+            removed += 1
+    if removed == 0:
+        # No GlobalId match — source is probably not IFC; signal failure
+        os.unlink(tmp_path)
+        return None
+    filtered.write(tmp_path)
+    return tmp_path
+
+
 def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
     """
     Export a normalized model as IFC4X3 and load it into the in-memory IFC model.
@@ -643,8 +686,33 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
     source = (meta.get("source") or "").lower()
     stream_id = meta.get("stream_id") or ""
 
-    # IFC source: try to serve the original file stored on the Speckle server
-    if "ifc" in source and stream_id:
+    # If this model was produced by speckle_filter_publish its source is stored as
+    # "filtered" in the normalizer DB — skip the stream blob (which would return the
+    # full original IFC) and instead build a filtered IFC from the in-memory model.
+    is_derived = source == "filtered"
+    if is_derived:
+        tmp_path = _build_ifc_subset(model_id)
+        if tmp_path:
+            m = ifcopenshell.open(tmp_path)
+            with _model_lock:
+                _tmp_path = tmp_path
+                _model = m
+                _model_source = f"speckle:{model_id}"
+            count = len(list(m))
+            elements = len(m.by_type("IfcElement"))
+            return (
+                f"Loaded filtered IFC built from source model — {elements} element(s).\n"
+                f"  Schema: {m.schema}\n"
+                f"  Total entities: {count}\n"
+                f"  Temp file: {tmp_path}\n"
+                f"You can now use ifc_summary(), ifc_tree(), ifc_select(), ifc_save(), etc."
+            )
+        # Source model not in memory (session restart) or not IFC — fall through to normalizer export
+
+    # IFC source: try to serve the original file stored on the Speckle server.
+    # Skipped for derived (filter-published) models even when source is not in memory,
+    # so we don't accidentally serve the full original IFC for a filtered model.
+    if not is_derived and "ifc" in source and stream_id:
         ifc_bytes = _download_original_ifc_blob(stream_id)
         if ifc_bytes:
             with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
@@ -1462,6 +1530,54 @@ def speckle_query_by_parameter(
 
 
 @mcp.tool()
+def speckle_find_nearby(
+    model_id: str,
+    reference: str,
+    radius_m: float = 5.0,
+    category: str = "",
+) -> str:
+    """
+    Find elements within radius_m meters of a reference element.
+    reference: speckle_id or (partial) name of the element to search around.
+    category: optional category filter, e.g. 'Columns', 'Walls'.
+
+    Only works for elements ingested with SI geometry (centroid_si) — older
+    models may need re-ingestion for this to return results.
+    → feeds: speckle_element_detail(element_id)
+    """
+    params = {"reference": reference, "radius_m": radius_m}
+    if category:
+        params["category"] = category
+    resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{model_id}/elements/nearby",
+        params=params,
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    if resp.status_code == 400:
+        return f"Bad request: {resp.json().get('detail', resp.text)}"
+    resp.raise_for_status()
+    data = resp.json()
+    elements = data.get("elements", [])
+    if not elements:
+        return (
+            f"No elements found within {radius_m}m of '{reference}'. "
+            "This may mean the reference wasn't found, or the model predates "
+            "SI geometry support — try re-ingesting."
+        )
+    lines = [f"{len(elements)} element(s) within {radius_m}m of '{reference}':"]
+    for e in elements:
+        lines.append(
+            f"  [{e.get('ifc_class', '?')}] {e.get('name') or '(unnamed)'}"
+            f"  category={e.get('category') or '?'}"
+            f"  distance={e.get('distance_m')}m"
+            f"  speckle_id={e.get('speckle_id', '')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def speckle_get_materials(model_id: str) -> str:
     """
     List all distinct material values for a model with element counts.
@@ -1663,6 +1779,7 @@ def speckle_filter_publish(
                 f"Published {r['element_count']} element(s) to branch '{r['branch_name']}' "
                 f"(took {elapsed}s).\n"
                 f"Commit ID: {r['commit_id']}\n"
+                f"Model ID:  {r.get('model_id', '')}\n"
                 f"URL: {r['url']}"
             )
         if s["status"] == "failed":
@@ -1684,30 +1801,391 @@ def classification_reload() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# QA drill-down / CSV export / cost estimate / trend / IFC pset writer
+# ─────────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def speckle_qa_elements(model_id: str, issue: str, limit: int = 50) -> str:
+    """
+    Return the actual elements affected by a specific QA issue.
+
+    Run speckle_qa_check(model_id) first to see issue counts, then drill into
+    a specific issue with this tool to get the element list.
+
+    issue: unclassified | no_geometry | no_name | no_storey | no_material | duplicate_ids
+    limit: max elements to return (default 50, max 500)
+
+    → fix unclassified elements: speckle_set_overrides(model_id, ...)
+    → fix storey/name gaps: edit source model and re-ingest
+    """
+    VALID = {"unclassified", "no_geometry", "no_name", "no_storey", "no_material", "duplicate_ids"}
+    if issue not in VALID:
+        return f"Unknown issue '{issue}'. Valid: {', '.join(sorted(VALID))}"
+
+    resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{model_id}/qa/elements",
+        params={"issue": issue, "limit": min(limit, 500)},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id!r} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    elements = resp.json()
+
+    if not elements:
+        return f"No elements found for issue '{issue}' — this check passes."
+
+    lines = [f"{len(elements)} element(s) with issue '{issue}' (limit={limit}):"]
+    for e in elements:
+        name   = e.get("name") or "(unnamed)"
+        storey = e.get("storey") or "?"
+        lines.append(
+            f"  [{e.get('ifc_class') or '?'}] {name}"
+            f"  storey={storey}"
+            f"  element_id={e.get('element_id', '')}"
+            f"  speckle_id={e.get('speckle_id', '')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_export_csv(
+    model_id: str,
+    output_path: str = "",
+    category: str = "",
+    ifc_class: str = "",
+    storey: str = "",
+) -> str:
+    """
+    Export model elements to a CSV file with geometry quantities and key parameters.
+
+    output_path: destination .csv path. Defaults to a temp file.
+    category, ifc_class, storey: optional substring filters.
+
+    Output columns: element_id, speckle_id, ifc_class, category, name, storey,
+                    volume_m3, area_m2, material, profile, grade
+
+    Use speckle_list_ingested() to find model_id values.
+    """
+    params: dict = {}
+    if category:  params["category"]  = category
+    if ifc_class: params["ifc_class"] = ifc_class
+    if storey:    params["storey"]    = storey
+
+    resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{model_id}/export/csv",
+        params=params,
+        timeout=120,
+        stream=True,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id!r} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+
+    if not output_path:
+        output_path = os.path.join(tempfile.gettempdir(), f"model_{model_id[:8]}.csv")
+
+    row_count = 0
+    with open(output_path, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=65_536):
+            fh.write(chunk)
+            row_count += chunk.count(b"\n")
+
+    data_rows = max(0, row_count - 1)  # subtract header
+    return f"Exported {data_rows:,} element(s) to {output_path!r}"
+
+
+@mcp.tool()
+def speckle_cost_estimate(model_id: str, rates_json: str, group_by: str = "category") -> str:
+    """
+    Apply unit rates to model quantities to produce a rough cost estimate (5D).
+
+    rates_json: JSON array of rate rules, e.g.
+      '[{"match":"Concrete","unit":"m3","rate":180,"currency":"EUR"},
+        {"match":"Steel","unit":"m3","rate":7800,"currency":"EUR"}]'
+
+    Each rule matches the group name (case-insensitive substring).
+    unit: "m3" → volume_m3, "m2" → area_m2, "count" → element_count
+
+    group_by: 'category' (default), 'ifc_class', or 'storey'
+
+    Unmatched groups are listed at the bottom so you can extend the rate card.
+    Use speckle_list_ingested() to find model_id values.
+    """
+    try:
+        rates = json.loads(rates_json)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON in rates_json: {e}"
+    if not isinstance(rates, list) or not rates:
+        return "rates_json must be a non-empty JSON array."
+
+    resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{model_id}/quantities",
+        params={"group_by": group_by},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id!r} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    data = resp.json()
+    rows = data.get("rows", [])
+    if not rows:
+        return "No quantity data available for this model."
+
+    UNIT_FIELDS = {"m3": "volume_m3", "m2": "area_m2", "count": "element_count"}
+
+    def _qty(row, unit):
+        return row.get(UNIT_FIELDS.get(unit, "element_count"), 0) or 0
+
+    def _match(group_name):
+        for r in rates:
+            if r.get("match", "").lower() in group_name.lower():
+                return r
+        return None
+
+    currency = rates[0].get("currency", "") if rates else ""
+    cost_rows, unmatched = [], []
+
+    for row in rows:
+        group = row.get("group", "Unknown")
+        rule = _match(group)
+        if not rule:
+            unmatched.append(group)
+            continue
+        unit = rule.get("unit", "count")
+        rate = float(rule.get("rate", 0))
+        qty  = _qty(row, unit)
+        cost_rows.append((group, qty, unit, rate, qty * rate))
+
+    cost_rows.sort(key=lambda x: -x[4])
+    total_cost = sum(c[4] for c in cost_rows)
+
+    W = 36
+    lines = [
+        f"Cost estimate — model {model_id[:8]}...  group_by={group_by}",
+        "",
+        f"  {'Group':<{W}} {'Quantity':>12}  {'Rate':>10}  {'Cost':>14}",
+        "  " + "─" * (W + 42),
+    ]
+    for group, qty, unit, rate, cost in cost_rows:
+        lines.append(
+            f"  {group:<{W}} {qty:>11.2f}{unit}  {rate:>10,.0f}  {cost:>14,.0f} {currency}"
+        )
+    lines += [
+        "  " + "─" * (W + 42),
+        f"  {'TOTAL':<{W}} {'':>12}  {'':>10}  {total_cost:>14,.0f} {currency}",
+    ]
+    if unmatched:
+        lines.append(f"\nNo rate matched for: {', '.join(unmatched[:10])}")
+        lines.append("Add matching entries to rates_json to include these groups.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_trend_analysis(model_id: str, limit: int = 10) -> str:
+    """
+    Track how model quantities have changed across ingested versions of the same stream.
+
+    model_id: any ingested model from the target stream (provides the stream_id).
+    limit: max versions to show, newest first (default 10).
+
+    Returns a timeline of element count and volume per version.
+    Useful for construction monitoring: "is concrete volume growing as planned per pour?"
+
+    Use speckle_list_ingested() to find model_id values.
+    """
+    # Resolve stream_id from model metadata
+    meta = requests.get(f"{_NORMALIZER_URL}/models/{model_id}", timeout=15)
+    if meta.status_code == 404:
+        return f"Model {model_id!r} not found. Use speckle_list_ingested() to verify."
+    meta.raise_for_status()
+    stream_id = meta.json().get("stream_id", "")
+    if not stream_id:
+        return "Could not determine stream_id for this model."
+
+    # All ingested versions for this stream (oldest-first from DB)
+    trend = requests.get(f"{_NORMALIZER_URL}/models/trend/{stream_id}", timeout=30)
+    trend.raise_for_status()
+    versions = trend.json()
+    if not versions:
+        return f"No ingested versions found for stream {stream_id}."
+
+    # Cap to newest `limit` versions
+    versions = list(reversed(versions))[:limit]
+
+    # Fetch quantities per version in parallel
+    def _fetch_qty(v):
+        try:
+            r = requests.get(
+                f"{_NORMALIZER_URL}/models/{v['model_id']}/quantities",
+                params={"group_by": "ifc_class"},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                return v["model_id"], r.json()
+        except Exception:
+            pass
+        return v["model_id"], {}
+
+    qty_map: dict = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for mid, data in pool.map(_fetch_qty, versions):
+            qty_map[mid] = data
+
+    lines = [f"Version trend — stream {stream_id}  ({len(versions)} version(s) shown)", ""]
+    lines.append(
+        f"  {'Date':<12} {'Commit':<10} {'Branch':<20} {'Elements':>9} {'Volume m³':>11} {'Δ Elements':>11}"
+    )
+    lines.append("  " + "─" * 78)
+
+    prev_elements = None
+    for v in reversed(versions):  # display oldest → newest
+        mid     = v["model_id"]
+        date    = str(v.get("ingested_at", ""))[:10]
+        commit  = (v.get("commit_id") or mid)[:8]
+        branch  = (v.get("branch_name") or "")[:18]
+        elements = int(v.get("total_elements") or 0)
+        q        = qty_map.get(mid, {})
+        volume   = float(q.get("total_volume_m3", 0) or 0)
+
+        delta = ""
+        if prev_elements is not None:
+            diff  = elements - prev_elements
+            delta = f"{diff:+,}"
+        prev_elements = elements
+
+        lines.append(
+            f"  {date:<12} {commit:<10} {branch:<20} {elements:>9,}"
+            f" {volume:>11.1f} {delta:>11}"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def ifc_write_pset(element_ids: str, pset_name: str, properties: str) -> str:
+    """
+    Write a named property set onto elements in the loaded IFC model.
+
+    element_ids: comma-separated STEP entity IDs (e.g. "42,57,103")
+                 OR "all" to target every IfcElement in the model.
+    pset_name:   name of the IfcPropertySet to create (or extend if it already exists).
+    properties:  JSON object of key→value pairs to write,
+                 e.g. '{"Fire Rating":"REI90","Load Bearing":"true"}'
+
+    Requires a model already loaded via ifc_load() or speckle_load().
+    Call ifc_save(path) afterwards to persist changes to disk.
+    → verify results with: ifc_info(element_id)
+    """
+    m = _require_model()
+
+    try:
+        props = json.loads(properties)
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON in properties: {e}"
+    if not isinstance(props, dict) or not props:
+        return "properties must be a non-empty JSON object."
+
+    # Resolve target elements
+    if element_ids.strip().lower() == "all":
+        targets = list(m.by_type("IfcElement"))
+    else:
+        try:
+            ids = [int(i.strip()) for i in element_ids.split(",") if i.strip()]
+        except ValueError:
+            return "element_ids must be comma-separated integers or 'all'."
+        targets, missing = [], []
+        for eid in ids:
+            try:
+                targets.append(m.by_id(eid))
+            except Exception:
+                missing.append(eid)
+        if missing:
+            return f"Entity ID(s) not found: {missing}. Use ifc_select() to find valid IDs."
+
+    if not targets:
+        return "No elements matched. Use ifc_select() to find valid element IDs."
+
+    # Build IfcPropertySingleValue list
+    import ifcopenshell.guid as guid
+    ifc_props = [
+        m.createIfcPropertySingleValue(Name=k, NominalValue=m.createIfcLabel(str(v)))
+        for k, v in props.items()
+    ]
+
+    pset = m.createIfcPropertySet(
+        GlobalId=guid.new(),
+        OwnerHistory=None,
+        Name=pset_name,
+        HasProperties=ifc_props,
+    )
+    m.createIfcRelDefinesByProperties(
+        GlobalId=guid.new(),
+        OwnerHistory=None,
+        RelatedObjects=targets,
+        RelatingPropertyDefinition=pset,
+    )
+
+    return (
+        f"Wrote '{pset_name}' with {len(ifc_props)} properties "
+        f"to {len(targets)} element(s).\n"
+        f"Properties: {', '.join(props.keys())}\n"
+        f"Call ifc_save(path) to persist changes to disk."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Speckle IFC MCP server")
     ap.add_argument(
-        "--transport", default="stdio", choices=["stdio", "sse"],
-        help="Transport: 'stdio' for local Claude Code (default), 'sse' for HTTP/remote",
+        "--transport", default="stdio", choices=["stdio", "streamable-http", "sse"],
+        help=(
+            "Transport: 'stdio' for local Claude Code (default), "
+            "'streamable-http' for HTTP/remote (recommended), "
+            "'sse' for legacy HTTP/remote"
+        ),
     )
-    ap.add_argument("--host", default="0.0.0.0", help="Bind host for SSE (default: 0.0.0.0)")
-    ap.add_argument("--port", type=int, default=8003, help="Port for SSE (default: 8003)")
+    ap.add_argument("--host", default="0.0.0.0", help="Bind host for HTTP transports (default: 0.0.0.0)")
+    ap.add_argument("--port", type=int, default=8003, help="Port for HTTP transports (default: 8003)")
     args, _ = ap.parse_known_args()
 
-    if args.transport == "sse":
+    if args.transport in ("streamable-http", "sse"):
         import uvicorn
+        from mcp.server.transport_security import TransportSecuritySettings
 
         print(
-            "WARNING: SSE mode shares a single Python process. "
+            f"WARNING: {args.transport} mode shares a single Python process. "
             "All clients share the same in-memory IFC model — concurrent loads will "
             "clobber each other. Use stdio mode for single-user deployments, or "
-            "run one process per client for multi-user SSE.",
+            "run one process per client for multi-user remote access.",
             file=sys.stderr,
         )
-        sse_app = mcp.sse_app()
 
-        # ASGI middleware: enforce X-Api-Key header when MCP_API_KEY is set
+        # DNS-rebinding protection (mcp SDK) checks the Host/Origin headers against an
+        # allow-list. FastMCP defaults this to localhost only, which rejects every
+        # request that arrives via a reverse proxy with 421 "Invalid Host header".
+        # Add any public hostnames (and LAN host:port combos used for direct testing)
+        # via MCP_ALLOWED_HOSTS (comma-separated, e.g. "mcp.example.com,192.168.1.10:8003").
+        allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+        for host_entry in os.getenv("MCP_ALLOWED_HOSTS", "").split(","):
+            host_entry = host_entry.strip()
+            if host_entry:
+                allowed_hosts.append(host_entry)
+                allowed_origins.append(f"https://{host_entry}")
+                allowed_origins.append(f"http://{host_entry}")
+        mcp.settings.transport_security = TransportSecuritySettings(
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
+
+        app = mcp.streamable_http_app() if args.transport == "streamable-http" else mcp.sse_app()
+
+        # ASGI middleware: enforce MCP_API_KEY via either `X-Api-Key: <key>` or
+        # `Authorization: Bearer <key>` (the latter is what most MCP clients, e.g. n8n,
+        # send by default).
         class _ApiKeyMiddleware:
             def __init__(self, app):
                 self._app = app
@@ -1716,12 +2194,16 @@ if __name__ == "__main__":
                 if _MCP_API_KEY and scope["type"] == "http":
                     headers = {k.lower(): v for k, v in scope.get("headers", [])}
                     key = headers.get(b"x-api-key", b"").decode()
+                    if not key:
+                        auth = headers.get(b"authorization", b"").decode()
+                        if auth.lower().startswith("bearer "):
+                            key = auth[len("Bearer "):]
                     if key != _MCP_API_KEY:
                         from starlette.responses import Response
                         await Response("Unauthorized\n", status_code=401)(scope, receive, send)
                         return
                 await self._app(scope, receive, send)
 
-        uvicorn.run(_ApiKeyMiddleware(sse_app), host=args.host, port=args.port)
+        uvicorn.run(_ApiKeyMiddleware(app), host=args.host, port=args.port)
     else:
         mcp.run()

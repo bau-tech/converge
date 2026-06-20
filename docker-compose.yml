@@ -32,6 +32,8 @@ services:
       SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
       SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
       SPECKLE_SKIP_ANALYTICS: "true"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      AUTO_SYNC_SCAN_INTERVAL_S: ${AUTO_SYNC_SCAN_INTERVAL_S:-900}
       OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
       MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       PG_HOST: postgres
@@ -54,6 +56,61 @@ services:
     networks:
       - speckle-net
 
+  # ── Speckle IFC MCP Server (streamable HTTP, remote access) ──────────────────
+  speckle-mcp:
+    build:
+      context: ./bim-normalizer
+    container_name: speckle-mcp
+    command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
+    ports:
+      - "8003:8003"
+    environment:
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      NORMALIZER_URL: http://bim-normalizer:8002
+      MCP_API_KEY: ${MCP_API_KEY:-}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+    depends_on:
+      bim-normalizer:
+        condition: service_healthy
+    restart: unless-stopped
+    # Override the image's HEALTHCHECK (CMD curl http://localhost:8002/health) — this
+    # container only serves speckle_mcp.py on 8003, nothing listens on 8002.
+    healthcheck:
+      disable: true
+    networks:
+      - speckle-net
+
+  # ── BCF-API server ────────────────────────────────────────────────────────────
+  bcf-server:
+    build:
+      context: ./bim-normalizer
+    container_name: bcf-server
+    command: ["python", "bcf_server.py"]
+    ports:
+      - "8004:8004"
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${PG_USER:-speckle}
+      PG_PASS: ${PG_PASS:-speckle}
+      PG_NAME: ${PG_NAME:-speckle}
+      PORT: 8004
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - speckle-net
+
   # ── Frontend Dashboard (Nginx + built Vite SPA) ──────────────────────────────
   speckle-dashboard:
     build:
@@ -62,6 +119,8 @@ services:
         VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}
         VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
         VITE_NORMALIZER_URL: /normalizer
+        VITE_BCF_URL: /bcf
+        VITE_BCF_API_KEY: ${BCF_API_KEY:-}
         VITE_OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
         VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
         VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
@@ -74,8 +133,11 @@ services:
       - "8080:80"
     environment:
       NORMALIZER_URL: http://bim-normalizer:8002/
+      BCF_SERVER_URL: http://bcf-server:8004/
     depends_on:
       bim-normalizer:
+        condition: service_healthy
+      bcf-server:
         condition: service_healthy
     restart: unless-stopped
     networks:

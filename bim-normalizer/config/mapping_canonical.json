@@ -80,10 +80,11 @@
   },
 
   "lifecycle_status": {
-    "_comment": "IFC construction/lifecycle status (Pset_ConstructionOccurence.Status: NEW, EXISTING, DEMOLISH, TEMPORARY, ...) — distinct from 'phase' (project schedule phase name).",
-    "keys": [],
+    "_comment": "IFC construction/lifecycle status (Pset_ConstructionOccurrence.Status: NEW, EXISTING, DEMOLISH, TEMPORARY, ...) — distinct from 'phase' (project schedule phase name).",
+    "keys": ["ConstructionStatus", "Status"],
     "psets": [
-      {"pset": "Pset_ConstructionOccurence", "key": "Status"}
+      {"pset": "Pset_ConstructionOccurrence", "key": "Status"},
+      {"pset": "Pset_ConstructionOccurence",  "key": "Status"}
     ]
   },
 
@@ -119,22 +120,32 @@
   },
 
   "area": {
-    "keys": ["Area", "AREA", "area", "Net Area", "Gross Area"],
+    "keys": ["Area", "AREA", "area", "Net Area", "Gross Area", "NetArea", "GrossArea", "NetSideArea"],
     "psets": [
       {"pset": "Qto_WallBaseQuantities",   "key": "NetSideArea"},
+      {"pset": "Qto_WallBaseQuantities",   "key": "GrossSideArea"},
       {"pset": "Qto_SlabBaseQuantities",   "key": "NetArea"},
-      {"pset": "Qto_BeamBaseQuantities",   "key": "CrossSectionArea"},
-      {"pset": "Qto_ColumnBaseQuantities", "key": "CrossSectionArea"}
+      {"pset": "Qto_SlabBaseQuantities",   "key": "GrossArea"},
+      {"pset": "Qto_BeamBaseQuantities",   "key": "OuterSurfaceArea"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "OuterSurfaceArea"},
+      {"pset": "Qto_MemberBaseQuantities", "key": "OuterSurfaceArea"},
+      {"pset": "Qto_MemberBaseQuantities", "key": "GrossSurfaceArea"}
     ]
   },
 
   "volume": {
-    "keys": ["Volume", "VOLUME", "volume", "Net Volume", "Gross Volume"],
+    "keys": ["Volume", "VOLUME", "volume", "Net Volume", "Gross Volume", "NetVolume", "GrossVolume"],
     "psets": [
       {"pset": "Qto_WallBaseQuantities",   "key": "NetVolume"},
+      {"pset": "Qto_WallBaseQuantities",   "key": "GrossVolume"},
       {"pset": "Qto_SlabBaseQuantities",   "key": "NetVolume"},
+      {"pset": "Qto_SlabBaseQuantities",   "key": "GrossVolume"},
       {"pset": "Qto_BeamBaseQuantities",   "key": "NetVolume"},
-      {"pset": "Qto_ColumnBaseQuantities", "key": "NetVolume"}
+      {"pset": "Qto_BeamBaseQuantities",   "key": "GrossVolume"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "NetVolume"},
+      {"pset": "Qto_ColumnBaseQuantities", "key": "GrossVolume"},
+      {"pset": "Qto_MemberBaseQuantities", "key": "NetVolume"},
+      {"pset": "Qto_MemberBaseQuantities", "key": "GrossVolume"}
     ]
   },
 

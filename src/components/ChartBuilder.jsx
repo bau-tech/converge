@@ -132,20 +132,20 @@ export function ChartBuilder({
                     initial={{ opacity: 0, scale: 0.9, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                    className="bg-zinc-900 border border-white/10 rounded-xl shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col"
+                    className="glass-card shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col"
                     onClick={e => e.stopPropagation()}
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-gradient-to-r from-cyan-500/10 to-purple-500/10">
+                    <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--speckle-outline-3)]">
                         <div className="flex items-center gap-2">
-                            <Sparkles className="w-5 h-5 text-cyan-500" />
-                            <h2 className="text-lg font-semibold">
+                            <Sparkles className="w-5 h-5 text-[var(--speckle-outline-1)]" />
+                            <h2 className="text-sm font-semibold">
                                 {initialConfig ? 'Edit Custom Chart' : 'Create Custom Chart'}
                             </h2>
                         </div>
                         <button
                             onClick={onClose}
-                            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                            className="p-2 hover:bg-[var(--speckle-outline-3)] rounded-md transition-colors"
                         >
                             <X className="w-5 h-5" />
                         </button>
@@ -156,25 +156,25 @@ export function ChartBuilder({
                         {/* Search (if many fields) */}
                         {availableFields.length > 10 && (
                             <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--speckle-foreground-3)]" />
                                 <input
                                     type="text"
                                     value={searchTerm}
                                     onChange={e => setSearchTerm(e.target.value)}
                                     placeholder="Search properties..."
-                                    className="w-full bg-zinc-800 border border-white/10 rounded-lg pl-10 pr-4 py-2.5 text-sm focus:outline-none focus:border-cyan-500 transition-colors placeholder:text-zinc-600"
+                                    className="w-full glass rounded-md pl-10 pr-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-[var(--speckle-outline-1)]/50 transition-colors placeholder:text-[var(--speckle-foreground-3)]"
                                 />
                             </div>
                         )}
 
                         {/* Field Selection - Grouped */}
                         <div>
-                            <label className="text-sm text-zinc-400 mb-2 block">Data Field</label>
-                            <div className="bg-zinc-800 border border-white/10 rounded-lg max-h-48 overflow-y-auto">
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Data Field</label>
+                            <div className="glass rounded-md max-h-48 overflow-y-auto">
                                 {/* Summary Fields */}
                                 {filteredFields.summaryFields.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-cyan-500 bg-cyan-500/10 sticky top-0 flex items-center gap-2">
+                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
                                             <Database className="w-3 h-3" />
                                             Summary
                                         </div>
@@ -182,11 +182,11 @@ export function ChartBuilder({
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-white/5 transition-colors flex items-center justify-between ${selectedField === field.key ? 'bg-cyan-500/20' : ''
+                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors flex items-center justify-between ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
                                                 <span>{field.config.title}</span>
-                                                <span className="text-xs text-zinc-500">{field.entryCount} items</span>
+                                                <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} items</span>
                                             </button>
                                         ))}
                                     </div>
@@ -195,22 +195,22 @@ export function ChartBuilder({
                                 {/* Dimensions (Numeric Properties) - Distribution Charts */}
                                 {filteredFields.numericFields?.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-green-500 bg-green-500/10 sticky top-0 flex items-center gap-2">
+                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
                                             📊 Elements by Dimension (Distribution)
                                         </div>
                                         {filteredFields.numericFields.map(field => (
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-white/5 transition-colors ${selectedField === field.key ? 'bg-green-500/20' : ''
+                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
                                                 <div className="flex items-center justify-between">
                                                     <span>{field.config.title}</span>
-                                                    <span className="text-xs text-zinc-500">{field.entryCount} elements</span>
+                                                    <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} elements</span>
                                                 </div>
                                                 {field.stats && (
-                                                    <div className="text-xs text-zinc-600 mt-0.5 flex gap-3">
+                                                    <div className="text-xs text-[var(--speckle-foreground-3)] mt-0.5 flex gap-3">
                                                         <span>range: {field.stats.min?.toFixed(1)} - {field.stats.max?.toFixed(1)}</span>
                                                     </div>
                                                 )}
@@ -222,7 +222,7 @@ export function ChartBuilder({
                                 {/* Discovered Properties */}
                                 {filteredFields.discoveredFields.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-purple-500 bg-purple-500/10 sticky top-0 flex items-center gap-2">
+                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
                                             <Search className="w-3 h-3" />
                                             Discovered Properties {!fullData && '(Loading...)'}
                                         </div>
@@ -230,14 +230,14 @@ export function ChartBuilder({
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-white/5 transition-colors ${selectedField === field.key ? 'bg-purple-500/20' : ''
+                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
                                                 <div className="flex items-center justify-between">
                                                     <span>{field.config.title}</span>
-                                                    <span className="text-xs text-zinc-500">{field.entryCount} values</span>
+                                                    <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} values</span>
                                                 </div>
-                                                <div className="text-xs text-zinc-600 mt-0.5 truncate">
+                                                <div className="text-xs text-[var(--speckle-foreground-3)] mt-0.5 truncate">
                                                     {field.path}
                                                 </div>
                                             </button>
@@ -247,13 +247,13 @@ export function ChartBuilder({
 
                                 {/* No results */}
                                 {filteredFields.summaryFields.length === 0 && filteredFields.discoveredFields.length === 0 && (filteredFields.numericFields?.length || 0) === 0 && (
-                                    <div className="px-3 py-6 text-center text-zinc-500 text-sm">
+                                    <div className="px-3 py-6 text-center text-[var(--speckle-foreground-3)] text-sm">
                                         No fields found
                                     </div>
                                 )}
                             </div>
                             {(groupedFields.discoveredFields.length > 0 || groupedFields.numericFields?.length > 0) && (
-                                <p className="text-xs text-zinc-600 mt-2">
+                                <p className="text-xs text-[var(--speckle-foreground-3)] mt-2">
                                     💡 Properties are scanned from your model's elements
                                 </p>
                             )}
@@ -261,16 +261,16 @@ export function ChartBuilder({
 
                         {/* Chart Type Selection */}
                         <div>
-                            <label className="text-sm text-zinc-400 mb-2 block">Chart Type</label>
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Chart Type</label>
                             <div className="grid grid-cols-2 gap-3">
                                 {/* Basic Types (Always Available for Categorical) */}
                                 {(!selectedFieldData?.isNumeric) && (
                                     <>
                                         <button
                                             onClick={() => setChartType('bar')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'bar'
-                                                ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'bar'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <BarChart3 className="w-5 h-5" />
@@ -278,9 +278,9 @@ export function ChartBuilder({
                                         </button>
                                         <button
                                             onClick={() => setChartType('pie')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'pie'
-                                                ? 'border-purple-500 bg-purple-500/20 text-purple-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'pie'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <PieChart className="w-5 h-5" />
@@ -288,9 +288,9 @@ export function ChartBuilder({
                                         </button>
                                         <button
                                             onClick={() => setChartType('sunburst')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'sunburst'
-                                                ? 'border-orange-500 bg-orange-500/20 text-orange-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'sunburst'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <Target className="w-5 h-5" />
@@ -298,9 +298,9 @@ export function ChartBuilder({
                                         </button>
                                         <button
                                             onClick={() => setChartType('treemap')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'treemap'
-                                                ? 'border-green-500 bg-green-500/20 text-green-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'treemap'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <LayoutDashboard className="w-5 h-5" />
@@ -314,9 +314,9 @@ export function ChartBuilder({
                                     <>
                                         <button
                                             onClick={() => setChartType('histogram')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'histogram'
-                                                ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'histogram'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <BarChart2 className="w-5 h-5" />
@@ -324,9 +324,9 @@ export function ChartBuilder({
                                         </button>
                                         <button
                                             onClick={() => setChartType('box')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'box'
-                                                ? 'border-blue-500 bg-blue-500/20 text-blue-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'box'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                         >
                                             <Box className="w-5 h-5" />
@@ -334,9 +334,9 @@ export function ChartBuilder({
                                         </button>
                                         <button
                                             onClick={() => setChartType('violin')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-all ${chartType === 'violin'
-                                                ? 'border-purple-500 bg-purple-500/20 text-purple-400'
-                                                : 'border-white/10 hover:border-white/20'
+                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'violin'
+                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
+                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                                 }`}
                                             title="Renders as a box plot"
                                         >
@@ -351,13 +351,13 @@ export function ChartBuilder({
                         {/* Orientation (only for bar charts) */}
                         {chartType === 'bar' && (
                             <div>
-                                <label className="text-sm text-zinc-400 mb-2 block">Orientation</label>
+                                <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Orientation</label>
                                 <div className="grid grid-cols-2 gap-3">
                                     <button
                                         onClick={() => setOrientation('h')}
-                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border text-sm transition-all ${orientation === 'h'
-                                            ? 'border-cyan-500 bg-cyan-500/10'
-                                            : 'border-white/10 hover:border-white/20'
+                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm transition-all ${orientation === 'h'
+                                            ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10'
+                                            : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                             }`}
                                     >
                                         <BarChart3 className="w-4 h-4" />
@@ -365,9 +365,9 @@ export function ChartBuilder({
                                     </button>
                                     <button
                                         onClick={() => setOrientation('v')}
-                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border text-sm transition-all ${orientation === 'v'
-                                            ? 'border-cyan-500 bg-cyan-500/10'
-                                            : 'border-white/10 hover:border-white/20'
+                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm transition-all ${orientation === 'v'
+                                            ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10'
+                                            : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
                                             }`}
                                     >
                                         <BarChart3 className="w-4 h-4 rotate-90" />
@@ -379,8 +379,8 @@ export function ChartBuilder({
 
                         {/* Custom Title */}
                         <div>
-                            <label className="text-sm text-zinc-400 mb-2 block flex items-center gap-2">
-                                <Type className="w-4 h-4" />
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block flex items-center gap-2">
+                                <Type className="w-3 h-3" />
                                 Custom Title (optional)
                             </label>
                             <input
@@ -388,24 +388,24 @@ export function ChartBuilder({
                                 value={customTitle}
                                 onChange={e => setCustomTitle(e.target.value)}
                                 placeholder={selectedFieldData?.config.title || 'Enter chart title...'}
-                                className="w-full bg-zinc-800 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-cyan-500 transition-colors placeholder:text-zinc-600"
+                                className="w-full glass rounded-md px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-[var(--speckle-outline-1)]/50 transition-colors placeholder:text-[var(--speckle-foreground-3)]"
                             />
                         </div>
 
                         {/* Preview indicator */}
                         {selectedField && (
-                            <div className="bg-zinc-800/50 rounded-lg p-4 border border-white/5">
-                                <p className="text-xs text-zinc-500 mb-1">Preview</p>
+                            <div className="glass rounded-md p-4">
+                                <p className="text-xs text-[var(--speckle-foreground-3)] mb-1">Preview</p>
                                 <div className="flex items-center gap-2">
                                     {chartType === 'pie'
-                                        ? <PieChart className="w-4 h-4 text-purple-500" />
-                                        : <BarChart3 className={`w-4 h-4 text-cyan-500 ${orientation === 'v' ? 'rotate-90' : ''}`} />
+                                        ? <PieChart className="w-4 h-4 text-[var(--speckle-outline-1)]" />
+                                        : <BarChart3 className={`w-4 h-4 text-[var(--speckle-outline-1)] ${orientation === 'v' ? 'rotate-90' : ''}`} />
                                     }
                                     <span className="text-sm font-medium">
                                         {customTitle || selectedFieldData?.config.title}
                                     </span>
                                     {selectedFieldData?.isDiscovered && (
-                                        <span className="text-xs px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded">
+                                        <span className="text-xs px-1.5 py-0.5 bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)] rounded">
                                             Discovered
                                         </span>
                                     )}
@@ -415,19 +415,19 @@ export function ChartBuilder({
                     </div>
 
                     {/* Footer */}
-                    <div className="flex gap-3 px-5 py-4 border-t border-white/10 bg-zinc-800/30">
+                    <div className="flex gap-3 px-5 py-4 border-t border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation)]/30">
                         <button
                             onClick={onClose}
-                            className="flex-1 px-4 py-2.5 rounded-lg border border-white/10 hover:bg-white/5 transition-colors text-sm"
+                            className="flex-1 px-4 py-2.5 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-sm"
                         >
                             Cancel
                         </button>
                         <button
                             onClick={handleCreate}
                             disabled={!selectedField}
-                            className={`flex-1 px-4 py-2.5 rounded-lg flex items-center justify-center gap-2 text-sm font-medium transition-all ${selectedField
-                                ? 'bg-gradient-to-r from-cyan-500 to-purple-500 hover:opacity-90'
-                                : 'bg-zinc-700 text-zinc-500 cursor-not-allowed'
+                            className={`flex-1 px-4 py-2.5 rounded-md flex items-center justify-center gap-2 text-sm font-medium transition-all ${selectedField
+                                ? 'bg-[var(--speckle-outline-1)] text-white hover:opacity-90'
+                                : 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] cursor-not-allowed'
                                 }`}
                         >
                             <Check className="w-4 h-4" />

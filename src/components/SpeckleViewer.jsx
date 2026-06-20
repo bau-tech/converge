@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react'
 import { createPortal } from 'react-dom'
-import { MessageSquare, X } from 'lucide-react'
+import { Vector3 } from 'three'
+import { Flag } from 'lucide-react'
 import {
     Viewer,
     DefaultViewerParams,
@@ -27,10 +28,14 @@ import { TimelinePlayer } from './TimelinePlayer'
 
 const MeasurementType = { PERPENDICULAR: 0, POINTTOPOINT: 1, AREA: 2, POINT: 3 }
 const DEFAULT_LIGHT = { enabled: true, castShadow: false, elevation: 1.33, azimuth: 0.75 }
+// Viewer canvas background — follows the dashboard theme so the 3D viewport
+// doesn't stay light-grey when the rest of the dashboard switches to dark mode.
+const VIEWER_BG_DARK = 0x101012
+const VIEWER_BG_LIGHT = 0xffffff
 
 /**
  * Modern SpeckleViewer component using latest Speckle Viewer API
- * Handles 3D model loading, viewing, diffing, timeline, and comments overlay
+ * Handles 3D model loading, viewing, diffing, timeline, and BCF topic overlay
  */
 const SpeckleViewer = forwardRef(function SpeckleViewer({
     projectId,
@@ -48,7 +53,8 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     normalizerModelId = null,
     onCloseTimeline,
     onTimelineSync,
-    comments = [],
+    bcfTopics = [],
+    darkMode = true,
 }, ref) {
     // Refs for viewer instance and container
     const containerRef = useRef(null)
@@ -65,11 +71,24 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // handleHideSelected can use it directly instead of querying getSelectedNodes()
     // (which may return stale/cleared state if the portal toolbar click interferes).
     const lastSelectedSceneIdRef = useRef(null)
+    // Tracks which BCF pin (if any) is currently isolated/focused, so clicking
+    // it again (or clicking empty space) can deselect: clear the 'bcf'
+    // isolation filter and reset the camera back, instead of leaving the
+    // model permanently ghosted/zoomed-in with no way back.
+    const selectedBcfTopicGuidRef = useRef(null)
+    // When chart hover takes over selection, stores the previous selection id for restore on clearHover
+    const hoverRestoreRef = useRef(undefined)  // undefined = no hover active; null = hover active, nothing to restore
+    // Alternates between two state-key strings for the filteredElementIds isolation
+    // below. FilteringExtension only clears its previously-isolated ids when the
+    // stateKey passed to isolateObjects() changes from the last call — if the same
+    // key is reused, new ids are merged into (not replacing) the old set. Toggling
+    // the key on every call guarantees the isolation is replaced, not accumulated,
+    // whenever the filter result changes.
+    const filterStateKeyRef = useRef(0)
     // Stable ref for onReady — prevents initializeViewer from being recreated
     // every time the parent passes a new onReady arrow function reference.
     const onReadyRef = useRef(onReady)
     useEffect(() => { onReadyRef.current = onReady }, [onReady])
-    const commentRafRef = useRef(null)
     const timelinePlayRef = useRef(null)
     const timelineAbortRef = useRef(null)
 
@@ -78,6 +97,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // eventually exhausting the browser's WebGL context limit (~8–16 contexts).
     useEffect(() => {
         return () => {
+            timelineAbortRef.current?.abort()
             try { viewerRef.current?.dispose() } catch {}
             viewerRef.current = null
         }
@@ -87,7 +107,12 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     const projectIdRef = useRef(projectId)
     const configRef = useRef(config)
     const elementMapRef = useRef(new Map())
+    // Reverse lookup (IFC GUID / application_id -> element) so a BCF viewpoint's
+    // stored ifcGuids can be mapped back to scene object ids on pin click.
+    const elementByAppIdRef = useRef(new Map())
     const speckleIdsRef = useRef([])
+    const darkModeRef = useRef(darkMode)
+    useEffect(() => { darkModeRef.current = darkMode }, [darkMode])
 
     // State
     const [objectId, setObjectId] = useState(null)
@@ -127,11 +152,85 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     const [timelineSpeed, setTimelineSpeed] = useState(1)
     const [syncCharts, setSyncCharts] = useState(false)
 
-    // Comments state
-    const [showComments, setShowComments] = useState(false)
-    const [selectedComment, setSelectedComment] = useState(null)
-    const [pinPositions, setPinPositions] = useState({})
     const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
+
+    // BCF topic pins
+    const [showBcfTopics, setShowBcfTopics] = useState(true)
+    const [bcfPinPositions, setBcfPinPositions] = useState({})
+    const bcfRafRef = useRef(null)
+
+    // Shared by captureViewpoint() and captureViewpointForElements() — reads
+    // the current camera, clipping planes, and a screenshot into a BCF-shaped
+    // viewpoint payload (matches bim-normalizer/bcf/schemas.py's
+    // ViewpointCreate). `selectionAppIds`, if given, overrides which IFC
+    // GUIDs go into `selection` (defaults to whatever's currently
+    // click-selected).
+    const readViewpointFromCamera = async (selectionAppIds) => {
+        const viewer = viewerRef.current
+        if (!viewer) return null
+        try {
+            const camera = viewer.getRenderer()?.renderingCamera
+            if (!camera) return null
+            camera.updateMatrixWorld(true)
+            const e = camera.matrixWorld.elements
+            const normalize = (x, y, z) => {
+                const len = Math.hypot(x, y, z) || 1
+                return { x: x / len, y: y / len, z: z / len }
+            }
+            const camera_view_point = { x: e[12], y: e[13], z: e[14] }
+            const camera_direction = normalize(-e[8], -e[9], -e[10])
+            const camera_up_vector = normalize(e[4], e[5], e[6])
+            const is_orthogonal = !!camera.isOrthographicCamera
+            const field_of_view = is_orthogonal ? null : camera.fov
+            const view_to_world_scale = is_orthogonal ? (camera.top - camera.bottom) : null
+
+            const clipping_planes = []
+            try {
+                const sectionTool = viewer.getExtension(SectionTool)
+                if (sectionTool?.enabled) {
+                    for (const plane of sectionTool.sectionPlanes || []) {
+                        const n = plane.normal
+                        clipping_planes.push({
+                            location: { x: -plane.constant * n.x, y: -plane.constant * n.y, z: -plane.constant * n.z },
+                            direction: { x: n.x, y: n.y, z: n.z },
+                        })
+                    }
+                }
+            } catch {}
+
+            let selection = selectionAppIds
+            if (!selection) {
+                selection = []
+                const sceneId = lastSelectedSceneIdRef.current
+                if (sceneId) {
+                    const el = elementMapRef.current.get(sceneId)
+                    if (el?.application_id) selection.push(el.application_id)
+                }
+            }
+
+            let snapshot_base64 = null
+            try {
+                const dataUrl = await viewer.screenshot()
+                if (dataUrl) snapshot_base64 = dataUrl.split(',')[1] || null
+                else console.warn('[SpeckleViewer] readViewpointFromCamera: viewer.screenshot() returned empty/falsy')
+            } catch (e) { console.warn('[SpeckleViewer] readViewpointFromCamera: screenshot capture failed:', e) }
+
+            return {
+                is_orthogonal,
+                camera_view_point,
+                camera_direction,
+                camera_up_vector,
+                field_of_view,
+                view_to_world_scale,
+                clipping_planes,
+                selection,
+                snapshot_base64,
+            }
+        } catch (e) {
+            console.warn('[SpeckleViewer] readViewpointFromCamera error:', e)
+            return null
+        }
+    }
 
     // Imperative API — lets App.jsx call setFilter(ids) directly, bypassing the
     // React prop/memo chain which can be unreliable for real-time filter updates.
@@ -157,7 +256,124 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 viewerRef.current.getExtension(SelectionExtension)?.selectObjects([id])
                 viewerRef.current.getExtension(HybridCameraController)?.setCameraView([id], true)
             } catch (e) { console.warn('[SpeckleViewer] selectObject error:', e) }
-        }
+        },
+        // Highlight a set of elements from an external source (chart hover).
+        // Does NOT move the camera. Saves the current click-selection so
+        // clearHover() can restore it when the pointer leaves the chart.
+        highlightObjects(ids) {
+            if (!viewerRef.current) return
+            try {
+                const selExt = viewerRef.current.getExtension(SelectionExtension)
+                if (!selExt) return
+                // Only save restore-point on first hover entry (undefined → not null)
+                if (hoverRestoreRef.current === undefined) {
+                    hoverRestoreRef.current = lastSelectedSceneIdRef.current ?? null
+                }
+                selExt.selectObjects(ids || [])
+                viewerRef.current.requestRender()
+            } catch (e) { console.warn('[SpeckleViewer] highlightObjects error:', e) }
+        },
+        // Clear the chart-hover highlight and restore the previous click-selection.
+        clearHover() {
+            if (!viewerRef.current) return
+            try {
+                const selExt = viewerRef.current.getExtension(SelectionExtension)
+                if (!selExt) return
+                const prev = hoverRestoreRef.current
+                hoverRestoreRef.current = undefined  // reset to "no hover active"
+                if (prev) {
+                    selExt.selectObjects([prev])
+                } else {
+                    selExt.clearSelection()
+                }
+                viewerRef.current.requestRender()
+            } catch (e) { console.warn('[SpeckleViewer] clearHover error:', e) }
+        },
+        // Captures the current camera, clipping planes, selection, and a
+        // screenshot as a BCF-shaped viewpoint payload (matches the backend's
+        // ViewpointCreate schema in bim-normalizer/bcf/schemas.py).
+        async captureViewpoint() {
+            return readViewpointFromCamera()
+        },
+        // Isolates/selects elements by IFC GUID (application_id) and flies the
+        // camera to frame them, without taking a screenshot — used so a user
+        // can click a result row (e.g. a clash) and see it highlighted live
+        // in the 3D view before deciding whether to push it anywhere.
+        focusElements(applicationIds) {
+            const viewer = viewerRef.current
+            if (!viewer || !applicationIds?.length) return
+            try {
+                const ids = applicationIds
+                    .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
+                    .filter(Boolean)
+                if (!ids.length) return
+                viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'clash', true, true)
+                viewer.getExtension(SelectionExtension)?.selectObjects(ids)
+                viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
+                // selectObjects() alone doesn't guarantee the selection outline is
+                // actually drawn before the next idle frame — request one explicitly
+                // (matches highlightObjects(), which does the same for chart hover).
+                viewer.requestRender()
+            } catch (e) { console.warn('[SpeckleViewer] focusElements error:', e) }
+        },
+        // Isolates/selects elements by IFC GUID (application_id), flies the
+        // camera to frame them, waits for the transition, then captures a
+        // viewpoint the same way captureViewpoint() does — used to generate
+        // a real snapshot for elements that aren't currently selected/in
+        // view (e.g. a clash-detection result pushed to BCF).
+        async captureViewpointForElements(applicationIds) {
+            const viewer = viewerRef.current
+            if (!viewer || !applicationIds?.length) return null
+            try {
+                const ids = applicationIds
+                    .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
+                    .filter(Boolean)
+                if (ids.length) {
+                    viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'clash', true, true)
+                    viewer.getExtension(SelectionExtension)?.selectObjects(ids)
+                    viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
+                    // setCameraView's transition has no completion callback/promise —
+                    // a fixed wait is the only option before the screenshot is taken.
+                    await new Promise((resolve) => setTimeout(resolve, 650))
+                    // The selection outline can still lag a frame behind the camera
+                    // settling — force one more render and give it a tick to actually
+                    // composite before the screenshot is taken, otherwise the
+                    // clashing elements show isolated but not visibly highlighted.
+                    viewer.requestRender()
+                    await new Promise((resolve) => setTimeout(resolve, 100))
+                }
+                const foundAppIds = applicationIds.filter((appId) => elementByAppIdRef.current.has(appId))
+                return await readViewpointFromCamera(foundAppIds)
+            } catch (e) {
+                console.warn('[SpeckleViewer] captureViewpointForElements error:', e)
+                return null
+            }
+        },
+        // Restores a previously captured BCF viewpoint: flies the camera back,
+        // re-selects/isolates the referenced elements (mapped from IFC GUIDs
+        // back to scene object ids), mirroring handleCommentClick below.
+        restoreBcfViewpoint(viewpoint, topicGuid = null) {
+            const viewer = viewerRef.current
+            if (!viewer || !viewpoint) return
+            try {
+                selectedBcfTopicGuidRef.current = topicGuid
+                const ids = (viewpoint.selection || [])
+                    .map((guid) => elementByAppIdRef.current.get(guid)?.speckle_id)
+                    .filter(Boolean)
+                if (ids.length) {
+                    viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
+                    viewer.getExtension(SelectionExtension)?.selectObjects(ids)
+                }
+                if (viewpoint.camera_view_point && viewpoint.camera_direction) {
+                    const position = new Vector3(viewpoint.camera_view_point.x, viewpoint.camera_view_point.y, viewpoint.camera_view_point.z)
+                    const dir = viewpoint.camera_direction
+                    const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), 10)
+                    viewer.getExtension(HybridCameraController)?.setCameraView({ position, target }, true)
+                } else if (ids.length) {
+                    viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
+                }
+            } catch (e) { console.warn('[SpeckleViewer] restoreBcfViewpoint error:', e) }
+        },
     }), [])
 
     // ─────────────────────────────────────────────────────────────
@@ -166,9 +382,18 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     useEffect(() => { projectIdRef.current = projectId }, [projectId])
     useEffect(() => { configRef.current = config }, [config])
 
+    // Keep the viewer canvas background in sync with the dashboard theme
+    useEffect(() => {
+        const renderer = viewerRef.current?.getRenderer()
+        if (!renderer?.renderer) return
+        renderer.renderer.setClearColor(darkMode ? VIEWER_BG_DARK : VIEWER_BG_LIGHT, 1)
+        viewerRef.current?.requestRender()
+    }, [darkMode, isViewerReady])
+
     // Build cached element lookup map
     useEffect(() => {
         const map = new Map()
+        const byAppId = new Map()
         const ids = []
         const elements = Array.isArray(fullData?.elements) ? fullData.elements : []
         for (const el of elements) {
@@ -177,8 +402,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 ids.push(el.speckle_id)
             }
             if (el.id) map.set(el.id, el)
+            if (el.application_id) byAppId.set(el.application_id, el)
         }
         elementMapRef.current = map
+        elementByAppIdRef.current = byAppId
         speckleIdsRef.current = ids
     }, [fullData])
 
@@ -264,13 +491,6 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             controller.abort()
         }
     }, [projectId, versionId, resolveObjectId])
-
-    // Reset comments on version change
-    useEffect(() => {
-        setShowComments(false)
-        setSelectedComment(null)
-        setPinPositions({})
-    }, [projectId, versionId])
 
     // ─────────────────────────────────────────────────────────────
     // Viewer initialization
@@ -359,6 +579,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             if (passes?.length) passes.forEach((p) => { p.enabled = false })
             if (renderer?.shadowcatcher) renderer.shadowcatcher.shadowcatcherPass.enabled = false
             if (renderer?.setMaximumFPS) renderer.setMaximumFPS(30)
+            renderer?.renderer?.setClearColor(darkModeRef.current ? VIEWER_BG_DARK : VIEWER_BG_LIGHT, 1)
         } catch {}
 
         // Click handler
@@ -371,6 +592,16 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 setSelectionCount(0)
                 lastSelectedSceneIdRef.current = null
                 if (onSelectionChange) onSelectionChange(null)
+                // Clicking empty space while a BCF pin is focused also resets
+                // the view — otherwise the model stays isolated/ghosted and
+                // zoomed into that pin's viewpoint with no way back.
+                if (selectedBcfTopicGuidRef.current) {
+                    try {
+                        viewer.getExtension(FilteringExtension)?.resetFilters()
+                        viewer.getExtension(HybridCameraController)?.setCameraView([], true)
+                    } catch {}
+                    selectedBcfTopicGuidRef.current = null
+                }
                 return
             }
 
@@ -533,7 +764,8 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 // isolateObjects already ghosts non-matching elements — no need to
                 // also call selectObjects, which would incorrectly turn every matching
                 // element cyan as if the user had clicked them all.
-                filteringExt.isolateObjects(filteredElementIds, 'filter', true, true)
+                filterStateKeyRef.current = filterStateKeyRef.current === 0 ? 1 : 0
+                filteringExt.isolateObjects(filteredElementIds, `filter-${filterStateKeyRef.current}`, true, true)
             } catch (err) {
                 console.warn('[SpeckleViewer] isolateObjects error:', err)
             }
@@ -957,54 +1189,64 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     }, [containerSize])
 
     useEffect(() => {
-        if (!showComments || !isViewerReady || !comments.length) {
-            if (commentRafRef.current) cancelAnimationFrame(commentRafRef.current)
-            setPinPositions({})
+        if (!showBcfTopics || !isViewerReady || !bcfTopics.length) {
+            if (bcfRafRef.current) cancelAnimationFrame(bcfRafRef.current)
+            setBcfPinPositions({})
             return
         }
 
         const loop = () => {
             const nextPins = {}
-            for (const comment of comments) {
-                try {
-                    const state = typeof comment.viewerState === 'string' ? JSON.parse(comment.viewerState) : comment.viewerState
-                    const target = state?.ui?.camera?.target || state?.camera?.target
-                    if (!target) continue
-                    const [tx, ty, tz] = Array.isArray(target) ? target : [target.x, target.y, target.z]
-                    const pos = projectWorldPoint(tx, ty, tz)
-                    if (pos?.visible) nextPins[comment.id] = pos
-                } catch {}
+            for (const topic of bcfTopics) {
+                const cvp = topic.viewpoint?.camera_view_point
+                if (!cvp) continue
+                const pos = projectWorldPoint(cvp.x, cvp.y, cvp.z)
+                if (pos?.visible) nextPins[topic.guid] = pos
             }
-            setPinPositions(nextPins)
-            commentRafRef.current = requestAnimationFrame(loop)
+            setBcfPinPositions(nextPins)
+            bcfRafRef.current = requestAnimationFrame(loop)
         }
 
-        commentRafRef.current = requestAnimationFrame(loop)
+        bcfRafRef.current = requestAnimationFrame(loop)
         return () => {
-            if (commentRafRef.current) cancelAnimationFrame(commentRafRef.current)
+            if (bcfRafRef.current) cancelAnimationFrame(bcfRafRef.current)
         }
-    }, [showComments, isViewerReady, comments, projectWorldPoint])
+    }, [showBcfTopics, isViewerReady, bcfTopics, projectWorldPoint])
 
-    const handleCommentClick = useCallback((comment) => {
-        setSelectedComment((prev) => (prev?.id === comment.id ? null : comment))
+    const handleBcfPinClick = useCallback((topic) => {
         if (!viewerRef.current) return
         try {
-            const state = typeof comment.viewerState === 'string' ? JSON.parse(comment.viewerState) : comment.viewerState
-            const resourceIds = (comment.viewerResources || []).map((r) => r.objectId).filter(Boolean)
-            const selectedIds = resourceIds.length > 0 ? resourceIds : (state?.selection?.objects || state?.selectedObjects || [])
-            if (selectedIds?.length) {
-                viewerRef.current.getExtension(FilteringExtension)?.isolateObjects(selectedIds, 'comment', true, true)
-                viewerRef.current.getExtension(SelectionExtension)?.selectObjects(selectedIds)
-                // Only zoom to the linked elements — skip if empty to avoid zooming to extents
-                viewerRef.current.getExtension(HybridCameraController)?.setCameraView(selectedIds, true)
-            } else if (state?.camera) {
-                // Restore the saved camera position even when no elements are linked
-                try {
-                    viewerRef.current.getExtension(HybridCameraController)?.setCameraView(state.camera, false)
-                } catch {}
+            // Clicking an already-focused pin again deselects it: clear the
+            // isolation/selection and reset the camera, rather than leaving
+            // the model stuck ghosted and zoomed in with no way back.
+            if (selectedBcfTopicGuidRef.current === topic.guid) {
+                viewerRef.current.getExtension(FilteringExtension)?.resetFilters()
+                viewerRef.current.getExtension(SelectionExtension)?.clearSelection()
+                viewerRef.current.getExtension(HybridCameraController)?.setCameraView([], true)
+                selectedBcfTopicGuidRef.current = null
+                return
             }
+            if (!topic.viewpoint) return
+
+            const ids = (topic.viewpoint.selection || [])
+                .map((guid) => elementByAppIdRef.current.get(guid)?.speckle_id)
+                .filter(Boolean)
+            if (ids.length) {
+                viewerRef.current.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
+                viewerRef.current.getExtension(SelectionExtension)?.selectObjects(ids)
+            }
+            const cvp = topic.viewpoint.camera_view_point
+            const dir = topic.viewpoint.camera_direction
+            if (cvp && dir) {
+                const position = new Vector3(cvp.x, cvp.y, cvp.z)
+                const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), 10)
+                viewerRef.current.getExtension(HybridCameraController)?.setCameraView({ position, target }, true)
+            } else if (ids.length) {
+                viewerRef.current.getExtension(HybridCameraController)?.setCameraView(ids, true)
+            }
+            selectedBcfTopicGuidRef.current = topic.guid
         } catch (err) {
-            console.warn('Comment navigation error:', err)
+            console.warn('BCF topic navigation error:', err)
         }
     }, [])
 
@@ -1139,76 +1381,39 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 />
             )}
 
-            {/* Comments toggle button — top-right corner */}
-            {isViewerReady && comments.length > 0 && (
+            {/* BCF topics toggle button — top-right corner */}
+            {isViewerReady && bcfTopics.length > 0 && (
                 <button
                     style={{ position: 'absolute', top: 12, right: 12, pointerEvents: 'auto' }}
-                    onClick={() => {
-                        setShowComments((v) => {
-                            const next = !v
-                            if (!next) setSelectedComment(null)
-                            return next
-                        })
-                    }}
+                    onClick={() => setShowBcfTopics((v) => !v)}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium shadow transition-all ${
-                        showComments
-                            ? 'bg-primary text-black'
+                        showBcfTopics
+                            ? 'bg-amber-500 text-black'
                             : 'bg-zinc-800/80 border border-white/10 text-zinc-400 hover:text-zinc-200'
                     }`}
                 >
-                    <MessageSquare className="w-3.5 h-3.5" />
-                    {comments.length}
+                    <Flag className="w-3.5 h-3.5" />
+                    {bcfTopics.length}
                 </button>
             )}
 
-            {/* Comment pins — rendered over the viewer area */}
-            {isViewerReady && showComments && (
+            {/* BCF topic pins */}
+            {isViewerReady && showBcfTopics && (
                 <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', borderRadius: '0.75rem', pointerEvents: 'none' }}>
-                    {comments.map((comment, idx) => {
-                        const pos = pinPositions[comment.id]
+                    {bcfTopics.map((topic) => {
+                        const pos = bcfPinPositions[topic.guid]
                         return pos ? (
                             <button
-                                key={comment.id}
-                                onClick={() => handleCommentClick(comment)}
+                                key={topic.guid}
+                                onClick={() => handleBcfPinClick(topic)}
+                                title={topic.title}
                                 style={{ position: 'absolute', left: pos.x, top: pos.y, transform: 'translate(-50%, -50%)', pointerEvents: 'auto' }}
-                                className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shadow-lg border-2 transition-transform ${
-                                    selectedComment?.id === comment.id
-                                        ? 'bg-primary border-white text-black scale-125'
-                                        : 'bg-zinc-900 border-primary text-primary hover:scale-110'
-                                }`}
+                                className="w-6 h-6 rounded-full flex items-center justify-center shadow-lg border-2 bg-zinc-900 border-amber-500 text-amber-500 hover:scale-110 transition-transform"
                             >
-                                {idx + 1}
+                                <Flag className="w-3 h-3" />
                             </button>
                         ) : null
                     })}
-                </div>
-            )}
-
-            {/* Selected comment popup — bottom-left */}
-            {isViewerReady && showComments && selectedComment && (
-                <div style={{ position: 'absolute', bottom: 56, left: 12, width: 288, pointerEvents: 'auto', zIndex: 1 }}
-                    className="rounded-xl shadow-2xl overflow-hidden bg-zinc-900 border border-white/10"
-                >
-                    <div className="p-3 border-b border-white/10 flex items-center gap-2">
-                        <div className="w-6 h-6 rounded-full bg-primary/30 flex items-center justify-center text-[10px] font-bold text-primary shrink-0">
-                            {(selectedComment.author?.name || '?')[0].toUpperCase()}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                            <p className="text-xs font-medium text-zinc-200 truncate">{selectedComment.author?.name || 'Unknown'}</p>
-                            <p className="text-[10px] text-zinc-500">{new Date(selectedComment.createdAt).toLocaleDateString()}</p>
-                        </div>
-                        <button onClick={() => setSelectedComment(null)} className="text-zinc-500 hover:text-zinc-300 shrink-0">
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                    </div>
-                    <div className="p-3 max-h-48 overflow-y-auto">
-                        <p className="text-sm text-zinc-300 whitespace-pre-wrap">
-                            {selectedComment._text || selectedComment.rawText || '(No text)'}
-                        </p>
-                        {selectedComment.screenshot && (
-                            <img src={selectedComment.screenshot} className="mt-2 w-full rounded-lg border border-white/10" alt="Comment" />
-                        )}
-                    </div>
                 </div>
             )}
         </div>,
@@ -1245,7 +1450,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 </div>
             )}
 
-            {/* All interactive overlays (toolbar, timeline, diffbar, comments)
+            {/* All interactive overlays (toolbar, timeline, diffbar, BCF topics)
                 are rendered via the overlayJSX portal below — outside the viewer DOM. */}
         </div>
         {overlayJSX}

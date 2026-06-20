@@ -1,5 +1,5 @@
 import EChart from './EChart'
-import { baseOption, categoryAxisStyle, valueAxisStyle } from '../lib/echartsTheme'
+import { baseOption, categoryAxisStyle, valueAxisStyle, legendStyle } from '../lib/echartsTheme'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2 } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
@@ -120,6 +120,7 @@ const isEmptyKey = (k) => EMPTY_KEYS.has(k) || (typeof k === 'string' && k.trim(
 function resolveColors(scheme) {
     const palettes = {
         default: COLOR_PALETTES.bar,
+        speckle: ['#136CFF','#276FE5','#4B40C9','#34D399','#FBBF24','#F87171','#B8C0CC'],
         emerald: ['#10B981','#34D399','#6EE7B7','#059669','#047857','#065F46','#064E3B'],
         blue:    ['#3B82F6','#60A5FA','#93C5FD','#2563EB','#1D4ED8','#1E40AF','#1E3A8A'],
         amber:   ['#F59E0B','#FBBF24','#FCD34D','#D97706','#B45309','#92400E','#78350F'],
@@ -146,15 +147,25 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
     const isHorizontal = config.orientation !== 'v'
     const unit = config.unit || null
     const valueLabel = unit === 'm³' ? 'Volume' : unit === 'm²' ? 'Area' : 'Count'
-    const formatVal = v => unit ? Number(v).toFixed(2) : v
+    const decimals = config.decimals ?? (unit ? 2 : 0)
+    const useThousands = config.thousandsSeparator !== false
+    const formatVal = v => {
+        const num = Number(v)
+        if (Number.isNaN(num)) return v
+        return useThousands
+            ? num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+            : num.toFixed(decimals)
+    }
     const palette = resolveColors(config.colorScheme)
     const showLabels = config.showLabels !== false
 
     const tickFontSize   = config.tickFontSize   || 11
-    const tickFontColor  = config.tickFontColor  || (darkMode ? '#e4e4e7' : '#18181b')
+    const tickFontColor  = config.tickFontColor  || (darkMode ? '#e4e4e7' : '#000000')
     const tickAngle      = config.tickAngle      ?? (isHorizontal ? 0 : -45)
     const valueFontSize  = config.valueFontSize  || 11
-    const valueFontColor = config.valueFontColor || (darkMode ? '#e4e4e7' : '#18181b')
+    const valueFontColor = config.valueFontColor || (darkMode ? '#e4e4e7' : '#000000')
+    const showGridLines  = config.showGridLines  !== false
+    const showLegend     = config.showLegend     === true
 
     const seriesData = sorted.map((d, idx) => {
         const base = palette[idx % palette.length]
@@ -176,15 +187,20 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
         darkMode,
         axisLabel: { color: tickFontColor, fontSize: tickFontSize, rotate: tickAngle },
     })
-    const valueAxisOpt = valueAxisStyle({ darkMode })
+    const valueAxisOpt = valueAxisStyle({
+        darkMode, showGridLines,
+        min: config.axisMin != null && config.axisMin !== '' ? Number(config.axisMin) : undefined,
+        max: config.axisMax != null && config.axisMax !== '' ? Number(config.axisMax) : undefined,
+        axisLabel: { formatter: formatVal },
+    })
 
     const grid = standalone
         ? (isHorizontal
-            ? { left: 50, right: 8, top: 8, bottom: 28, containLabel: true }
-            : { left: 40, right: 8, top: 8, bottom: 70, containLabel: true })
+            ? { left: 50, right: 8, top: showLegend ? 28 : 8, bottom: 28, containLabel: true }
+            : { left: 40, right: 8, top: showLegend ? 28 : 8, bottom: 70, containLabel: true })
         : (isHorizontal
-            ? { left: 60, right: 20, top: 30, bottom: 40, containLabel: true }
-            : { left: 40, right: 20, top: 30, bottom: tickAngle === 0 ? 40 : Math.abs(tickAngle) >= 45 ? 80 : 60, containLabel: true })
+            ? { left: 60, right: 20, top: showLegend ? 50 : 30, bottom: 40, containLabel: true }
+            : { left: 40, right: 20, top: showLegend ? 50 : 30, bottom: tickAngle === 0 ? 40 : Math.abs(tickAngle) >= 45 ? 80 : 60, containLabel: true })
 
     return {
         ...baseOption({
@@ -195,18 +211,20 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
             },
         }),
         animationDurationUpdate: isResizing ? 0 : 650,
+        legend: legendStyle({ show: showLegend, darkMode, top: 4, left: 'center', data: [valueLabel] }),
         grid,
         xAxis: isHorizontal ? valueAxisOpt : categoryAxisOpt,
         yAxis: isHorizontal ? categoryAxisOpt : valueAxisOpt,
         series: [{
             type: 'bar',
+            name: valueLabel,
             data: seriesData,
             label: {
                 show: showLabels,
                 position: isHorizontal ? 'right' : 'top',
                 color: valueFontColor,
                 fontSize: valueFontSize,
-                formatter: (params) => unit ? `${formatVal(params.value)} ${unit}` : params.value,
+                formatter: (params) => unit ? `${formatVal(params.value)} ${unit}` : formatVal(params.value),
             },
         }],
     }
@@ -221,7 +239,31 @@ function preparePieOption(data, config, highlightedValue, { darkMode = true, sta
     const showLabels = config.showLabels !== false
     const donut = config.donut !== false  // default true (donut style)
     const labelFontSize = config.labelFontSize || 11
-    const labelFontColor = config.labelFontColor || (darkMode ? '#e4e4e7' : '#18181b')
+    const labelFontColor = config.labelFontColor || (darkMode ? '#e4e4e7' : '#000000')
+    const showLegend = config.showLegend === true
+    const unit = config.unit || null
+    const decimals = config.decimals ?? (unit ? 2 : 0)
+    const useThousands = config.thousandsSeparator !== false
+    const formatVal = v => {
+        const num = Number(v)
+        if (Number.isNaN(num)) return v
+        return useThousands
+            ? num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
+            : num.toFixed(decimals)
+    }
+    const showLabelName = config.pieLabelName !== false
+    const showLabelValue = config.pieLabelValue !== false
+    const showLabelPercent = config.pieLabelPercent !== false
+    const showLeaderLine = config.pieLeaderLine !== false
+    const formatLabel = (params) => {
+        const parts = []
+        if (showLabelValue) parts.push(`${formatVal(params.value)}${unit ? ' ' + unit : ''}`)
+        if (showLabelPercent) parts.push(`(${params.percent}%)`)
+        const tail = parts.join(' ')
+        if (showLabelName && tail) return `${params.name}: ${tail}`
+        if (showLabelName) return params.name
+        return tail || params.name
+    }
 
     const seriesData = sorted.map((d, idx) => {
         const base = palette[idx % palette.length]
@@ -241,17 +283,31 @@ function preparePieOption(data, config, highlightedValue, { darkMode = true, sta
     return {
         ...baseOption({
             darkMode,
-            tooltipFormatter: (params) => `<b>${params.name}</b><br/>Count: ${params.value}<br/>${params.percent}%`,
+            tooltipFormatter: (params) => `<b>${params.name}</b><br/>Count: ${formatVal(params.value)}${unit ? ' ' + unit : ''}<br/>${params.percent}%`,
         }),
         animationDurationUpdate: isResizing ? 0 : 650,
+        legend: legendStyle({
+            show: showLegend, darkMode,
+            orient: 'vertical', right: 4, top: 'center', type: 'scroll',
+            itemWidth: 12, itemHeight: 12,
+            data: seriesData.map(d => d.name),
+        }),
         series: [{
             type: 'pie',
             radius: donut ? ['50%', '75%'] : '75%',
+            center: showLegend ? ['38%', '50%'] : ['50%', '50%'],
             data: seriesData,
-            label: standalone
-                ? { show: showLabels, position: 'inside', formatter: '{d}%', fontSize: labelFontSize, color: '#fff' }
-                : { show: showLabels, position: 'outside', formatter: '{b}: {d}%', fontSize: labelFontSize, color: labelFontColor },
-            labelLine: { show: !standalone && showLabels },
+            // Outside labels + leader lines for every slice — name, value and
+            // percent together, so the chart reads on its own without needing
+            // the legend or a tooltip hover.
+            label: {
+                show: showLabels,
+                position: 'outside',
+                formatter: formatLabel,
+                fontSize: labelFontSize,
+                color: labelFontColor,
+            },
+            labelLine: { show: showLabels && showLeaderLine },
         }],
     }
 }
@@ -289,6 +345,8 @@ function prepareHierarchicalOption(data, config, highlightedValue, { darkMode = 
         .sort((a, b) => b[1] - a[1])
         .slice(0, 20)
 
+    const showLegend = config.showLegend === true
+
     const seriesData = entries.map((d, idx) => ({
         name: d[0],
         value: d[1],
@@ -302,6 +360,12 @@ function prepareHierarchicalOption(data, config, highlightedValue, { darkMode = 
             darkMode,
             tooltipFormatter: (params) => `<b>${params.name}</b><br/>Count: ${params.value}`,
         }),
+        legend: legendStyle({
+            show: showLegend, darkMode,
+            orient: 'vertical', right: 4, top: 'center', type: 'scroll',
+            itemWidth: 12, itemHeight: 12,
+            data: seriesData.map(d => d.name),
+        }),
     }
 
     if (config.type === 'sunburst') {
@@ -310,8 +374,9 @@ function prepareHierarchicalOption(data, config, highlightedValue, { darkMode = 
             series: [{
                 type: 'sunburst',
                 radius: ['0%', '85%'],
+                center: showLegend ? ['38%', '50%'] : ['50%', '50%'],
                 data: seriesData,
-                label: { color: darkMode ? '#e4e4e7' : '#18181b' },
+                label: { color: darkMode ? '#e4e4e7' : '#000000' },
             }],
         }
     }
@@ -322,6 +387,10 @@ function prepareHierarchicalOption(data, config, highlightedValue, { darkMode = 
             type: 'treemap',
             data: seriesData,
             roam: false,
+            left: 0,
+            right: showLegend ? '22%' : 0,
+            top: 0,
+            bottom: 0,
             breadcrumb: { show: false },
             upperLabel: { show: false },
             label: { color: '#fff' },
@@ -436,6 +505,8 @@ export function DynamicChart({
     highlightedValue,
     viewerSelectedElement,
     onValueClick,
+    onHoverValue,  // (field, value) => void  — called when pointer enters a chart segment
+    onHoverEnd,    // () => void               — called when pointer leaves the chart
     fullDataReady,
     onRemove,
     onEdit,
@@ -543,7 +614,20 @@ export function DynamicChart({
         onValueClick(effectiveConfig.field, params.name)
     }
 
-    const onEvents = { click: handleClick }
+    const handleMouseOver = (params) => {
+        if (!onHoverValue || !effectiveConfig.field || !params.name || isStatistical) return
+        onHoverValue(effectiveConfig.field, params.name)
+    }
+
+    const handleMouseOut = () => {
+        if (onHoverEnd) onHoverEnd()
+    }
+
+    const onEvents = {
+        click: handleClick,
+        mouseover: handleMouseOver,
+        mouseout: handleMouseOut,
+    }
     const cursor = (effectiveConfig.clickable && fullDataReady && !isStatistical) ? 'pointer' : 'default'
 
     // ── Standalone panel mode (individual grid panel) ──────────────────

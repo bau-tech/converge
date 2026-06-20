@@ -51,7 +51,7 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
             className="absolute top-3 left-3 right-3 z-20"
         >
             {/* Main bar */}
-            <div className="rounded-xl border border-purple-500/20 bg-zinc-900 shadow-2xl p-2 flex items-center gap-2 flex-wrap">
+            <div className="rounded-xl border border-purple-500/20 bg-[var(--speckle-foundation-2)] shadow-2xl p-2 flex items-center gap-2 flex-wrap">
 
                 {/* Mode label */}
                 <div className="flex items-center gap-1.5 text-[11px] font-semibold text-purple-400 pr-1">
@@ -59,7 +59,7 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
                     Diff Mode
                 </div>
 
-                <div className="w-px h-4 bg-white/10 flex-shrink-0" />
+                <div className="w-px h-4 bg-[var(--speckle-outline-3)] flex-shrink-0" />
 
                 {/* Added pill */}
                 <button
@@ -81,11 +81,11 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
                     title="Click to isolate unchanged elements in 3D"
                     className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all ${
                         activeFilter === 'unchanged'
-                            ? 'bg-zinc-500/30 border border-zinc-400/60 text-zinc-200 shadow-[0_0_8px_rgba(161,161,170,0.25)]'
-                            : 'bg-zinc-700/30 border border-white/8 text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-300'
+                            ? 'bg-[var(--speckle-outline-5)]/30 border border-[var(--speckle-outline-5)] text-[var(--speckle-foreground)] shadow-[0_0_8px_rgba(161,161,170,0.25)]'
+                            : 'bg-[var(--speckle-outline-3)] border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-2)] hover:text-[var(--speckle-foreground-2)]'
                     }`}
                 >
-                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 flex-shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--speckle-outline-5)] flex-shrink-0" />
                     ~{unchanged_count.toLocaleString()} Unchanged
                 </button>
 
@@ -108,13 +108,13 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
                     </span>
                 )}
 
-                <div className="w-px h-4 bg-white/10 flex-shrink-0" />
+                <div className="w-px h-4 bg-[var(--speckle-outline-3)] flex-shrink-0" />
 
                 {/* Category changes toggle */}
                 {significantChanges.length > 0 && (
                     <button
                         onClick={() => setShowCategories(v => !v)}
-                        className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors"
+                        className="flex items-center gap-1 text-[11px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground-2)] transition-colors"
                     >
                         {significantChanges.length} categories changed
                         <ChevronDown className={`w-3 h-3 transition-transform ${showCategories ? 'rotate-180' : ''}`} />
@@ -127,7 +127,7 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
                 <button
                     onClick={onExit}
                     title="Exit diff mode"
-                    className="p-1 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-white transition-colors flex-shrink-0"
+                    className="p-1 rounded-lg hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors flex-shrink-0"
                 >
                     <X className="w-3.5 h-3.5" />
                 </button>
@@ -140,13 +140,13 @@ export function DiffBar({ diffResult, onExit, onIsolateAdded, onIsolateUnchanged
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
-                        className="mt-1.5 rounded-xl border border-white/10 bg-zinc-900 overflow-hidden"
+                        className="mt-1.5 glass rounded-xl overflow-hidden"
                     >
                         <div className="p-2 grid grid-cols-2 gap-x-4 gap-y-0.5">
                             {significantChanges.map(c => (
-                                <div key={c.category} className="flex items-center gap-2 py-1 border-b border-white/5 last:border-0">
-                                    <span className="text-[11px] text-zinc-300 truncate flex-1">{c.category}</span>
-                                    <span className="text-[10px] text-zinc-500 tabular-nums">{c.other_count} → {c.current_count}</span>
+                                <div key={c.category} className="flex items-center gap-2 py-1 border-b border-[var(--speckle-outline-3)] last:border-0">
+                                    <span className="text-[11px] text-[var(--speckle-foreground-2)] truncate flex-1">{c.category}</span>
+                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] tabular-nums">{c.other_count} → {c.current_count}</span>
                                     <span className={`text-[11px] font-semibold tabular-nums w-8 text-right ${c.delta > 0 ? 'text-green-400' : 'text-red-400'}`}>
                                         {c.delta > 0 ? '+' : ''}{c.delta}
                                     </span>

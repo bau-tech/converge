@@ -15,6 +15,8 @@ export function StandaloneChartWidget({
     highlightedField,
     highlightedValue,
     onValueClick,
+    onHoverValue,
+    onHoverEnd,
     viewerSelectedElement,
     darkMode = true,
 }) {
@@ -104,13 +106,24 @@ export function StandaloneChartWidget({
         minCount:       displayOptions.minCount     ?? 0,
         showLabels:     displayOptions.showLabels   ?? true,
         donut:          displayOptions.donut        ?? true,
+        showLegend:     displayOptions.showLegend   ?? false,
+        showGridLines:  displayOptions.showGridLines ?? true,
         tickFontSize:   displayOptions.tickFontSize   ?? 11,
-        tickFontColor:  displayOptions.tickFontColor  ?? (darkMode ? '#e4e4e7' : '#18181b'),
+        tickFontColor:  displayOptions.tickFontColor  ?? (darkMode ? '#e4e4e7' : '#000000'),
         tickAngle:      displayOptions.tickAngle      ?? (cfg.orientation === 'v' ? -45 : 0),
         valueFontSize:  displayOptions.valueFontSize  ?? 11,
-        valueFontColor: displayOptions.valueFontColor ?? (darkMode ? '#e4e4e7' : '#18181b'),
+        valueFontColor: displayOptions.valueFontColor ?? (darkMode ? '#e4e4e7' : '#000000'),
         labelFontSize:  displayOptions.labelFontSize  ?? 11,
-        labelFontColor: displayOptions.labelFontColor ?? (darkMode ? '#e4e4e7' : '#18181b'),
+        labelFontColor: displayOptions.labelFontColor ?? (darkMode ? '#e4e4e7' : '#000000'),
+        unit:               displayOptions.unit               ?? cfg.unit ?? null,
+        decimals:           displayOptions.decimals           ?? null,
+        thousandsSeparator: displayOptions.thousandsSeparator  ?? true,
+        axisMin:            displayOptions.axisMin             ?? null,
+        axisMax:            displayOptions.axisMax             ?? null,
+        pieLabelName:       displayOptions.pieLabelName        ?? true,
+        pieLabelValue:      displayOptions.pieLabelValue       ?? true,
+        pieLabelPercent:    displayOptions.pieLabelPercent     ?? true,
+        pieLeaderLine:      displayOptions.pieLeaderLine       ?? true,
     } : cfg ? { ...cfg, title: widget.title || cfg.title } : null
 
     return (
@@ -124,6 +137,8 @@ export function StandaloneChartWidget({
                     highlightedValue={effectiveHighlight}
                     viewerSelectedElement={viewerSelectedElement}
                     onValueClick={effectiveCfg.clickable ? onValueClick : undefined}
+                    onHoverValue={onHoverValue}
+                    onHoverEnd={onHoverEnd}
                     fullDataReady={fullDataReady}
                     onEdit={() => setShowBuilder(true)}
                     darkMode={darkMode}

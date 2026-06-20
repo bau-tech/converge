@@ -276,7 +276,7 @@ export default function ViewerToolbar({
         exit:       { opacity: 0, y: 8, scale: 0.96 },
         transition: { duration: 0.15 },
     }
-    const popoverCls = "glass rounded-xl border border-white/15 bg-zinc-900 shadow-2xl"
+    const popoverCls = "glass rounded-xl shadow-2xl"
 
     return (
         <div
@@ -293,7 +293,7 @@ export default function ViewerToolbar({
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                                 Camera Views
                             </span>
-                            <button onClick={() => setShowCamViews(false)} className="text-zinc-500 hover:text-white transition-colors">
+                            <button onClick={() => setShowCamViews(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors">
                                 <X className="w-3.5 h-3.5" />
                             </button>
                         </div>
@@ -304,7 +304,7 @@ export default function ViewerToolbar({
                                 <button
                                     key={id}
                                     onClick={() => { onCameraView(id); setShowCamViews(false) }}
-                                    className="py-1.5 rounded-lg text-[11px] font-medium text-zinc-300 hover:bg-sky-500/20 hover:text-sky-300 transition-all border border-white/8 hover:border-sky-500/30"
+                                    className="py-1.5 rounded-lg text-[11px] font-medium text-[var(--speckle-foreground-2)] hover:bg-sky-500/20 hover:text-sky-300 transition-all border border-[var(--speckle-outline-3)] hover:border-sky-500/30"
                                 >
                                     {label}
                                 </button>
@@ -314,13 +314,13 @@ export default function ViewerToolbar({
                         {/* Named views from model */}
                         {namedViews.length > 0 && (
                             <>
-                                <p className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider mb-1.5">Model Views</p>
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider mb-1.5">Model Views</p>
                                 <div className="max-h-36 overflow-y-auto space-y-0.5 custom-scrollbar">
                                     {namedViews.map((view, idx) => (
                                         <button
                                             key={view.id || view.name || idx}
                                             onClick={() => { onCameraView(view); setShowCamViews(false) }}
-                                            className="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] text-zinc-300 hover:bg-sky-500/15 hover:text-sky-300 transition-all truncate"
+                                            className="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-2)] hover:bg-sky-500/15 hover:text-sky-300 transition-all truncate"
                                         >
                                             {view.name || view.id || `View ${idx + 1}`}
                                         </button>
@@ -341,17 +341,17 @@ export default function ViewerToolbar({
                                 <Sun className="w-3.5 h-3.5" />
                                 Lighting
                             </span>
-                            <button onClick={() => setShowLighting(false)} className="text-zinc-500 hover:text-white transition-colors">
+                            <button onClick={() => setShowLighting(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors">
                                 <X className="w-3.5 h-3.5" />
                             </button>
                         </div>
 
                         {/* Enable toggle */}
                         <div className="flex items-center justify-between mb-3">
-                            <span className="text-[11px] text-zinc-300 font-medium">Sun light</span>
+                            <span className="text-[11px] text-[var(--speckle-foreground-2)] font-medium">Sun light</span>
                             <button
                                 onClick={() => onSetLighting({ enabled: !lc.enabled })}
-                                className={`relative w-9 h-5 rounded-full transition-colors ${lc.enabled ? 'bg-amber-500' : 'bg-zinc-700'}`}
+                                className={`relative w-9 h-5 rounded-full transition-colors ${lc.enabled ? 'bg-amber-500' : 'bg-[var(--speckle-outline-5)]'}`}
                             >
                                 <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${lc.enabled ? 'translate-x-4' : ''}`} />
                             </button>
@@ -362,8 +362,8 @@ export default function ViewerToolbar({
                             {/* Elevation */}
                             <div>
                                 <div className="flex justify-between mb-1">
-                                    <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Elevation</span>
-                                    <span className="text-[10px] text-zinc-400 font-mono">{elevDeg}°</span>
+                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider">Elevation</span>
+                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] font-mono">{elevDeg}°</span>
                                 </div>
                                 <input
                                     type="range"
@@ -379,8 +379,8 @@ export default function ViewerToolbar({
                             {/* Azimuth */}
                             <div>
                                 <div className="flex justify-between mb-1">
-                                    <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Azimuth</span>
-                                    <span className="text-[10px] text-zinc-400 font-mono">{azimDeg}°</span>
+                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider">Azimuth</span>
+                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] font-mono">{azimDeg}°</span>
                                 </div>
                                 <input
                                     type="range"
@@ -395,10 +395,10 @@ export default function ViewerToolbar({
 
                             {/* Cast shadows toggle */}
                             <div className="flex items-center justify-between">
-                                <span className="text-[11px] text-zinc-300 font-medium">Cast shadows</span>
+                                <span className="text-[11px] text-[var(--speckle-foreground-2)] font-medium">Cast shadows</span>
                                 <button
                                     onClick={() => onSetLighting({ castShadow: !lc.castShadow })}
-                                    className={`relative w-9 h-5 rounded-full transition-colors ${lc.castShadow ? 'bg-amber-500' : 'bg-zinc-700'}`}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${lc.castShadow ? 'bg-amber-500' : 'bg-[var(--speckle-outline-5)]'}`}
                                 >
                                     <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${lc.castShadow ? 'translate-x-4' : ''}`} />
                                 </button>
@@ -421,7 +421,7 @@ export default function ViewerToolbar({
                                     className={`flex flex-col items-center gap-1 px-3 py-2 rounded-lg text-[10px] font-medium transition-all ${
                                         viewMode === mode
                                             ? 'bg-blue-500 text-white'
-                                            : 'text-zinc-400 hover:bg-white/10 hover:text-white'
+                                            : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
                                     }`}
                                 >
                                     {icon}
@@ -438,11 +438,11 @@ export default function ViewerToolbar({
                 {showExplode && (
                     <motion.div ref={explodeRef} {...popoverAnim} className={`${popoverCls} p-3 w-56`}>
                         <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                            <span className="text-xs font-semibold text-[var(--speckle-foreground-2)] flex items-center gap-1.5">
                                 <Maximize2 className="w-3.5 h-3.5" />
                                 Explode
                             </span>
-                            <span className="text-[10px] text-zinc-500 font-mono">{Math.round((explodeValue || 0) * 100)}%</span>
+                            <span className="text-[10px] text-[var(--speckle-foreground-3)] font-mono">{Math.round((explodeValue || 0) * 100)}%</span>
                         </div>
                         <input
                             type="range"
@@ -453,14 +453,14 @@ export default function ViewerToolbar({
                             onChange={e => onExplode(parseFloat(e.target.value))}
                             className="w-full accent-blue-500 cursor-pointer"
                         />
-                        <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+                        <div className="flex justify-between text-[9px] text-[var(--speckle-foreground-3)] mt-1">
                             <span>0%</span>
                             <span>100%</span>
                         </div>
                         {(explodeValue || 0) > 0 && (
                             <button
                                 onClick={() => onExplode(0)}
-                                className="mt-2 w-full py-1 rounded-lg text-[10px] text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                                className="mt-2 w-full py-1 rounded-lg text-[10px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] hover:bg-[var(--speckle-outline-3)] transition-colors"
                             >
                                 Reset
                             </button>
@@ -474,7 +474,7 @@ export default function ViewerToolbar({
                 {showMeasurements && (
                     <motion.div ref={measRef} {...popoverAnim} className={`${popoverCls} w-72`}>
                         {/* Header */}
-                        <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b border-white/8">
+                        <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b border-[var(--speckle-outline-3)]">
                             <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
                                 <Ruler className="w-3.5 h-3.5" />
                                 Measurements
@@ -490,14 +490,14 @@ export default function ViewerToolbar({
                                     className={`text-[9px] px-2 py-0.5 rounded-full font-semibold transition-colors ${
                                         measurementsActive
                                             ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
-                                            : 'bg-zinc-700/60 text-zinc-500 hover:bg-zinc-600/60 hover:text-zinc-300'
+                                            : 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-2)] hover:text-[var(--speckle-foreground-2)]'
                                     }`}
                                 >
                                     {measurementsActive ? 'Active' : 'Inactive'}
                                 </button>
                                 <button
                                     onClick={() => setShowMeasurements(false)}
-                                    className="text-zinc-500 hover:text-white transition-colors ml-1"
+                                    className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors ml-1"
                                 >
                                     <X className="w-3.5 h-3.5" />
                                 </button>
@@ -507,7 +507,7 @@ export default function ViewerToolbar({
                         <div className="p-3 space-y-3">
                             {/* Type selector */}
                             <div>
-                                <p className="text-[10px] text-zinc-500 mb-1.5 font-medium uppercase tracking-wider">Type</p>
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] mb-1.5 font-medium uppercase tracking-wider">Type</p>
                                 <div className="flex gap-1">
                                     {MEAS_TYPES.map(({ type, label, title, icon }) => (
                                         <button
@@ -517,7 +517,7 @@ export default function ViewerToolbar({
                                             className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-medium transition-all ${
                                                 currentType === type
                                                     ? 'bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-500/40'
-                                                    : 'text-zinc-400 hover:bg-white/8 hover:text-white'
+                                                    : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
                                             }`}
                                         >
                                             {icon}
@@ -530,7 +530,7 @@ export default function ViewerToolbar({
                             {/* Units + Precision row */}
                             <div className="flex gap-2">
                                 <div className="flex-1">
-                                    <p className="text-[10px] text-zinc-500 mb-1 font-medium uppercase tracking-wider">Units</p>
+                                    <p className="text-[10px] text-[var(--speckle-foreground-3)] mb-1 font-medium uppercase tracking-wider">Units</p>
                                     <div className="flex gap-0.5">
                                         {UNITS.map(({ value, label }) => (
                                             <button
@@ -539,7 +539,7 @@ export default function ViewerToolbar({
                                                 className={`flex-1 py-1 rounded text-[10px] font-medium transition-all ${
                                                     currentUnits === value
                                                         ? 'bg-blue-500/25 text-blue-300 ring-1 ring-blue-500/30'
-                                                        : 'text-zinc-500 hover:bg-white/8 hover:text-zinc-300'
+                                                        : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground-2)]'
                                                 }`}
                                             >
                                                 {label}
@@ -548,7 +548,7 @@ export default function ViewerToolbar({
                                     </div>
                                 </div>
                                 <div className="w-20">
-                                    <p className="text-[10px] text-zinc-500 mb-1 font-medium uppercase tracking-wider">Decimal</p>
+                                    <p className="text-[10px] text-[var(--speckle-foreground-3)] mb-1 font-medium uppercase tracking-wider">Decimal</p>
                                     <div className="flex gap-0.5">
                                         {PRECISIONS.map(p => (
                                             <button
@@ -557,7 +557,7 @@ export default function ViewerToolbar({
                                                 className={`flex-1 py-1 rounded text-[10px] font-medium transition-all ${
                                                     currentPrecision === p
                                                         ? 'bg-blue-500/25 text-blue-300 ring-1 ring-blue-500/30'
-                                                        : 'text-zinc-500 hover:bg-white/8 hover:text-zinc-300'
+                                                        : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground-2)]'
                                                 }`}
                                             >
                                                 {p}
@@ -574,7 +574,7 @@ export default function ViewerToolbar({
                                     className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-medium transition-all ${
                                         vertexSnap
                                             ? 'bg-blue-500/20 text-blue-300 ring-1 ring-blue-500/30'
-                                            : 'text-zinc-500 hover:bg-white/8 hover:text-zinc-300'
+                                            : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground-2)]'
                                     }`}
                                 >
                                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -587,12 +587,12 @@ export default function ViewerToolbar({
 
                             {/* Measurement list */}
                             {measurements.length > 0 && (
-                                <div className="border-t border-white/8 pt-2">
+                                <div className="border-t border-[var(--speckle-outline-3)] pt-2">
                                     <div className="flex items-center justify-between mb-1.5">
-                                        <p className="text-[10px] text-zinc-500 font-medium uppercase tracking-wider">Results</p>
+                                        <p className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider">Results</p>
                                         <button
                                             onClick={onClearMeasurements}
-                                            className="text-[9px] text-zinc-500 hover:text-red-400 flex items-center gap-0.5 transition-colors"
+                                            className="text-[9px] text-[var(--speckle-foreground-3)] hover:text-red-400 flex items-center gap-0.5 transition-colors"
                                         >
                                             <Trash2 className="w-2.5 h-2.5" />
                                             Clear all
@@ -605,13 +605,13 @@ export default function ViewerToolbar({
                                             return (
                                                 <div
                                                     key={m.measurementId || m.uuid || idx}
-                                                    className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-white/4 hover:bg-white/8 group transition-colors"
+                                                    className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-[var(--speckle-foundation)] hover:bg-[var(--speckle-outline-3)] group transition-colors"
                                                 >
                                                     <span className="text-emerald-400/70 shrink-0">{typeIcon}</span>
-                                                    <span className="text-xs font-mono text-zinc-200 flex-1 tabular-nums">{val}</span>
+                                                    <span className="text-xs font-mono text-[var(--speckle-foreground)] flex-1 tabular-nums">{val}</span>
                                                     <button
                                                         onClick={() => onDeleteMeasurement(m.toMeasurementData ? m.toMeasurementData() : m)}
-                                                        className="text-zinc-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                                                        className="text-[var(--speckle-foreground-3)] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0"
                                                         title="Delete"
                                                     >
                                                         <X className="w-3 h-3" />
@@ -625,12 +625,12 @@ export default function ViewerToolbar({
 
                             {/* Empty states */}
                             {measurementsActive && measurements.length === 0 && (
-                                <p className="text-[10px] text-zinc-600 text-center py-1">
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] text-center py-1">
                                     Click on the model to place points
                                 </p>
                             )}
                             {!measurementsActive && measurements.length === 0 && (
-                                <p className="text-[10px] text-zinc-600 text-center py-1">
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] text-center py-1">
                                     Activate to start measuring
                                 </p>
                             )}
@@ -645,7 +645,7 @@ export default function ViewerToolbar({
                     <motion.div ref={colorByRef} {...popoverAnim} className={`${popoverCls} p-3 w-48`}>
                         <div className="flex items-center justify-between mb-2">
                             <span className="text-xs font-semibold text-violet-400">Colour by</span>
-                            <button onClick={() => setShowColorBy(false)} className="text-zinc-500 hover:text-white">
+                            <button onClick={() => setShowColorBy(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]">
                                 <X className="w-3.5 h-3.5" />
                             </button>
                         </div>
@@ -656,14 +656,14 @@ export default function ViewerToolbar({
                                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-all ${
                                         activeColorField === value
                                             ? 'bg-violet-500/25 text-violet-300 ring-1 ring-violet-500/40'
-                                            : 'text-zinc-300 hover:bg-white/8 hover:text-white'
+                                            : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
                                     }`}
                                 >{label}</button>
                             ))}
                         </div>
                         {activeColorField && (
                             <button onClick={() => { onRemoveColorFilter(); setShowColorBy(false) }}
-                                className="mt-2 w-full py-1 rounded-lg text-[10px] text-zinc-500 hover:text-red-400 hover:bg-white/5 transition-colors"
+                                className="mt-2 w-full py-1 rounded-lg text-[10px] text-[var(--speckle-foreground-3)] hover:text-red-400 hover:bg-[var(--speckle-outline-3)] transition-colors"
                             >✕ Clear colour filter</button>
                         )}
                     </motion.div>
@@ -671,11 +671,11 @@ export default function ViewerToolbar({
             </AnimatePresence>
 
             {/* ── Toolbar pill ──────────────────────────────────────────────── */}
-            <div className="glass rounded-full overflow-hidden shadow-lg border border-white/10 bg-zinc-900 p-1.5 flex gap-1 items-center">
+            <div className="glass rounded-full overflow-hidden shadow-lg p-1.5 flex gap-1 items-center">
 
                 {/* Section Box */}
                 <button
-                    className={`p-2 rounded-full transition-colors ${isSectionBoxEnabled ? 'bg-blue-500 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-white'}`}
+                    className={`p-2 rounded-full transition-colors ${isSectionBoxEnabled ? 'bg-blue-500 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onSectionBoxClick}
                     title="Section Box"
                 >
@@ -684,7 +684,7 @@ export default function ViewerToolbar({
 
                 {/* Zoom Extents */}
                 <button
-                    className="p-2 rounded-full transition-colors text-zinc-300 hover:bg-white/10 hover:text-white"
+                    className="p-2 rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
                     onClick={onZoomExtents}
                     title="Zoom Extents"
                 >
@@ -693,7 +693,7 @@ export default function ViewerToolbar({
 
                 {/* Perspective / Ortho toggle */}
                 <button
-                    className={`p-2 rounded-full transition-all text-xs font-bold ${isOrtho ? 'bg-sky-500/70 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-white'}`}
+                    className={`p-2 rounded-full transition-all text-xs font-bold ${isOrtho ? 'bg-sky-500/70 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onToggleProjection}
                     disabled={!isViewerReady}
                     title={isOrtho ? 'Switch to Perspective' : 'Switch to Orthographic'}
@@ -703,7 +703,7 @@ export default function ViewerToolbar({
 
                 {/* Camera Views */}
                 <button
-                    className={`p-2 rounded-full transition-all ${showCamViews ? 'bg-sky-500/80 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-sky-300'}`}
+                    className={`p-2 rounded-full transition-all ${showCamViews ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
                     onClick={() => { closeAll(); setShowCamViews(v => !v) }}
                     disabled={!isViewerReady}
                     title="Camera Views"
@@ -715,11 +715,11 @@ export default function ViewerToolbar({
                     </svg>
                 </button>
 
-                <div className="w-px bg-white/10 mx-0.5 self-stretch" />
+                <div className="w-px bg-[var(--speckle-outline-3)] mx-0.5 self-stretch" />
 
                 {/* Screenshot */}
                 <button
-                    className="p-2 rounded-full transition-colors text-zinc-300 hover:bg-white/10 hover:text-white"
+                    className="p-2 rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
                     onClick={onScreenshot}
                     disabled={!isViewerReady}
                     title="Save Screenshot"
@@ -727,11 +727,11 @@ export default function ViewerToolbar({
                     <Camera className="w-5 h-5" />
                 </button>
 
-                <div className="w-px bg-white/10 mx-0.5 self-stretch" />
+                <div className="w-px bg-[var(--speckle-outline-3)] mx-0.5 self-stretch" />
 
                 {/* View Mode */}
                 <button
-                    className={`p-2 rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-white'}`}
+                    className={`p-2 rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={() => { closeAll(); setShowModes(v => !v) }}
                     disabled={!isViewerReady}
                     title={`View mode: ${currentMode.label}`}
@@ -741,7 +741,7 @@ export default function ViewerToolbar({
 
                 {/* Edges */}
                 <button
-                    className={`p-2 rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-white'}`}
+                    className={`p-2 rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onToggleEdges}
                     disabled={!isViewerReady}
                     title={edgesEnabled ? 'Hide edges' : 'Show edges'}
@@ -761,8 +761,8 @@ export default function ViewerToolbar({
                         showLighting
                             ? 'bg-amber-500/80 text-white'
                             : lc.enabled
-                                ? 'text-amber-300 hover:bg-white/10'
-                                : 'text-zinc-300 hover:bg-white/10 hover:text-amber-300'
+                                ? 'text-amber-300 hover:bg-[var(--speckle-outline-3)]'
+                                : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-amber-300'
                     }`}
                     onClick={() => { closeAll(); setShowLighting(v => !v) }}
                     disabled={!isViewerReady}
@@ -771,11 +771,11 @@ export default function ViewerToolbar({
                     <Sun className="w-5 h-5" />
                 </button>
 
-                <div className="w-px bg-white/10 mx-0.5 self-stretch" />
+                <div className="w-px bg-[var(--speckle-outline-3)] mx-0.5 self-stretch" />
 
                 {/* Fly-through mode */}
                 <button
-                    className={`p-2 rounded-full transition-all ${isFlyMode ? 'bg-sky-500/80 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-sky-300'}`}
+                    className={`p-2 rounded-full transition-all ${isFlyMode ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
                     onClick={onToggleFlyMode}
                     disabled={!isViewerReady}
                     title={isFlyMode ? 'Exit fly-through (back to orbit)' : 'Fly-through mode (WASD to move)'}
@@ -818,7 +818,7 @@ export default function ViewerToolbar({
 
                 {/* Colour by property */}
                 <button
-                    className={`p-2 rounded-full transition-all ${activeColorField || showColorBy ? 'bg-violet-500/80 text-white' : 'text-zinc-300 hover:bg-white/10 hover:text-violet-300'}`}
+                    className={`p-2 rounded-full transition-all ${activeColorField || showColorBy ? 'bg-violet-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-violet-300'}`}
                     onClick={() => { closeAll(); setShowColorBy(v => !v) }}
                     disabled={!isViewerReady}
                     title={activeColorField ? `Colour by: ${activeColorField}` : 'Colour by property'}
@@ -836,8 +836,8 @@ export default function ViewerToolbar({
                         measurementsActive
                             ? 'bg-emerald-500/80 text-white shadow-[0_0_10px_rgba(52,211,153,0.4)]'
                             : showMeasurements
-                                ? 'bg-white/10 text-emerald-300'
-                                : 'text-zinc-300 hover:bg-white/10 hover:text-white'
+                                ? 'bg-[var(--speckle-outline-3)] text-emerald-300'
+                                : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
                     }`}
                     onClick={() => { closeAll(); setShowMeasurements(v => !v) }}
                     disabled={!isViewerReady}
@@ -856,7 +856,7 @@ export default function ViewerToolbar({
                     className={`p-2 rounded-full transition-all relative ${
                         showExplode || (explodeValue || 0) > 0
                             ? 'bg-amber-500/80 text-white'
-                            : 'text-zinc-300 hover:bg-white/10 hover:text-white'
+                            : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
                     }`}
                     onClick={() => { closeAll(); setShowExplode(v => !v) }}
                     disabled={!isViewerReady}

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X } from 'lucide-react'
 import EChart from './EChart'
@@ -11,7 +11,12 @@ function rulesKey(widgetId) {
     return `validation-rules-${widgetId || 'default'}`
 }
 
-export default function ValidationWidget({ widgetId, fullData, title = "New Validation", onUpdateTitle }) {
+function logicKey(widgetId) {
+    return `validation-logic-${widgetId || 'default'}`
+}
+
+
+export default function ValidationWidget({ widgetId, fullData, title = "New Validation", onUpdateTitle, onFilterElements, onHighlightElements, darkMode = true }) {
     const [name, setName] = useState(title)
     const [isEditing, setIsEditing] = useState(true)
     const [rules, setRules] = useState(() => {
@@ -20,11 +25,22 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             return saved ? JSON.parse(saved) : DEFAULT_RULES
         } catch { return DEFAULT_RULES }
     })
+    const [logicMode, setLogicMode] = useState(() => {
+        try {
+            return localStorage.getItem(logicKey(widgetId)) === 'OR' ? 'OR' : 'AND'
+        } catch { return 'AND' }
+    })
+    const [activeSlice, setActiveSlice] = useState(null)
 
     // Persist rules whenever they change
     useEffect(() => {
         try { localStorage.setItem(rulesKey(widgetId), JSON.stringify(rules)) } catch {}
     }, [rules, widgetId])
+
+    // Persist AND/OR mode whenever it changes
+    useEffect(() => {
+        try { localStorage.setItem(logicKey(widgetId), logicMode) } catch {}
+    }, [logicMode, widgetId])
 
     // Update parent title when local name changes
     useEffect(() => {
@@ -124,20 +140,26 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
     }
 
     const results = useMemo(() => {
-        if (!fullData?.elements) return { passed: 0, failed: 0, total: 0, passPct: 0 }
+        if (!fullData?.elements) return { passed: 0, failed: 0, total: 0, passPct: 0, passedIds: [], failedIds: [] }
 
         let passed = 0
         let failed = 0
+        const passedIds = []
+        const failedIds = []
 
         fullData.elements.forEach(el => {
-            // AND Logic: Must pass ALL rules
-            const allPassed = rules.every(rule => {
-                const val = getNested(el, rule.property)
-                return checkRule(val, rule)
-            })
+            const ruleResults = rules.map(rule => checkRule(getNested(el, rule.property), rule))
+            // AND: must pass every rule. OR: must pass at least one rule.
+            const elementPassed = logicMode === 'OR' ? ruleResults.some(Boolean) : ruleResults.every(Boolean)
+            const id = el.speckle_id || el.id
 
-            if (allPassed) passed++
-            else failed++
+            if (elementPassed) {
+                passed++
+                if (id) passedIds.push(id)
+            } else {
+                failed++
+                if (id) failedIds.push(id)
+            }
         })
 
         const total = passed + failed
@@ -145,9 +167,47 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             passed,
             failed,
             total,
-            passPct: total > 0 ? (passed / total) * 100 : 0
+            passPct: total > 0 ? (passed / total) * 100 : 0,
+            passedIds,
+            failedIds,
         }
-    }, [fullData, rules])
+    }, [fullData, rules, logicMode])
+
+    // Rules changed — if a slice filter was active, its element IDs are now stale, clear it.
+    // Skip on initial mount so this widget doesn't clobber another widget's active filter.
+    const activeSliceRef = useRef(null)
+    useEffect(() => { activeSliceRef.current = activeSlice }, [activeSlice])
+    useEffect(() => {
+        if (activeSliceRef.current) {
+            setActiveSlice(null)
+            onFilterElements?.(null)
+        }
+    }, [fullData, rules, logicMode])
+
+    const handlePieClick = (params) => {
+        const name = params?.name
+        if (!name) return
+
+        if (activeSlice === name) {
+            setActiveSlice(null)
+            onFilterElements?.(null)
+            return
+        }
+
+        const ids = name === 'Passed' ? results.passedIds : results.failedIds
+        setActiveSlice(name)
+        onFilterElements?.(ids.length > 0 ? ids : null)
+    }
+
+    const handlePieMouseOver = (params) => {
+        if (!params?.name || !onHighlightElements) return
+        const ids = params.name === 'Passed' ? results.passedIds : results.failedIds
+        if (ids.length) onHighlightElements(ids)
+    }
+
+    const handlePieMouseOut = () => {
+        onHighlightElements?.(null)
+    }
 
     const addRule = () => {
         setRules([...rules, { id: Date.now(), property: 'category', operator: 'equals', value: '' }])
@@ -174,7 +234,7 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             {/* Header / Mode Toggle */}
             <div className="flex items-center justify-between p-3 border-b border-white/5 bg-zinc-900/30 shrink-0">
                 <div className="flex items-center gap-2 flex-1">
-                    <div className={`w-2 h-2 rounded-full ${results.passPct === 100 ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : results.passPct > 80 ? 'bg-amber-500' : 'bg-red-500'}`} />
+                    <div className={`w-2 h-2 rounded-full ${results.passPct === 100 ? 'bg-[var(--speckle-success)] shadow-[0_0_8px_var(--speckle-success)]' : results.passPct > 80 ? 'bg-amber-500' : 'bg-[var(--speckle-danger)]'}`} />
                     {isEditing ? (
                         <input
                             type="text"
@@ -222,8 +282,8 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                         onChange={(e) => updateRule(rule.id, 'property', e.target.value)}
                                         className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300"
                                     >
-                                        {propertyOptions.map(opt => (
-                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                        {propertyOptions.map((opt, i) => (
+                                            <option key={opt.disabled ? `sep-${i}` : opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
                                         ))}
                                     </select>
 
@@ -256,25 +316,46 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                             onClick={addRule}
                             className="w-full py-2 border border-dashed border-white/10 rounded-lg text-zinc-500 hover:text-zinc-300 hover:border-white/20 hover:bg-white/5 text-xs flex items-center justify-center gap-2 transition-all"
                         >
-                            <Plus className="w-3 h-3" /> Add Rule (AND)
+                            <Plus className="w-3 h-3" /> Add Rule
                         </button>
+
+                        {rules.length > 1 && (
+                            <div className="flex items-center justify-center gap-2 pt-1">
+                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Match</span>
+                                <div className="flex rounded-md border border-white/10 overflow-hidden text-xs">
+                                    <button
+                                        onClick={() => setLogicMode('AND')}
+                                        className={`px-3 py-1 transition-colors ${logicMode === 'AND' ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-500 hover:bg-white/5'}`}
+                                    >
+                                        ALL (AND)
+                                    </button>
+                                    <button
+                                        onClick={() => setLogicMode('OR')}
+                                        className={`px-3 py-1 transition-colors ${logicMode === 'OR' ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-500 hover:bg-white/5'}`}
+                                    >
+                                        ANY (OR)
+                                    </button>
+                                </div>
+                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">rules</span>
+                            </div>
+                        )}
                     </div>
                 ) : (
-                    <div className="h-full flex flex-col">
-                        {/* Summary Cards */}
-                        <div className="grid grid-cols-2 gap-3 mb-4 shrink-0">
-                            <div className="glass-card p-3 flex flex-col items-center justify-center text-center">
-                                <span className="text-2xl font-bold text-green-500">{results.passed}</span>
+                    <div className="h-full flex flex-col" style={{ containerType: 'size' }}>
+                        {/* Summary Cards — ~20% of the available space, numbers scale with widget size */}
+                        <div className="grid grid-cols-2 gap-3 mb-3" style={{ flex: '1 1 0%', minHeight: 0 }}>
+                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden">
+                                <span className="font-bold text-green-500 leading-none" style={{ fontSize: 'clamp(0.875rem, min(9cqw, 14cqh), 2.5rem)' }}>{results.passed}</span>
                                 <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Passed</span>
                             </div>
-                            <div className="glass-card p-3 flex flex-col items-center justify-center text-center">
-                                <span className={`text-2xl font-bold ${results.failed > 0 ? 'text-red-500' : 'text-zinc-500'}`}>{results.failed}</span>
+                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden">
+                                <span className={`font-bold leading-none ${results.failed > 0 ? 'text-red-500' : 'text-zinc-500'}`} style={{ fontSize: 'clamp(0.875rem, min(9cqw, 14cqh), 2.5rem)' }}>{results.failed}</span>
                                 <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Failed</span>
                             </div>
                         </div>
 
-                        {/* Chart */}
-                        <div className="flex-1 min-h-0 relative">
+                        {/* Chart — ~80% of the available space, auto-sizes with the widget */}
+                        <div className="relative" style={{ flex: '4 1 0%', minHeight: 0 }}>
                             {results.total === 0 ? (
                                 <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
                                     No elements to validate
@@ -285,8 +366,9 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                         option={{
                                             ...baseOption({
                                                 tooltipFormatter: (params) => `${params.name}: ${params.value}`,
+                                                darkMode,
                                             }),
-                                            textStyle: { fontFamily: 'system-ui', color: '#a1a1aa' },
+                                            textStyle: { fontFamily: 'system-ui' },
                                             series: [{
                                                 type: 'pie',
                                                 radius: ['60%', '80%'],
@@ -294,15 +376,21 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                                     { name: 'Passed', value: results.passed, itemStyle: { color: '#22c55e' } },
                                                     { name: 'Failed', value: results.failed, itemStyle: { color: '#ef4444' } },
                                                 ],
-                                                label: { show: true, position: 'inside', formatter: '{d}%', color: '#fff' },
-                                                labelLine: { show: false },
+                                                label: {
+                                                    show: true,
+                                                    position: 'outside',
+                                                    formatter: (params) => `${params.name}: ${params.value} (${params.percent}%)`,
+                                                    color: darkMode ? '#e4e4e7' : '#000000',
+                                                },
+                                                labelLine: { show: true },
                                             }],
                                         }}
-                                        style={{ width: '100%', height: '100%' }}
+                                        onEvents={{ click: handlePieClick, mouseover: handlePieMouseOver, mouseout: handlePieMouseOut }}
+                                        style={{ width: '100%', height: '100%', cursor: 'pointer' }}
                                     />
                                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                                         <div className="text-center">
-                                            <div className="text-2xl font-bold text-white">{results.passPct.toFixed(0)}%</div>
+                                            <div className="text-2xl font-bold text-[var(--speckle-foreground)]">{results.passPct.toFixed(0)}%</div>
                                             <div className="text-[10px] text-zinc-500 uppercase">Success</div>
                                         </div>
                                     </div>
@@ -310,9 +398,29 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                             )}
                         </div>
 
+                        {activeSlice && (
+                            <div className="mt-2 flex items-center justify-center gap-2 text-[10px] text-cyan-400 shrink-0">
+                                <span>Filtering viewer: {activeSlice}</span>
+                                <button
+                                    onClick={() => { setActiveSlice(null); onFilterElements?.(null) }}
+                                    className="p-0.5 rounded hover:bg-white/10"
+                                    title="Clear filter"
+                                >
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </div>
+                        )}
+
                         {/* Rules Summary List */}
                         <div className="mt-4 pt-3 border-t border-white/5 shrink-0">
-                            <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Active Rules</div>
+                            <div className="flex items-center justify-between mb-2">
+                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Active Rules</span>
+                                {rules.length > 1 && (
+                                    <span className="text-[10px] text-cyan-400 font-mono bg-white/5 px-1.5 py-0.5 rounded">
+                                        Match {logicMode === 'OR' ? 'ANY' : 'ALL'}
+                                    </span>
+                                )}
+                            </div>
                             <div className="space-y-1">
                                 {rules.map((r, i) => {
                                     const opLabel = operatorOptions.find(o => o.value === r.operator)?.label ?? r.operator

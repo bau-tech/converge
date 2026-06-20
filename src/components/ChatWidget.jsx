@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence, useDragControls } from 'framer-motion'
-import { MessageSquare, Send, X, Sparkles, Settings, Cpu, Database, Save, Wrench, Filter } from 'lucide-react'
+import { MessageSquare, Send, X, Sparkles, Settings, Cpu, Database, Save, Wrench, Filter, Download, Trash2, Copy, Check } from 'lucide-react'
 
 // ── Minimal inline markdown renderer ────────────────────────────────────────
 function MarkdownMessage({ content }) {
@@ -56,12 +56,35 @@ function MarkdownMessage({ content }) {
     return <div className="space-y-1">{elements}</div>
 }
 
+const INIT_MSG = { role: 'assistant', id: 'init', content: 'Hi! Ask me anything about this model:\n• "Show all structural columns"\n• "Total concrete volume by storey"\n• "Any unusually heavy beams?"\n• "Find walls without a material"\n• "How does this version compare to the previous one?"' }
+
+function CopyButton({ text }) {
+    const [copied, setCopied] = useState(false)
+    return (
+        <button
+            onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/10 text-zinc-500 hover:text-zinc-300"
+            title="Copy"
+        >
+            {copied ? <Check className="w-3 h-3 text-cyan-400" /> : <Copy className="w-3 h-3" />}
+        </button>
+    )
+}
+
+function exportMarkdown(messages) {
+    const lines = ['# BIM AI Chat', `*${new Date().toLocaleString()}*`, '']
+    for (const m of messages) {
+        if (m.id === 'init') continue
+        lines.push(`---\n\n**${m.role === 'user' ? 'You' : 'Assistant'}:** ${m.content}`)
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'chat.md'; a.click()
+}
+
 export function ChatWidget({ onFilter, projectId, modelId, modelContext, normalizerUrl = 'http://localhost:8002' }) {
     const [isOpen, setIsOpen] = useState(false)
     const [showSettings, setShowSettings] = useState(false)
-    const [messages, setMessages] = useState([
-        { role: 'assistant', content: 'Hello! I\'m your BIM Intelligence Assistant. I can filter elements, calculate quantities, and answer questions about your model.\n\nTry:\n- "Show me all walls on Level 1"\n- "How many elements are in each category?"\n- "What is the total weight of structural beams?"' }
-    ])
+    const [messages, setMessages] = useState([INIT_MSG])
     const [input, setInput] = useState('')
     const [isLoading, setIsLoading] = useState(false)
     const messagesEndRef = useRef(null)
@@ -89,6 +112,8 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     useEffect(() => {
         scrollToBottom()
     }, [messages, isOpen])
+
+    const handleReset = () => { setMessages([INIT_MSG]); if (onFilter) onFilter(null) }
 
     const handleSaveSettings = () => {
         localStorage.setItem('chat_ai_provider', provider)
@@ -126,7 +151,6 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         })
 
         // Add user message + live assistant placeholder
-        const assistantIdx = messages.length + 1  // position after user msg
         setMessages(prev => [
             ...prev,
             { role: 'user', content: userMsg },
@@ -242,7 +266,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             dragControls={dragControls}
             dragListener={false} // Disable dragging by default, enable on specific elements
             initial={false}
-            className="fixed bottom-20 right-6 z-50 flex flex-col items-end"
+            className="fixed bottom-24 right-6 z-50 flex flex-col items-end"
         >
 
             {/* Chat Window */}
@@ -252,11 +276,11 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                        className="pointer-events-auto w-[350px] h-[500px] glass-card flex flex-col overflow-hidden mb-4 shadow-2xl border border-white/20 bg-zinc-950 rounded-2xl"
+                        className="pointer-events-auto w-[350px] h-[500px] glass-card flex flex-col overflow-hidden mb-4 shadow-2xl"
                     >
                         {/* Header */}
                         <div
-                            className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5 cursor-move"
+                            className="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-white/5 cursor-move"
                             onPointerDown={(e) => dragControls.start(e)}
                         >
                             <div className="flex items-center gap-2">
@@ -272,6 +296,22 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                             </div>
                             <div className="flex items-center gap-1">
                                 <button
+                                    onClick={(e) => { e.stopPropagation(); exportMarkdown(messages) }}
+                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400"
+                                    title="Export chat as Markdown"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <Download className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); handleReset() }}
+                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400"
+                                    title="Clear chat"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
                                     onClick={(e) => {
                                         e.stopPropagation()
                                         setShowSettings(!showSettings)
@@ -285,7 +325,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 <button
                                     onClick={() => setIsOpen(false)}
                                     className="p-1 hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
-                                    onPointerDown={(e) => e.stopPropagation()} // Prevent drag when clicking close
+                                    onPointerDown={(e) => e.stopPropagation()}
                                 >
                                     <X className="w-4 h-4 text-zinc-400" />
                                 </button>
@@ -480,8 +520,11 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 return (
                                     <div key={idx} className="flex justify-start">
                                         <div className="max-w-[90%] space-y-2">
-                                            <div className="bg-zinc-800/80 border border-white/10 text-zinc-100 rounded-2xl rounded-tl-sm px-4 py-2.5">
+                                            <div className="group relative bg-zinc-800/80 border border-white/10 text-zinc-100 rounded-2xl rounded-tl-sm px-4 py-2.5">
                                                 <MarkdownMessage content={msg.content} />
+                                                <div className="absolute top-1.5 right-1.5">
+                                                    <CopyButton text={msg.content} />
+                                                </div>
                                             </div>
                                             {/* Tool badges */}
                                             {msg.toolsUsed?.length > 0 && (
@@ -544,12 +587,12 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                     // Framer motion drag usually doesn't prevent click unless dragged.
                     dragControls.start(e)
                 }}
-                className="pointer-events-auto w-12 h-12 rounded-full bg-cyan-600 text-white shadow-lg shadow-cyan-900/20 flex items-center justify-center hover:bg-cyan-500 transition-colors relative cursor-move"
+                className="pointer-events-auto w-12 h-12 rounded-full border border-cyan-500/40 backdrop-blur-md text-cyan-400 shadow-lg hover:bg-cyan-500/10 flex items-center justify-center transition-colors relative cursor-move"
             >
                 {isOpen ? (
-                    <X className="w-6 h-6" />
+                    <X className="w-8 h-8" />
                 ) : (
-                    <MessageSquare className="w-6 h-6" />
+                    <MessageSquare className="w-8 h-8" />
                 )}
                 {/* Ping animation if closed and no messages read? Optional. */}
             </motion.button>

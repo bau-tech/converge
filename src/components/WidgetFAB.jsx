@@ -1,16 +1,22 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Activity, Table, Layout, ShieldCheck, CalendarClock, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video } from 'lucide-react'
+import { Plus, Activity, Table, Layout, ShieldCheck, CalendarClock, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video, Filter } from 'lucide-react'
+import { BcfLogoIcon } from './BcfLogoIcon'
 
+// Same neutral icon/hover treatment as every other panel's list items
+// (BcfTopicPanel's topic list, ChatWidget's message list, etc.) — a single
+// consistent style instead of a different accent color per widget type.
 const WIDGET_TYPES = [
-    { type: 'table',      icon: Table,         label: 'Table',         color: 'text-zinc-300',    bg: 'hover:bg-white/5' },
-    { type: 'pivot',      icon: Layout,        label: 'Pivot',         color: 'text-zinc-300',    bg: 'hover:bg-white/5' },
-    { type: 'validation', icon: ShieldCheck,   label: 'Validation',    color: 'text-emerald-400', bg: 'hover:bg-emerald-500/10' },
-    { type: 'schedule',   icon: CalendarClock, label: '4D Schedule',   color: 'text-amber-400',   bg: 'hover:bg-amber-500/10' },
-    { type: 'quantities', icon: Boxes,         label: '5D Quantities', color: 'text-emerald-400', bg: 'hover:bg-emerald-500/10' },
-    { type: 'chart',      icon: Activity,      label: 'Custom Chart',  color: 'text-blue-400',    bg: 'hover:bg-blue-500/10' },
-    { type: 'text',       icon: FileText,      label: 'Notes',         color: 'text-zinc-400',    bg: 'hover:bg-white/5' },
-    { type: 'video',      icon: Video,         label: 'PeerTube Video',color: 'text-rose-400',    bg: 'hover:bg-rose-500/10' },
+    { type: 'table',      icon: Table,         label: 'Table' },
+    { type: 'pivot',      icon: Layout,        label: 'Pivot' },
+    { type: 'filter',     icon: Filter,        label: 'Filter Builder' },
+    { type: 'validation', icon: ShieldCheck,   label: 'Validation' },
+    { type: 'schedule',   icon: CalendarClock, label: '4D Schedule' },
+    { type: 'quantities', icon: Boxes,         label: '5D Quantities' },
+    { type: 'chart',      icon: Activity,      label: 'Custom Chart' },
+    { type: 'text',       icon: FileText,      label: 'Notes' },
+    { type: 'video',      icon: Video,         label: 'PeerTube Video' },
+    { type: 'bcf_stats',  icon: BcfLogoIcon,   label: 'BCF Issue Stats' },
 ]
 
 export function WidgetFAB({
@@ -26,7 +32,7 @@ export function WidgetFAB({
     const hasCharts = availableCharts.length > 0
 
     return (
-        <div className="fixed bottom-6 left-6 z-50 flex flex-col items-start gap-3">
+        <div className="fixed bottom-6 left-6 z-[100000] flex flex-col items-start gap-3">
             <AnimatePresence>
                 {open && (
                     <motion.div
@@ -71,8 +77,8 @@ export function WidgetFAB({
                                                     className="w-full flex items-center gap-2 px-3 py-2 hover:bg-white/5 transition-colors disabled:opacity-40 text-left"
                                                 >
                                                     {chart.config.type === 'pie'
-                                                        ? <PieChart className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                                                        : <BarChart3 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                                                        ? <PieChart className="w-3.5 h-3.5 text-[var(--speckle-outline-4)] shrink-0" />
+                                                        : <BarChart3 className="w-3.5 h-3.5 text-[var(--speckle-outline-1)] shrink-0" />
                                                     }
                                                     <span className="text-xs text-[var(--speckle-foreground-2)] flex-1 truncate">
                                                         {chart.config.title}
@@ -93,16 +99,16 @@ export function WidgetFAB({
 
                             {tab === 'widgets' && (
                                 <div className="grid grid-cols-2 gap-1 p-2">
-                                    {WIDGET_TYPES.map(({ type, icon: Icon, label, color, bg }) => (
+                                    {WIDGET_TYPES.map(({ type, icon: Icon, label }) => (
                                         <motion.button
                                             key={type}
                                             whileHover={{ scale: 1.02 }}
                                             whileTap={{ scale: 0.97 }}
                                             onClick={() => { onAddWidget(type); setOpen(false) }}
                                             disabled={disabled}
-                                            className={`flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${bg} disabled:opacity-40 disabled:cursor-not-allowed text-left border border-[var(--speckle-outline-3)]`}
+                                            className="flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed text-left border border-[var(--speckle-outline-3)]"
                                         >
-                                            <Icon className={`w-3.5 h-3.5 ${color} shrink-0`} />
+                                            <Icon className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0" />
                                             <span className="text-[var(--speckle-foreground-2)] text-xs">{label}</span>
                                         </motion.button>
                                     ))}
@@ -119,11 +125,10 @@ export function WidgetFAB({
                 onClick={() => setOpen(v => !v)}
                 disabled={disabled}
                 title={disabled ? 'Load a model first' : 'Add panels'}
-                className="w-12 h-12 rounded-full shadow-xl flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: 'linear-gradient(135deg, #136CFF 0%, #4B40C9 100%)' }}
+                className="w-12 h-12 rounded-full border border-blue-500/40 backdrop-blur-md text-blue-400 shadow-lg hover:bg-blue-500/10 flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
                 <motion.div animate={{ rotate: open ? 45 : 0 }} transition={{ duration: 0.18 }}>
-                    <Plus className="w-6 h-6 text-white" />
+                    <Plus className="w-8 h-8" />
                 </motion.div>
             </motion.button>
         </div>

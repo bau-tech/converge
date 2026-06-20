@@ -1,10 +1,8 @@
 """
-4D schedule: parse IFC work schedules (and P6 XML via ifc4d) into bim_tasks.
+4D schedule: parse IFC work schedules (IfcWorkSchedule) into bim_tasks.
 """
 import logging
 import re
-import tempfile
-import os
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
@@ -129,55 +127,6 @@ def import_from_ifc(conn, model_id: str, ifc_path: str) -> dict:
     conn.commit()
     return {'schedules': len(schedules), 'tasks': sort_counter[0]}
 
-
-def import_from_p6xml(conn, model_id: str, xml_bytes: bytes) -> dict:
-    """Convert a Primavera P6 XML to an IFC work schedule then import."""
-    import ifcopenshell
-
-    try:
-        import ifc4d
-    except ImportError:
-        raise ValueError('ifc4d is not installed — cannot import P6 XML')
-
-    with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as f:
-        f.write(xml_bytes)
-        xml_path = f.name
-
-    ifc_path = None
-    try:
-        ifc = ifcopenshell.file(schema='IFC4')
-
-        # Try common ifc4d API variants (API changed across versions)
-        converted = False
-        for cls_name in ('P6XmlToIfc', 'P6XmlReader', 'P6Xml2Ifc'):
-            cls = getattr(ifc4d, cls_name, None)
-            if cls is None:
-                continue
-            reader = cls()
-            for attr in ('xml', 'file', 'xml_file'):
-                if hasattr(reader, attr):
-                    setattr(reader, attr, xml_path)
-                    break
-            for attr in ('ifc', 'ifc_file'):
-                if hasattr(reader, attr):
-                    setattr(reader, attr, ifc)
-                    break
-            reader.execute()
-            converted = True
-            break
-
-        if not converted:
-            raise ValueError('Could not find a compatible P6XmlToIfc class in ifc4d')
-
-        with tempfile.NamedTemporaryFile(suffix='.ifc', delete=False) as f:
-            ifc_path = f.name
-        ifc.write(ifc_path)
-        return import_from_ifc(conn, model_id, ifc_path)
-
-    finally:
-        os.unlink(xml_path)
-        if ifc_path and os.path.exists(ifc_path):
-            os.unlink(ifc_path)
 
 
 def get_schedule(conn, model_id: str) -> dict:

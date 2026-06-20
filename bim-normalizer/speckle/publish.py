@@ -73,7 +73,7 @@ def _filter_tree(
             val = getattr(node, attr, None)
             if val is not None:
                 new_node[attr] = val
-        new_node["@elements"] = kept
+        new_node["elements"] = kept
         return new_node, total
 
     # Leaf element: keep as-is if selected
@@ -202,9 +202,20 @@ def filter_and_publish(
     )
     logger.info("Created commit %s on branch %r", new_commit_id, target_branch)
 
+    # Ingest the new commit so the published model has the same normalized
+    # structure (bim_elements/parameters) as the source model in the dashboard.
+    from pipeline.normalize import ingest_commit
+    ingest_result = ingest_commit(stream_id, new_commit_id, token=tok, server_url=srv, forced_source="filtered")
+    logger.info(
+        "Ingested filtered commit %s: model_id=%s element_count=%d",
+        new_commit_id, ingest_result["model_id"], ingest_result["element_count"],
+    )
+
     return {
         "commit_id": new_commit_id,
         "branch_name": target_branch,
         "element_count": element_count,
+        "model_id": ingest_result["model_id"],
+        "ingested_element_count": ingest_result["element_count"],
         "url": f"{srv}/streams/{stream_id}/commits/{new_commit_id}",
     }

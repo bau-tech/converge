@@ -46,6 +46,9 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
     // Column Filters
     const [showFilters, setShowFilters] = useState(false)
     const [filters, setFilters] = useState({})
+    // How multiple column filters combine: 'AND' requires every filter to match,
+    // 'OR' requires at least one to match. Only meaningful with 2+ active filters.
+    const [filterMode, setFilterMode] = useState('AND')
     const [copied, setCopied] = useState(false)
     const [copyError, setCopyError] = useState(false)
     // Track whether the table previously had its own filters so we only send
@@ -141,26 +144,30 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
             )
         }
 
-        // 2. Column Filters
+        // 2. Column Filters — AND requires every filter to match, OR requires any
         const activeFilters = Object.entries(filters)
         if (activeFilters.length > 0) {
-            data = data.filter(item => {
-                return activeFilters.every(([key, filterValue]) => {
-                    if (!filterValue) return true
+            const matchesFilter = (item, [key, filterValue]) => {
+                if (!filterValue) return true
 
-                    // Find column definition to get correct path
-                    const col = tableColumns.find(c => c.key === key)
-                    const path = col?.path || key
+                // Find column definition to get correct path
+                const col = tableColumns.find(c => c.key === key)
+                const path = col?.path || key
 
-                    let value = path ? getNestedValue(item, path) : item[key]
+                let value = path ? getNestedValue(item, path) : item[key]
 
-                    // Handle special cases
-                    if (key === 'speckle_type') value = value ? value.split('.').pop() : ''
+                // Handle special cases
+                if (key === 'speckle_type') value = value ? value.split('.').pop() : ''
 
-                    if (value === undefined || value === null) return false
-                    return String(value).toLowerCase().includes(filterValue.toLowerCase())
-                })
-            })
+                if (value === undefined || value === null) return false
+                return String(value).toLowerCase().includes(filterValue.toLowerCase())
+            }
+
+            data = data.filter(item =>
+                filterMode === 'OR'
+                    ? activeFilters.some(entry => matchesFilter(item, entry))
+                    : activeFilters.every(entry => matchesFilter(item, entry))
+            )
         }
 
         // 3. Sort
@@ -197,7 +204,7 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
         }
 
         return data
-    }, [fullData, searchTerm, filters, sortConfig, tableColumns, viewerSelectedIds, filteredIds])
+    }, [fullData, searchTerm, filters, filterMode, sortConfig, tableColumns, viewerSelectedIds, filteredIds])
 
     // Reset to page 1 whenever the viewer-driven filter changes.
     useEffect(() => { setPage(1) }, [filteredIds, viewerSelectedIds])
@@ -308,6 +315,22 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
                     >
                         <Filter className="w-4 h-4" />
                     </button>
+                    {Object.keys(filters).length > 1 && (
+                        <button
+                            onClick={() => setFilterMode(m => m === 'AND' ? 'OR' : 'AND')}
+                            aria-label={`Filter match mode: ${filterMode}. Click to switch to ${filterMode === 'AND' ? 'OR' : 'AND'}`}
+                            title={filterMode === 'AND'
+                                ? 'Matching ALL filters (AND). Click to match ANY filter (OR).'
+                                : 'Matching ANY filter (OR). Click to match ALL filters (AND).'}
+                            className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${
+                                filterMode === 'OR'
+                                    ? 'border-purple-500/50 bg-purple-500/20 text-purple-300'
+                                    : 'border-white/10 text-zinc-400 hover:text-white hover:border-white/20'
+                            }`}
+                        >
+                            Match: {filterMode}
+                        </button>
+                    )}
                     {(Object.keys(filters).length > 0) && (
                         <button
                             onClick={() => {

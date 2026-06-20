@@ -1,0 +1,161 @@
+from db.connection import get_conn, release_conn
+
+SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS bcf_topics (
+    guid             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id         UUID REFERENCES bim_models(model_id) ON DELETE SET NULL,
+    stream_id        TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    description      TEXT,
+    topic_type       TEXT,
+    topic_status     TEXT,
+    priority         TEXT,
+    stage            TEXT,
+    labels           TEXT[] DEFAULT '{}',
+    creation_author  TEXT NOT NULL,
+    creation_date    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    modified_author  TEXT,
+    modified_date    TIMESTAMPTZ,
+    due_date         TIMESTAMPTZ,
+    assigned_to      TEXT,
+    "index"          INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_topics_model  ON bcf_topics(model_id);
+CREATE INDEX IF NOT EXISTS idx_bcf_topics_stream ON bcf_topics(stream_id);
+CREATE INDEX IF NOT EXISTS idx_bcf_topics_status ON bcf_topics(topic_status);
+
+CREATE TABLE IF NOT EXISTS bcf_related_topics (
+    topic_guid          UUID NOT NULL REFERENCES bcf_topics(guid) ON DELETE CASCADE,
+    related_topic_guid  UUID NOT NULL REFERENCES bcf_topics(guid) ON DELETE CASCADE,
+    PRIMARY KEY (topic_guid, related_topic_guid)
+);
+
+CREATE TABLE IF NOT EXISTS bcf_document_references (
+    guid           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic_guid     UUID NOT NULL REFERENCES bcf_topics(guid) ON DELETE CASCADE,
+    document_guid  UUID,
+    url            TEXT,
+    description    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_docref_topic ON bcf_document_references(topic_guid);
+
+CREATE TABLE IF NOT EXISTS bcf_viewpoints (
+    guid                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic_guid           UUID NOT NULL REFERENCES bcf_topics(guid) ON DELETE CASCADE,
+    "index"              INTEGER,
+    is_orthogonal        BOOLEAN NOT NULL DEFAULT FALSE,
+    camera_view_point    JSONB,
+    camera_direction     JSONB,
+    camera_up_vector     JSONB,
+    field_of_view        DOUBLE PRECISION,
+    view_to_world_scale  DOUBLE PRECISION,
+    clipping_planes      JSONB DEFAULT '[]',
+    default_visibility   BOOLEAN DEFAULT TRUE,
+    snapshot_format      TEXT,
+    snapshot_data        BYTEA,
+    created_at           TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_vp_topic ON bcf_viewpoints(topic_guid);
+
+CREATE TABLE IF NOT EXISTS bcf_viewpoint_components (
+    id                  BIGSERIAL PRIMARY KEY,
+    viewpoint_guid      UUID NOT NULL REFERENCES bcf_viewpoints(guid) ON DELETE CASCADE,
+    ifc_guid            TEXT NOT NULL,
+    originating_system  TEXT,
+    authoring_tool_id   TEXT,
+    component_type      TEXT NOT NULL CHECK (component_type IN ('selection', 'visibility_exception', 'coloring')),
+    color               TEXT,
+    UNIQUE (viewpoint_guid, ifc_guid, component_type)
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_vpc_vp      ON bcf_viewpoint_components(viewpoint_guid);
+CREATE INDEX IF NOT EXISTS idx_bcf_vpc_ifcguid ON bcf_viewpoint_components(ifc_guid);
+
+CREATE TABLE IF NOT EXISTS bcf_comments (
+    guid             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic_guid       UUID NOT NULL REFERENCES bcf_topics(guid) ON DELETE CASCADE,
+    viewpoint_guid   UUID REFERENCES bcf_viewpoints(guid) ON DELETE SET NULL,
+    comment          TEXT NOT NULL,
+    author           TEXT NOT NULL,
+    date             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    modified_author  TEXT,
+    modified_date    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_comments_topic ON bcf_comments(topic_guid);
+
+CREATE TABLE IF NOT EXISTS bcf_extensions (
+    model_id    UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('topic_type', 'topic_status', 'priority', 'topic_label', 'stage')),
+    value       TEXT NOT NULL,
+    sort_order  INTEGER DEFAULT 0,
+    PRIMARY KEY (model_id, kind, value)
+);
+
+-- Tracks Speckle comment <-> BCF topic sync independently of bcf_topics
+-- rows, so the record survives topic deletion: once a Speckle comment has
+-- been pulled, it must never be pulled again even if its topic is later
+-- deleted by the user. Also used to mark comments WE created via push as
+-- already-pulled, preventing a push -> pull -> push ping-pong loop.
+CREATE TABLE IF NOT EXISTS bcf_speckle_sync (
+    model_id            UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,
+    speckle_comment_id  TEXT NOT NULL,
+    topic_guid          UUID REFERENCES bcf_topics(guid) ON DELETE SET NULL,
+    direction           TEXT NOT NULL CHECK (direction IN ('pulled', 'pushed')),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (model_id, speckle_comment_id, direction)
+);
+CREATE INDEX IF NOT EXISTS idx_bcf_sync_model ON bcf_speckle_sync(model_id);
+
+-- Tracks which individual bcf_comments (BCF-side replies) have already been
+-- relayed to/from a Speckle comment's replies, at the per-comment level —
+-- bcf_speckle_sync only tracks the top-level topic<->thread mapping. Without
+-- this, every sync pass would re-relay every existing reply as a new
+-- duplicate, since pushToSpeckle has no other way to know which ones it
+-- (or a prior pull) already handled.
+CREATE TABLE IF NOT EXISTS bcf_comment_push_sync (
+    comment_guid      UUID PRIMARY KEY REFERENCES bcf_comments(guid) ON DELETE CASCADE,
+    speckle_reply_id  TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+# One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by
+# the old label-only sync design before bcf_speckle_sync existed carry their
+# tracking info as 'speckle-comment:<id>' / 'speckle-pushed:<id>' labels —
+# migrate those into the persistent table so they aren't treated as
+# never-synced (and duplicated again) on the first run after this fix.
+# Safe to re-run on every startup.
+BACKFILL_SYNC_SQL = """
+INSERT INTO bcf_speckle_sync (model_id, speckle_comment_id, topic_guid, direction)
+SELECT t.model_id, substring(label, 17), t.guid, 'pulled'
+FROM bcf_topics t, unnest(t.labels) AS label
+WHERE label LIKE 'speckle-comment:%' AND t.model_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+INSERT INTO bcf_speckle_sync (model_id, speckle_comment_id, topic_guid, direction)
+SELECT t.model_id, substring(label, 16), t.guid, 'pushed'
+FROM bcf_topics t, unnest(t.labels) AS label
+WHERE label LIKE 'speckle-pushed:%' AND t.model_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+INSERT INTO bcf_speckle_sync (model_id, speckle_comment_id, topic_guid, direction)
+SELECT t.model_id, substring(label, 16), t.guid, 'pulled'
+FROM bcf_topics t, unnest(t.labels) AS label
+WHERE label LIKE 'speckle-pushed:%' AND t.model_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+"""
+
+
+def init_bcf_schema() -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL)
+            cur.execute(BACKFILL_SYNC_SQL)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)
