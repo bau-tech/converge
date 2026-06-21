@@ -12,11 +12,15 @@ import {
 import { convertGraphToIdsXml, graphToCanvasJson, parseCanvasJson, validateGraph } from '../utils/idsGraphToXml'
 import { SPEC_TEMPLATES, instantiateTemplate } from '../utils/idsTemplates'
 
-// Full-screen native visual IDS graph editor — built in-house (not a fork of
-// the AGPL-licensed ids-flow/idsedit.com) but producing the exact same
-// { nodes, edges } shape ../utils/idsGraphToXml.js already knows how to turn
-// into a runnable IDS spec. Nested inside IdsCheckPanel.jsx the same way
-// ClashCheckPanel/IdsCheckPanel themselves nest inside App.jsx.
+// Full-screen native visual IDS graph editor — built in-house, independent
+// of (not a fork of) the AGPL-licensed ids-flow/idsedit.com, producing the
+// { nodes, edges } shape ../utils/idsGraphToXml.js turns into a runnable IDS
+// spec (also an independent implementation, against the IDS 1.0 XSD itself
+// rather than any third-party tool's source). The canvas-JSON envelope
+// shape is kept interchangeable with ids-flow's "Export Canvas (.json)" for
+// interop, since matching a data format isn't the same as copying code.
+// Nested inside IdsCheckPanel.jsx the same way ClashCheckPanel/IdsCheckPanel
+// themselves nest inside App.jsx.
 function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved }) {
     const [nodes, setNodes, onNodesChange] = useNodesState(initialGraph?.nodes || [])
     const [edges, setEdges, onEdgesChange] = useEdgesState(initialGraph?.edges || [])

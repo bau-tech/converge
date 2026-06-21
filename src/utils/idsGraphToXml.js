@@ -1,17 +1,17 @@
-// Port of louistrue/ids-flow's lib/ids-xml-converter.ts (MIT-style open-source
-// IDS visual editor — https://github.com/louistrue/ids-flow). That tool's
-// "Export Canvas (.json)" button writes { version, metadata, nodes, edges },
-// where nodes/edges are a ReactFlow graph: one "spec" node per IDS
-// specification, with "entity"/"property"/"attribute"/"classification"/
-// "material"/"partOf"/"restriction" nodes wired to it via edges whose
-// targetHandle is "applicability" or "requirements". This file reproduces
-// that tool's graph -> IDS XML conversion so a canvas exported there can be
-// pasted here and turned into a spec our backend can run.
+// Converts this editor's ReactFlow graph ({ nodes, edges }) into a
+// buildingSMART IDS 1.0 specification document (the standard's own XSD is
+// authoritative — http://standards.buildingsmart.org/IDS/1.0/ids.xsd).
 //
-// Known simplification vs the original: ids-flow normalizes property
-// baseNames against a bundled IFC pset schema (normalizePropertyName); we
-// upload the baseName as typed instead. Everything else mirrors the
-// upstream converter element-for-element.
+// Graph shape: one "spec" node per <ids:specification>. Facet nodes
+// (entity/property/attribute/classification/material/partOf) attach to a
+// spec via an edge whose targetHandle is "applicability" or "requirements";
+// a facet's value can additionally point at a "restriction" node (a plain
+// node-to-node edge, no handle) to render an <xs:restriction> instead of a
+// literal <ids:simpleValue>.
+//
+// Per-facet XML shape is declared in FACET_SCHEMAS below and driven through
+// one generic emitter (emitFacetXml) rather than bespoke per-type code, so
+// adding a facet type only means adding a table entry.
 
 function esc(value) {
     return String(value)
@@ -21,279 +21,276 @@ function esc(value) {
         .replace(/"/g, '&quot;')
 }
 
-function attr(name, value) {
+// xs:string attribute, only rendered when there's a real value to write.
+function xmlAttr(name, value) {
     return value !== undefined && value !== null && value !== '' ? ` ${name}="${esc(value)}"` : ''
 }
 
-function idsSimple(tag, text) {
+function xmlAttrs(names, source) {
+    return names.map(n => xmlAttr(n, source[n])).join('')
+}
+
+// Facet name/value fields (ids:name, ids:value, ids:propertySet, ...) wrap
+// their literal text in <ids:simpleValue> per the IDS facet schema.
+function simpleValueEl(tag, text) {
     return `<${tag}><ids:simpleValue>${esc(text)}</ids:simpleValue></${tag}>`
 }
 
-// ids:info's children (title, description, author, ...) are plain xs:string
-// elements — unlike facet name/value fields, they are NOT wrapped in
-// <ids:simpleValue>.
-function plainText(tag, text) {
+// ids:info's children are plain xs:string elements (no simpleValue wrapper).
+function textEl(tag, text) {
     return `<${tag}>${esc(text)}</${tag}>`
 }
 
-function occursFromCardinality(cardinality) {
-    if (!cardinality || cardinality === 'required') return { minOccurs: '1', maxOccurs: 'unbounded' }
+// IDS facet cardinality ("required" | "optional" | "prohibited") only maps
+// to applicability minOccurs/maxOccurs for the *specification's own* wildcard
+// <ids:applicability/> element (used when a spec has no applicability facets
+// at all but should still validate against every element of the model) —
+// everywhere else cardinality is written verbatim as a facet attribute.
+function applicabilityOccursFor(cardinality) {
     if (cardinality === 'optional') return { minOccurs: '0', maxOccurs: 'unbounded' }
     if (cardinality === 'prohibited') return { minOccurs: '0', maxOccurs: '0' }
-    return { minOccurs: '1', maxOccurs: 'unbounded' }
+    return { minOccurs: '1', maxOccurs: 'unbounded' } // default + 'required'
 }
 
-function buildValueRestrictionXml(data) {
-    let inner = ''
-    switch (data.restrictionType) {
-        case 'enumeration': {
-            const values = [...(data.values || [])].sort()
-            inner = values.map(v => `<xs:enumeration value="${esc(v)}"/>`).join('')
-            break
-        }
-        case 'pattern':
-            if (data.pattern) inner = `<xs:pattern value="${esc(data.pattern)}"/>`
-            break
-        case 'bounds':
-            if (data.minValue) inner += `<xs:minInclusive value="${esc(data.minValue)}"/>`
-            if (data.maxValue) inner += `<xs:maxInclusive value="${esc(data.maxValue)}"/>`
-            break
-        case 'length':
-            if (data.minLength) inner += `<xs:minLength value="${esc(data.minLength)}"/>`
-            if (data.maxLength) inner += `<xs:maxLength value="${esc(data.maxLength)}"/>`
-            break
-    }
-    return `<xs:restriction base="xs:string">${inner}</xs:restriction>`
+const RESTRICTION_BUILDERS = {
+    enumeration: (data) => [...(data.values || [])].sort()
+        .map(v => `<xs:enumeration value="${esc(v)}"/>`).join(''),
+    pattern: (data) => data.pattern ? `<xs:pattern value="${esc(data.pattern)}"/>` : '',
+    bounds: (data) => (data.minValue ? `<xs:minInclusive value="${esc(data.minValue)}"/>` : '') +
+        (data.maxValue ? `<xs:maxInclusive value="${esc(data.maxValue)}"/>` : ''),
+    length: (data) => (data.minLength ? `<xs:minLength value="${esc(data.minLength)}"/>` : '') +
+        (data.maxLength ? `<xs:maxLength value="${esc(data.maxLength)}"/>` : ''),
 }
 
-// A facet node has two distinct outgoing edges: one to its owning
-// specification (source=facet, target=spec) and, optionally, one to a
-// restriction node (source=facet, target=restriction). Filter specifically
-// for the restriction target — picking the first same-source edge
-// regardless of target type (as upstream's `edges.find` does) silently
-// drops the restriction whenever the spec-edge happens to come first in
-// the array.
-function findRestrictionNode(node, edges, nodes) {
+function restrictionXml(data) {
+    const build = RESTRICTION_BUILDERS[data.restrictionType]
+    return `<xs:restriction base="xs:string">${build ? build(data) : ''}</xs:restriction>`
+}
+
+// A facet can have a same-source edge to its owning spec AND, separately, a
+// same-source edge to a "restriction" node — both are plain edges with no
+// targetHandle, so the only way to tell them apart is the target node's
+// type. Must check every outgoing edge (not just the first) since either
+// edge can come first in the array.
+function findRestrictionFor(facetNode, edges, nodes) {
     for (const edge of edges) {
-        if (edge.source !== node.id) continue
-        const candidate = nodes.find(n => n.id === edge.target)
-        if (candidate && candidate.type === 'restriction') return candidate
+        if (edge.source !== facetNode.id) continue
+        const target = nodes.find(n => n.id === edge.target)
+        if (target?.type === 'restriction') return target
     }
     return null
 }
 
-function buildValueXml(tag, node, edges, nodes) {
-    const restrictionNode = findRestrictionNode(node, edges, nodes)
-    if (restrictionNode) return `<${tag}>${buildValueRestrictionXml(restrictionNode.data)}</${tag}>`
-    if (node.data.value) return idsSimple(tag, node.data.value)
+function valueChildXml(tag, facetNode, edges, nodes) {
+    const restriction = findRestrictionFor(facetNode, edges, nodes)
+    if (restriction) return `<${tag}>${restrictionXml(restriction.data)}</${tag}>`
+    if (facetNode.data.value) return simpleValueEl(tag, facetNode.data.value)
     return ''
 }
 
-function buildEntityFacetXml(node, instructions) {
+// One entry per facet node type. `attrs` lists which XML attributes the
+// facet carries (read from the merged { ...node.data, cardinality,
+// instructions } context); `body` renders the facet's child elements.
+// `appliesTo` lets a facet opt out of carrying cardinality/instructions
+// when used in <ids:applicability> (only "requirements" facets do).
+const FACET_SCHEMAS = {
+    entity: {
+        tag: 'ids:entity',
+        attrs: ['instructions'],
+        body: (data) => simpleValueEl('ids:name', String(data.name ?? '').toUpperCase()) +
+            (data.predefinedType ? simpleValueEl('ids:predefinedType', data.predefinedType) : ''),
+    },
+    property: {
+        tag: 'ids:property',
+        attrs: ['dataType', 'cardinality', 'uri', 'instructions'],
+        body: (data, ctx) => simpleValueEl('ids:propertySet', data.propertySet) +
+            simpleValueEl('ids:baseName', data.baseName) +
+            valueChildXml('ids:value', ctx.node, ctx.edges, ctx.nodes),
+    },
+    attribute: {
+        tag: 'ids:attribute',
+        attrs: ['cardinality', 'instructions'],
+        body: (data, ctx) => simpleValueEl('ids:name', data.name) +
+            valueChildXml('ids:value', ctx.node, ctx.edges, ctx.nodes),
+    },
+    classification: {
+        tag: 'ids:classification',
+        attrs: ['cardinality', 'uri', 'instructions'],
+        body: (data, ctx) => {
+            const value = valueChildXml('ids:value', ctx.node, ctx.edges, ctx.nodes)
+            // ids:system is XSD-required on this facet; when the user hasn't
+            // picked one, "any non-empty string" via a wildcard pattern keeps
+            // the document valid without forcing a specific system.
+            const system = data.system
+                ? simpleValueEl('ids:system', data.system)
+                : '<ids:system><xs:restriction base="xs:string"><xs:pattern value=".+"/></xs:restriction></ids:system>'
+            return value + system
+        },
+    },
+    material: {
+        tag: 'ids:material',
+        attrs: ['cardinality', 'uri', 'instructions'],
+        body: (data, ctx) => valueChildXml('ids:value', ctx.node, ctx.edges, ctx.nodes),
+    },
+    partOf: {
+        tag: 'ids:partOf',
+        attrs: ['cardinality', 'relation', 'instructions'],
+        body: (data) => `<ids:entity>${simpleValueEl('ids:name', String(data.entity ?? '').toUpperCase())}</ids:entity>`,
+    },
+}
+
+// Renders one facet node as XML. `section` is 'applicability' or
+// 'requirements' — applicability facets never carry cardinality/instructions
+// (those only constrain *requirements*), so this only mixes them in for the
+// requirements section.
+function emitFacetXml(node, section, edges, nodes) {
+    const schema = FACET_SCHEMAS[node.type]
+    if (!schema) return ''
     const data = node.data
-    let xml = `<ids:entity${attr('instructions', instructions)}>`
-    xml += idsSimple('ids:name', String(data.name).toUpperCase())
-    if (data.predefinedType) xml += idsSimple('ids:predefinedType', data.predefinedType)
-    return xml + '</ids:entity>'
+    const ctx = { node, edges, nodes }
+
+    const attrSource = section === 'requirements'
+        ? { ...data, cardinality: data.cardinality || 'required', instructions: data.instructions }
+        : { ...data, cardinality: undefined, instructions: undefined } // applicability never carries these two, everything else (dataType, uri, relation, ...) still comes from node data
+
+    return `<${schema.tag}${xmlAttrs(schema.attrs, attrSource)}>${schema.body(data, ctx)}</${schema.tag}>`
 }
 
-function buildPropertyFacetXml(node, cardinality, instructions, edges, nodes) {
-    const data = node.data
-    const attrs = attr('dataType', data.dataType) + attr('cardinality', cardinality) +
-        attr('uri', data.uri) + attr('instructions', instructions || data.instructions)
-    let xml = `<ids:property${attrs}>`
-    xml += idsSimple('ids:propertySet', data.propertySet)
-    xml += idsSimple('ids:baseName', data.baseName)
-    xml += buildValueXml('ids:value', node, edges, nodes)
-    return xml + '</ids:property>'
-}
+// Applicability facets render in a fixed, spec-mandated reading order
+// (entity/partOf first, value-bearing facets after) rather than graph order.
+const APPLICABILITY_ORDER = ['entity', 'partOf', 'classification', 'attribute', 'property', 'material']
 
-function buildAttributeFacetXml(node, cardinality, instructions, edges, nodes) {
-    const data = node.data
-    const attrs = attr('cardinality', cardinality) + attr('instructions', instructions || data.instructions)
-    let xml = `<ids:attribute${attrs}>`
-    xml += idsSimple('ids:name', data.name)
-    xml += buildValueXml('ids:value', node, edges, nodes)
-    return xml + '</ids:attribute>'
-}
-
-function buildClassificationFacetXml(node, cardinality, instructions, edges, nodes) {
-    const data = node.data
-    const attrs = attr('cardinality', cardinality) + attr('uri', data.uri) + attr('instructions', instructions || data.instructions)
-    let xml = `<ids:classification${attrs}>`
-    xml += buildValueXml('ids:value', node, edges, nodes)
-    // system is XSD-required; a ".+" pattern restriction stands in for "any system" when unset.
-    xml += data.system
-        ? idsSimple('ids:system', data.system)
-        : '<ids:system><xs:restriction base="xs:string"><xs:pattern value=".+"/></xs:restriction></ids:system>'
-    return xml + '</ids:classification>'
-}
-
-function buildMaterialFacetXml(node, cardinality, instructions, edges, nodes) {
-    const data = node.data
-    const attrs = attr('cardinality', cardinality) + attr('uri', data.uri) + attr('instructions', instructions || data.instructions)
-    let xml = `<ids:material${attrs}>`
-    xml += buildValueXml('ids:value', node, edges, nodes)
-    return xml + '</ids:material>'
-}
-
-function buildPartOfFacetXml(node, cardinality, instructions) {
-    const data = node.data
-    const attrs = attr('cardinality', cardinality) + attr('relation', data.relation) + attr('instructions', instructions || data.instructions)
-    return `<ids:partOf${attrs}><ids:entity>${idsSimple('ids:name', String(data.entity).toUpperCase())}</ids:entity></ids:partOf>`
-}
-
-const APPLICABILITY_TYPE_ORDER = { entity: 1, partOf: 2, classification: 3, attribute: 4, property: 5, material: 6 }
-
-function buildFacetXml(node, section, edges, nodes) {
-    if (section === 'applicability') {
-        switch (node.type) {
-            case 'entity': return buildEntityFacetXml(node)
-            case 'partOf': return buildPartOfFacetXml(node)
-            case 'classification': return buildClassificationFacetXml(node, undefined, undefined, edges, nodes)
-            case 'attribute': return buildAttributeFacetXml(node, undefined, undefined, edges, nodes)
-            case 'property': return buildPropertyFacetXml(node, undefined, undefined, edges, nodes)
-            case 'material': return buildMaterialFacetXml(node, undefined, undefined, edges, nodes)
-            default: return ''
-        }
-    }
-    const cardinality = node.data.cardinality || 'required'
-    const instructions = node.data.instructions
-    switch (node.type) {
-        case 'entity': return buildEntityFacetXml(node, instructions)
-        case 'property': return buildPropertyFacetXml(node, cardinality, instructions, edges, nodes)
-        case 'attribute': return buildAttributeFacetXml(node, cardinality, instructions, edges, nodes)
-        case 'classification': return buildClassificationFacetXml(node, cardinality, instructions, edges, nodes)
-        case 'material': return buildMaterialFacetXml(node, cardinality, instructions, edges, nodes)
-        case 'partOf': return buildPartOfFacetXml(node, cardinality, instructions)
-        default: return ''
-    }
-}
-
-function groupNodesBySpecification(nodes, edges, specNode) {
-    const applicabilityNodes = edges
+function collectSpecFacets(specNode, nodes, edges) {
+    const applicability = edges
         .filter(e => e.target === specNode.id && e.targetHandle === 'applicability')
         .map(e => nodes.find(n => n.id === e.source))
         .filter(Boolean)
 
-    const requirementEdges = edges.filter(e => e.target === specNode.id && e.targetHandle === 'requirements')
+    // Requirement edges can originate from the facet directly, or from a
+    // restriction node sitting between the facet and the spec — resolve
+    // back to the owning facet either way, and de-duplicate (a facet with
+    // both an explicit requirements edge and a restriction edge should only
+    // appear once).
     const seen = new Set()
-    const requirementNodes = []
-    for (const edge of requirementEdges) {
-        let sourceNode = nodes.find(n => n.id === edge.source)
-        if (sourceNode && sourceNode.type === 'restriction') {
-            const facetEdge = edges.find(e => e.target === sourceNode.id)
-            sourceNode = facetEdge ? nodes.find(n => n.id === facetEdge.source) : null
+    const requirements = []
+    for (const edge of edges) {
+        if (edge.target !== specNode.id || edge.targetHandle !== 'requirements') continue
+        let source = nodes.find(n => n.id === edge.source)
+        if (source?.type === 'restriction') {
+            const ownerEdge = edges.find(e => e.target === source.id)
+            source = ownerEdge ? nodes.find(n => n.id === ownerEdge.source) : null
         }
-        if (sourceNode && !seen.has(sourceNode.id)) {
-            seen.add(sourceNode.id)
-            requirementNodes.push(sourceNode)
+        if (source && !seen.has(source.id)) {
+            seen.add(source.id)
+            requirements.push(source)
         }
     }
-    return { applicabilityNodes, requirementNodes }
+    return { applicability, requirements }
 }
 
-function buildSpecificationXml(specNode, applicabilityNodes, requirementNodes, edges, nodes) {
-    const specData = specNode.data
-    const specAttrs = attr('name', specData.name || 'Generated Specification') +
-        attr('ifcVersion', specData.ifcVersion || 'IFC4X3_ADD2') +
-        attr('description', specData.description) +
-        attr('identifier', specData.identifier) +
-        attr('instructions', specData.instructions)
-
-    let xml = `<ids:specification${specAttrs}>`
-
-    if (applicabilityNodes.length > 0) {
-        const sorted = [...applicabilityNodes].sort(
-            (a, b) => (APPLICABILITY_TYPE_ORDER[a.type] || 99) - (APPLICABILITY_TYPE_ORDER[b.type] || 99)
+function applicabilityXml(specNode, applicability, edges, nodes) {
+    if (applicability.length > 0) {
+        const ordered = [...applicability].sort(
+            (a, b) => (APPLICABILITY_ORDER.indexOf(a.type) + 1 || 99) - (APPLICABILITY_ORDER.indexOf(b.type) + 1 || 99)
         )
-        xml += '<ids:applicability>'
-        for (const node of sorted) xml += buildFacetXml(node, 'applicability', edges, nodes)
-        xml += '</ids:applicability>'
-    } else if (specData.hasEmptyApplicability) {
-        let applAttrs
-        if (specData.applicabilityCardinality) {
-            const occ = occursFromCardinality(specData.applicabilityCardinality)
-            applAttrs = attr('minOccurs', occ.minOccurs) + attr('maxOccurs', occ.maxOccurs)
-        } else {
-            applAttrs = attr('minOccurs', specData.applicabilityMinOccurs) + attr('maxOccurs', specData.applicabilityMaxOccurs)
-        }
-        xml += `<ids:applicability${applAttrs}/>`
+        return `<ids:applicability>${ordered.map(n => emitFacetXml(n, 'applicability', edges, nodes)).join('')}</ids:applicability>`
     }
-    // else: no applicability facets and no wildcard flag — matches upstream,
-    // which silently omits <ids:applicability> here too. The backend's IDS
-    // schema validation will reject the result with a clear error, which is
-    // the right outcome: a spec needs at least one applicability facet.
 
-    xml += `<ids:requirements${attr('description', specData.requirementsDescription)}>`
-    for (const node of requirementNodes) xml += buildFacetXml(node, 'requirements', edges, nodes)
-    xml += '</ids:requirements>'
+    const data = specNode.data
+    if (!data.hasEmptyApplicability) {
+        // No applicability facets and no explicit wildcard flag: write
+        // nothing here and let the backend's IDS schema validation surface
+        // the (correct) "a specification needs an applicability" error.
+        return ''
+    }
 
-    return xml + '</ids:specification>'
+    const occurs = data.applicabilityCardinality
+        ? applicabilityOccursFor(data.applicabilityCardinality)
+        : { minOccurs: data.applicabilityMinOccurs, maxOccurs: data.applicabilityMaxOccurs }
+    return `<ids:applicability${xmlAttr('minOccurs', occurs.minOccurs)}${xmlAttr('maxOccurs', occurs.maxOccurs)}/>`
 }
 
-function cleanAuthorEmail(author) {
-    const cleaned = String(author).replace(/\s+/g, '').toLowerCase()
-    if (cleaned.includes('@')) return /^[^@]+@[^.]+\..+$/.test(cleaned) ? cleaned : null
-    return `${cleaned}@idsedit.com`
+function specificationXml(specNode, nodes, edges) {
+    const { applicability, requirements } = collectSpecFacets(specNode, nodes, edges)
+    const data = specNode.data
+
+    const attrs = xmlAttrs(['name', 'ifcVersion', 'description', 'identifier', 'instructions'], {
+        ...data,
+        name: data.name || 'Generated Specification',
+        ifcVersion: data.ifcVersion || 'IFC4X3_ADD2',
+    })
+
+    const requirementsXml = requirements.map(n => emitFacetXml(n, 'requirements', edges, nodes)).join('')
+
+    return `<ids:specification${attrs}>` +
+        applicabilityXml(specNode, applicability, edges, nodes) +
+        `<ids:requirements${xmlAttr('description', data.requirementsDescription)}>${requirementsXml}</ids:requirements>` +
+        `</ids:specification>`
 }
 
-function buildInfoXml(metadata, firstSpecData) {
+// IDS authors are recorded as an email address. Most users just type a
+// display name, so a plausible placeholder address is synthesized from it;
+// a string that already looks like an email passes through (after light
+// normalization) and an unsalvageable one is dropped rather than written
+// as invalid xs:string content the backend would reject.
+function authorEmail(author) {
+    const normalized = String(author).replace(/\s+/g, '').toLowerCase()
+    if (!normalized.includes('@')) return `${normalized}@idsedit.com`
+    return /^[^@]+@[^.]+\..+$/.test(normalized) ? normalized : null
+}
+
+function infoXml(metadata, firstSpecData) {
     const title = metadata?.title || firstSpecData?.name || 'Untitled IDS'
-    let xml = `<ids:info>${plainText('ids:title', title)}`
-    if (metadata?.copyright) xml += plainText('ids:copyright', metadata.copyright)
-    if (metadata?.version) xml += plainText('ids:version', metadata.version)
     const description = metadata?.description || firstSpecData?.description
-    if (description) xml += plainText('ids:description', description)
-    if (metadata?.author) {
-        const email = cleanAuthorEmail(metadata.author)
-        if (email) xml += plainText('ids:author', email)
-    }
-    if (metadata?.date) xml += plainText('ids:date', metadata.date)
-    if (metadata?.purpose) xml += plainText('ids:purpose', metadata.purpose)
-    if (metadata?.milestone) xml += plainText('ids:milestone', metadata.milestone)
-    return xml + '</ids:info>'
+    const email = metadata?.author ? authorEmail(metadata.author) : null
+
+    const fields = [
+        ['ids:title', title],
+        ['ids:copyright', metadata?.copyright],
+        ['ids:version', metadata?.version],
+        ['ids:description', description],
+        ['ids:author', email],
+        ['ids:date', metadata?.date],
+        ['ids:purpose', metadata?.purpose],
+        ['ids:milestone', metadata?.milestone],
+    ]
+    return `<ids:info>${fields.filter(([, v]) => v).map(([tag, v]) => textEl(tag, v)).join('')}</ids:info>`
 }
 
 // Lightweight structural check for the editor's validation panel — not a
 // substitute for the backend's real ids_check.validate_ids_xml, just enough
-// to catch the obvious "this can't generate a meaningful spec yet" states
-// before the user bothers saving. Each issue carries the offending node's id
-// so the UI can jump to + select it, mirroring (independently implemented,
-// not copied) the per-issue "click to go to node" pattern from ids-flow's own
-// client-side validator — minus its IFC-schema-driven data-type checks, which
-// would require bundling the same generated schema dataset we've kept out of
-// scope for this editor.
+// to flag "this can't produce a meaningful spec yet" before the user saves.
+// Each issue carries the offending node's id so the UI can select it.
 export function validateGraph(nodes, edges) {
     const issues = []
-    const push = (severity, message, nodeId) => issues.push({ severity, message, nodeId })
+    const flag = (severity, message, nodeId) => issues.push({ severity, message, nodeId })
 
     const specNodes = nodes.filter(n => n.type === 'spec')
     if (specNodes.length === 0) {
-        push('error', 'Add at least one Specification node')
+        flag('error', 'Add at least one Specification node')
         return { valid: false, issues }
     }
 
     for (const node of nodes) {
         if (node.type === 'entity' && !node.data.name) {
-            push('error', 'Entity node is missing an IFC class name', node.id)
+            flag('error', 'Entity node is missing an IFC class name', node.id)
         }
         if (node.type === 'property') {
-            if (!node.data.propertySet) push('warning', 'Property node is missing a Property Set', node.id)
-            if (!node.data.baseName) push('warning', 'Property node is missing a Base Name', node.id)
+            if (!node.data.propertySet) flag('warning', 'Property node is missing a Property Set', node.id)
+            if (!node.data.baseName) flag('warning', 'Property node is missing a Base Name', node.id)
         }
     }
 
     for (const spec of specNodes) {
         const name = spec.data.name || 'Untitled specification'
-        if (!spec.data.name) push('warning', `"${name}": missing a name`, spec.id)
+        if (!spec.data.name) flag('warning', `"${name}": missing a name`, spec.id)
 
         const applicabilityEdges = edges.filter(e => e.target === spec.id && e.targetHandle === 'applicability')
         if (applicabilityEdges.length === 0 && !spec.data.hasEmptyApplicability) {
-            push('error', `"${name}": needs at least one node connected to its "applic." port`, spec.id)
+            flag('error', `"${name}": needs at least one node connected to its "applic." port`, spec.id)
         } else if (applicabilityEdges.length > 0) {
             const hasEntity = applicabilityEdges.some(e => nodes.find(n => n.id === e.source)?.type === 'entity')
-            if (!hasEntity) push('warning', `"${name}": applicability should include an Entity node`, spec.id)
+            if (!hasEntity) flag('warning', `"${name}": applicability should include an Entity node`, spec.id)
         }
     }
 
@@ -305,22 +302,21 @@ export function convertGraphToIdsXml(nodes, edges, options = {}) {
     const specNodes = nodes.filter(n => n.type === 'spec')
     if (specNodes.length === 0) throw new Error('No specification ("spec") nodes found in this canvas')
 
-    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
-    xml += '<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema" '
-    xml += 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd">'
-    xml += buildInfoXml(options.metadata, specNodes[0].data)
-    xml += '<ids:specifications>'
-    for (const specNode of specNodes) {
-        const { applicabilityNodes, requirementNodes } = groupNodesBySpecification(nodes, edges, specNode)
-        xml += buildSpecificationXml(specNode, applicabilityNodes, requirementNodes, edges, nodes)
-    }
-    xml += '</ids:specifications></ids:ids>'
-    return xml
+    const header = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema" ' +
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd">'
+
+    const body = specNodes.map(spec => specificationXml(spec, nodes, edges)).join('')
+
+    return header +
+        infoXml(options.metadata, specNodes[0].data) +
+        `<ids:specifications>${body}</ids:specifications>` +
+        '</ids:ids>'
 }
 
-// Wraps a live graph (from the native IdsGraphEditor) into the same
-// { version, metadata, nodes, edges } shape ids-flow's own "Export Canvas
-// (.json)" produces, so files round-trip between this editor and ids-flow.
+// Wraps a live graph into a { version, metadata, nodes, edges } envelope —
+// a plain data-interchange shape (not specific to any one tool) that's
+// convenient for saving/loading canvases outside the backend's IDS storage.
 export function graphToCanvasJson(nodes, edges, metadata = {}) {
     return {
         version: '1.0',
@@ -336,22 +332,19 @@ export function graphToCanvasJson(nodes, edges, metadata = {}) {
     }
 }
 
-// Parses an ids-flow "Export Canvas (.json)" file's contents
-// ({ version, metadata, nodes, edges }) and validates its basic shape.
 export function parseCanvasJson(text) {
     const data = JSON.parse(text)
     if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
-        throw new Error('Expected an ids-flow canvas export with "nodes" and "edges" arrays')
+        throw new Error('Expected a canvas export with "nodes" and "edges" arrays')
     }
     return data
 }
 
-// Minimal indenter for displaying generated XML — not a full pretty-printer,
-// just enough to make the preview readable.
+// Minimal indenter for the editor's XML preview — not a full pretty-printer,
+// just enough to make the generated document readable at a glance.
 export function formatXmlPreview(xml) {
-    const withBreaks = xml.replace(/></g, '>\n<')
     let depth = 0
-    return withBreaks.split('\n').map(line => {
+    return xml.replace(/></g, '>\n<').split('\n').map(line => {
         const isClosing = /^<\//.test(line)
         const isSelfClosing = /\/>$/.test(line) || /^<\?/.test(line)
         if (isClosing) depth = Math.max(depth - 1, 0)

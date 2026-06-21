@@ -4,7 +4,7 @@
 // — public technical facts, not anyone's proprietary content — but the
 // selection, naming, descriptions, and grouping here are written
 // independently for this editor, not ported from any third-party tool's
-// source (see the AGPL note in IdsGraphEditor.jsx for why).
+// source (see IdsGraphEditor.jsx's header for the editor's own provenance).
 //
 // Node/edge indices are positions within the template's own `nodes` array;
 // instantiateTemplate() below resolves them to freshly generated graph ids
