@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from bcf.auth import get_bearer_token
 from bcf.db import fetch_all, fetch_one
-from bcf.oauth import current_user, FAKE_USER_EMAIL
+from bcf.oauth import current_user
 
 router = APIRouter(tags=["bcf-projects"])
 
@@ -24,7 +25,10 @@ _DEFAULT_EXTENSIONS = {
     "topic_label": [],
     "snippet_type": [],
     "stage": [],
-    "user_id_type": [FAKE_USER_EMAIL],
+    # user_id_type is filled in live from bcf_users at request time (see
+    # _user_id_type() / get_extensions() below) — this placeholder is
+    # overwritten on every call, never served as-is.
+    "user_id_type": [],
     "project_actions": ["update", "createTopic", "createDocument"],
     "topic_actions": [
         "update",
@@ -40,8 +44,8 @@ _DEFAULT_EXTENSIONS = {
 
 
 @router.get("/current-user")
-def get_current_user():
-    return current_user()
+def get_current_user(access_token: str = Depends(get_bearer_token)):
+    return current_user(access_token)
 
 
 @router.get("/projects")
@@ -78,6 +82,11 @@ def get_project(project_id: str):
     }
 
 
+def _user_id_type() -> list[str]:
+    rows = fetch_all("SELECT email FROM bcf_users ORDER BY email")
+    return [r["email"] for r in rows]
+
+
 @router.get("/projects/{project_id}/extensions")
 def get_extensions(project_id: str):
     rows = fetch_all(
@@ -85,11 +94,14 @@ def get_extensions(project_id: str):
         (project_id,),
     )
     if not rows:
-        return _DEFAULT_EXTENSIONS
+        extensions = dict(_DEFAULT_EXTENSIONS)
+        extensions["user_id_type"] = _user_id_type()
+        return extensions
     # The fixed action arrays aren't user-configurable (no DB rows ever exist
     # for them — see the CHECK constraint in bcf/db_schema.py), only the
     # value-list kinds below are overridden per-project from bcf_extensions.
     extensions = dict(_DEFAULT_EXTENSIONS)
+    extensions["user_id_type"] = _user_id_type()
     for k in ("topic_type", "topic_status", "priority", "topic_label", "stage"):
         extensions[k] = []
     for r in rows:

@@ -69,3 +69,16 @@ class ViewpointCreate(BaseModel):
     coloring: list[dict] = []  # [{"ifc_guid": "...", "color": "FF0000"}]
     # Raw PNG bytes, base64-encoded.
     snapshot_base64: str | None = None
+
+
+class UserCreate(BaseModel):
+    email: str
+    name: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    guid: str
+    email: str
+    name: str
+    created_at: str

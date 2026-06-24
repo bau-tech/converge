@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS bcf_comment_push_sync (
     speckle_reply_id  TEXT NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Real per-person BCF login accounts, replacing the earlier fake-identity
+-- OAuth shim. UNIQUE on email already provides an index, so no extra
+-- CREATE INDEX needed.
+CREATE TABLE IF NOT EXISTS bcf_users (
+    guid           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email          TEXT NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    password_hash  TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by
