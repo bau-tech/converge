@@ -14,8 +14,9 @@ mounted under both /bcf/2.1 and /bcf/3.0.
 Configuration (env, same vars as bim-normalizer):
   PG_HOST / PG_PORT / PG_USER / PG_PASS / PG_NAME
   PORT             default 8004
-  BCF_API_KEY      shared Bearer credential for our own dashboard's calls
-  BCF_OIDC_SECRET  signs the fake id_token issued by bcf/oauth.py
+  BCF_API_KEY        shared Bearer credential for our own dashboard's calls
+  BCF_OIDC_SECRET    signs the id_token issued by bcf/oauth.py
+  BCF_ADMIN_EMAIL/PASSWORD  optional one-time bootstrap bcf_users seed
 """
 
 import logging
@@ -27,8 +28,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from db.connection import init_pool, close_pool
 from bcf.db_schema import init_bcf_schema
+from bcf.db import execute
+from bcf.password import hash_password
 from bcf.versions import router as versions_router, BCF_VERSION, BCF_LEGACY_VERSION
 from bcf.auth_discovery import router as auth_discovery_router
+from bcf.foundation import router as foundation_router
 from bcf.oauth import router as oauth_router, compat_router as oauth_compat_router
 from bcf.auth import require_bcf_auth
 from bcf.projects import router as projects_router
@@ -37,6 +41,9 @@ from bcf.comments import router as comments_router
 from bcf.viewpoints import router as viewpoints_router
 from bcf.bridge import router as bridge_router
 from bcf.bcfxml import router as bcfxml_router
+from bcf.users import router as users_router
+from bcf.admin import router as admin_router
+from config import settings
 
 logging.basicConfig(
     level=getattr(logging, (os.getenv("LOG_LEVEL") or "INFO").upper(), logging.INFO),
@@ -50,6 +57,20 @@ async def lifespan(app: FastAPI):
     logger.info("Starting bcf-server...")
     init_pool()
     init_bcf_schema()
+    if settings.BCF_ADMIN_EMAIL and settings.BCF_ADMIN_PASSWORD:
+        # Convenience only — ON CONFLICT DO NOTHING means this never resets
+        # the password on later restarts, and skipping it entirely is fine
+        # too: the admin panel is reachable via BCF_API_KEY regardless of
+        # whether any bcf_users rows exist yet.
+        execute(
+            """
+            INSERT INTO bcf_users (email, name, password_hash)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (email) DO NOTHING
+            """,
+            (settings.BCF_ADMIN_EMAIL, "Admin", hash_password(settings.BCF_ADMIN_PASSWORD)),
+        )
+        logger.info("Bootstrap admin account ensured (%s).", settings.BCF_ADMIN_EMAIL)
     logger.info("bcf-server ready.")
     yield
     close_pool()
@@ -72,8 +93,13 @@ app.add_middleware(
 
 app.include_router(versions_router)
 app.include_router(auth_discovery_router)
+app.include_router(foundation_router)
 app.include_router(oauth_router)
 app.include_router(oauth_compat_router)
+# admin.py manages its own per-route session-cookie auth (require_admin_session) —
+# it must NOT get the blanket require_bcf_auth dependency below, since /admin/login
+# itself has to stay reachable without any credential at all.
+app.include_router(admin_router)
 
 for _version in (BCF_LEGACY_VERSION, BCF_VERSION):
     _prefix = f"/bcf/{_version}"
@@ -85,6 +111,7 @@ for _version in (BCF_LEGACY_VERSION, BCF_VERSION):
 
 app.include_router(bridge_router, dependencies=[Depends(require_bcf_auth)])
 app.include_router(bcfxml_router, dependencies=[Depends(require_bcf_auth)])
+app.include_router(users_router, dependencies=[Depends(require_bcf_auth)])
 
 
 @app.get("/health")
@@ -95,4 +122,17 @@ def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8004")))
+    # forwarded_allow_ips="*": this process only ever sees traffic from the
+    # reverse proxy (NPM) inside the docker network, never directly from the
+    # internet — without this, Uvicorn ignores the proxy's X-Forwarded-Proto
+    # and every URL we build from request.base_url comes out as "http://"
+    # even though the public-facing connection is HTTPS (confirmed: broke
+    # Solibri's BCF connector, which actually uses oauth2_auth_url/token_url
+    # from our /auth response, unlike BIMcollab ZOOM which hardcodes its own).
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8004")),
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
