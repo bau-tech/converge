@@ -118,11 +118,14 @@ async def _auto_sync_loop():
     from config import settings
     from speckle.webhooks import scan_all_enabled_servers
     while True:
-        await asyncio.sleep(settings.AUTO_SYNC_SCAN_INTERVAL_S)
+        # Scan immediately on every iteration, including the first — catches
+        # up on anything missed (new streams, missed deletions) while this
+        # backend was down, rather than waiting a full interval after restart.
         try:
             await scan_all_enabled_servers()
         except Exception as exc:
-            logger.error("Auto-sync periodic scan failed: %s", exc, exc_info=True)
+            logger.error("Auto-sync scan failed: %s", exc, exc_info=True)
+        await asyncio.sleep(settings.AUTO_SYNC_SCAN_INTERVAL_S)
 
 
 @asynccontextmanager
@@ -400,6 +403,7 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
     import json
 
     from db.connection import get_conn, release_conn
+    from db.purge import purge_speckle_models
     from pipeline.normalize import ingest_commit
 
     raw_body = await request.body()
@@ -440,10 +444,12 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
                 webhook_row_id, event_name, stream_id, commit_id)
 
     if event_name == "stream_delete":
-        # The stream itself is gone — nothing to ingest, just drop our row so
-        # it stops being counted as "watched". The periodic scan's
-        # reconciliation pass (speckle/webhooks.scan_server) is the fallback
-        # for streams registered before this trigger existed.
+        # The stream itself is gone — drop our watch registration AND every
+        # local model/BCF-topic ingested from it. Speckle is the single
+        # source of truth, so a project deleted there shouldn't keep living
+        # in the dashboard/BCF server. The periodic scan's reconciliation
+        # pass (speckle/webhooks.scan_server) is the fallback for streams
+        # registered before this trigger existed.
         conn = get_conn()
         try:
             with conn.cursor() as cur:
@@ -454,8 +460,36 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
             raise
         finally:
             release_conn(conn)
-        logger.info("Webhook %s: stream %s deleted upstream — removed local registration", webhook_row_id, stream_id)
-        return {"status": "removed"}
+        models_deleted = purge_speckle_models(stream_id)
+        logger.info(
+            "Webhook %s: stream %s deleted upstream — removed local registration and %d local model(s)",
+            webhook_row_id, stream_id, models_deleted,
+        )
+        return {"status": "removed", "models_deleted": models_deleted}
+
+    if event_name == "commit_delete":
+        deleted_commit_id = event_data.get("id") or (event_data.get("commit") or {}).get("id")
+        if not deleted_commit_id:
+            logger.warning("Webhook %s: commit_delete with no resolvable commit id — data=%r", webhook_row_id, event_data)
+            return {"status": "ignored", "event_name": event_name}
+        models_deleted = purge_speckle_models(stream_id, commit_id=deleted_commit_id)
+        logger.info(
+            "Webhook %s: commit %s deleted upstream on stream %s — removed %d local model(s)",
+            webhook_row_id, deleted_commit_id, stream_id, models_deleted,
+        )
+        return {"status": "removed", "models_deleted": models_deleted}
+
+    if event_name == "branch_delete":
+        deleted_branch_name = (event_data.get("branch") or {}).get("name")
+        if not deleted_branch_name:
+            logger.warning("Webhook %s: branch_delete with no resolvable branch name — data=%r", webhook_row_id, event_data)
+            return {"status": "ignored", "event_name": event_name}
+        models_deleted = purge_speckle_models(stream_id, branch_name=deleted_branch_name)
+        logger.info(
+            "Webhook %s: branch %r deleted upstream on stream %s — removed %d local model(s)",
+            webhook_row_id, deleted_branch_name, stream_id, models_deleted,
+        )
+        return {"status": "removed", "models_deleted": models_deleted}
 
     if event_name != "commit_create" or not commit_id:
         # branch_create has nothing to ingest yet — the new branch's first

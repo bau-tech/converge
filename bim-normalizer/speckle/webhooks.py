@@ -72,12 +72,53 @@ def get_latest_commit_id(server_url: str, token: str, stream_id: str) -> str | N
     return items[0]["id"] if items else None
 
 
+def list_commit_ids(server_url: str, token: str, stream_id: str) -> set[str]:
+    """Return every commit id currently on stream_id (across all branches —
+    this is a stream-level connection, not scoped to one branch), paginating
+    past the 100-item page size same as list_streams. Used to detect
+    commit_delete/branch_delete events missed while this backend was down:
+    get_latest_commit_id alone only catches missed additions, not deletions
+    of older commits/branches that were never the "latest" to begin with."""
+    query = """
+        query($id: String!, $limit: Int!, $cursor: String) {
+            stream(id: $id) {
+                commits(limit: $limit, cursor: $cursor) {
+                    totalCount
+                    cursor
+                    items { id }
+                }
+            }
+        }
+    """
+    ids: set[str] = set()
+    cursor = None
+    while True:
+        data = _graphql(server_url, token, query, {"id": stream_id, "limit": 100, "cursor": cursor})
+        page = (data.get("stream") or {}).get("commits") or {}
+        items = page.get("items") or []
+        ids.update(item["id"] for item in items)
+        cursor = page.get("cursor")
+        if not cursor or len(items) == 0 or len(ids) >= page.get("totalCount", len(ids)):
+            break
+    return ids
+
+
+# Speckle is the single source of truth: new versions/models sync in
+# (commit_create, branch_create), and every deletion variant Speckle exposes
+# is watched too so a deletion there is reflected here instantly instead of
+# leaving stale data behind (handled in main.py's receive_speckle_webhook —
+# see db.purge.purge_speckle_models). Trigger names are exactly the activity-event
+# strings Speckle's webhook dispatcher string-matches against (see
+# @speckle/shared's WebhookTriggers / packages/server's StreamActionTypes —
+# there's no GraphQL enum for these, the API takes plain strings).
+WEBHOOK_TRIGGERS = [
+    "commit_create", "branch_create", "stream_delete", "commit_delete", "branch_delete",
+]
+
+
 def register_webhook(server_url: str, token: str, stream_id: str, callback_url: str, secret: str) -> str:
     """Create a Speckle webhook on stream_id pointed at callback_url, firing on
-    new versions (commit_create), new models (branch_create), and the stream's
-    own deletion (stream_delete — lets the receiver clean up its
-    stream_webhooks row immediately rather than waiting on the periodic
-    scan's reconciliation pass). Returns the Speckle-assigned webhook id."""
+    WEBHOOK_TRIGGERS. Returns the Speckle-assigned webhook id."""
     mutation = """
         mutation($webhook: WebhookCreateInput!) {
             webhookCreate(webhook: $webhook)
@@ -89,20 +130,42 @@ def register_webhook(server_url: str, token: str, stream_id: str, callback_url: 
             "url": callback_url,
             "secret": secret,
             "enabled": True,
-            "triggers": ["commit_create", "branch_create", "stream_delete"],
+            "triggers": WEBHOOK_TRIGGERS,
         }
     }
     data = _graphql(server_url, token, mutation, variables)
     return data["webhookCreate"]
 
 
+def update_webhook_triggers(server_url: str, token: str, stream_id: str, webhook_id: str) -> None:
+    """Re-assert WEBHOOK_TRIGGERS on an already-registered webhook. Called on
+    every periodic scan (see scan_server) so streams registered before a
+    trigger was added to WEBHOOK_TRIGGERS pick it up automatically, with no
+    one-time migration needed — idempotent, cheap to call repeatedly."""
+    mutation = """
+        mutation($webhook: WebhookUpdateInput!) {
+            webhookUpdate(webhook: $webhook)
+        }
+    """
+    variables = {
+        "webhook": {
+            "id": webhook_id,
+            "streamId": stream_id,
+            "triggers": WEBHOOK_TRIGGERS,
+        }
+    }
+    _graphql(server_url, token, mutation, variables)
+
+
 def scan_server(server_url: str, token: str) -> int:
     """
-    Ensure every stream on server_url has a registered webhook, and drop
-    stream_webhooks rows for streams that no longer exist on the server.
-    Idempotent — streams already present in stream_webhooks are skipped
-    without calling Speckle again. Returns the number of newly-registered
-    webhooks.
+    Ensure every stream on server_url has a registered webhook with the
+    current WEBHOOK_TRIGGERS, and drop stream_webhooks rows for streams that
+    no longer exist on the server. Streams already registered get their
+    triggers re-asserted (cheap, idempotent) rather than being skipped, so
+    adding a new trigger to WEBHOOK_TRIGGERS rolls out to every already-
+    watched stream on the next scan with no separate migration. Returns the
+    number of newly-registered webhooks.
 
     The deletion side is a safety net, not the primary mechanism: a deleted
     stream's webhook also fires stream_delete (handled instantly by the
@@ -120,17 +183,20 @@ def scan_server(server_url: str, token: str) -> int:
     stream_id_set = set(stream_ids)
     registered = 0
     removed = 0
+    purged = 0
+
+    from db.purge import purge_speckle_models
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT stream_id FROM stream_webhooks WHERE server_url = %s",
+                "SELECT stream_id, speckle_webhook_id FROM stream_webhooks WHERE server_url = %s",
                 (server_url,),
             )
-            known = {row[0] for row in cur.fetchall()}
+            known = {row[0]: row[1] for row in cur.fetchall()}
 
-        stale = known - stream_id_set
+        stale = set(known) - stream_id_set
         if stale:
             with conn.cursor() as cur:
                 cur.execute(
@@ -140,8 +206,64 @@ def scan_server(server_url: str, token: str) -> int:
                 removed = cur.rowcount
             conn.commit()
 
+            # A stream missing from list_streams() is gone upstream — same
+            # situation as a stream_delete webhook, just discovered late
+            # (e.g. the webhook was missed while this backend was down).
+            # Purge local data too, not just the watch registration, so
+            # reconnecting actually catches up instead of leaving stale
+            # models/BCF topics behind indefinitely.
+            for stream_id in stale:
+                try:
+                    deleted = purge_speckle_models(stream_id)
+                    if deleted:
+                        purged += deleted
+                        logger.info(
+                            "Reconciliation: stream %s no longer exists on %s — purged %d local model(s)",
+                            stream_id, server_url, deleted,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Reconciliation: failed to purge local data for vanished stream %s on %s: %s",
+                        stream_id, server_url, exc, exc_info=True,
+                    )
+
+        # Direct check against every model ever ingested from this server —
+        # not just streams that previously got a stream_webhooks row. A
+        # model can land in bim_models without ever being "known" here (a
+        # one-off manual /ingest call, or its stream was already deleted on
+        # Speckle before auto-sync was first enabled for this server) — the
+        # stream_webhooks-based stale diff above can never catch those,
+        # since they were never in `known` to begin with.
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT stream_id FROM bim_models WHERE server_url = %s", (server_url,))
+            locally_ingested = {row[0] for row in cur.fetchall()}
+        for stream_id in locally_ingested - stream_id_set:
+            try:
+                deleted = purge_speckle_models(stream_id)
+                if deleted:
+                    purged += deleted
+                    logger.info(
+                        "Reconciliation: stream %s (ingested from %s, never webhook-registered) no longer "
+                        "exists upstream — purged %d local model(s)",
+                        stream_id, server_url, deleted,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Reconciliation: failed to purge never-registered vanished stream %s on %s: %s",
+                    stream_id, server_url, exc, exc_info=True,
+                )
+
         for stream_id in stream_ids:
             if stream_id in known:
+                webhook_id = known[stream_id]
+                if webhook_id:
+                    try:
+                        update_webhook_triggers(server_url, token, stream_id, webhook_id)
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to refresh webhook triggers for stream %s on %s: %s",
+                            stream_id, server_url, exc, exc_info=True,
+                        )
                 continue
             secret = secrets.token_hex(32)
             try:
@@ -212,6 +334,34 @@ def scan_server(server_url: str, token: str) -> int:
                     stream_id, server_url, exc, exc_info=True,
                 )
 
+        # Deletion reconciliation: the addition-only check above only ever
+        # looks at the single latest commit, so a commit_delete/branch_delete
+        # missed while this backend was down (deleting something other than
+        # the very latest commit) would otherwise never self-heal. Walks
+        # every commit id currently on the stream and purges any locally
+        # ingested commit_id that's no longer among them — this also
+        # inherently covers a deleted branch, since deleting a branch removes
+        # all of its commits from this same stream-wide list.
+        for stream_id in stream_ids:
+            try:
+                remote_commit_ids = list_commit_ids(server_url, token, stream_id)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT commit_id FROM bim_models WHERE stream_id = %s", (stream_id,))
+                    local_commit_ids = {row[0] for row in cur.fetchall()}
+                for commit_id in local_commit_ids - remote_commit_ids:
+                    deleted = purge_speckle_models(stream_id, commit_id=commit_id)
+                    if deleted:
+                        purged += deleted
+                        logger.info(
+                            "Reconciliation: commit %s on stream %s no longer exists on %s — purged local model",
+                            commit_id, stream_id, server_url,
+                        )
+            except Exception as exc:
+                logger.error(
+                    "Deletion-reconciliation failed for stream %s on %s: %s",
+                    stream_id, server_url, exc, exc_info=True,
+                )
+
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE auto_sync_servers SET last_scanned_at = NOW() WHERE server_url = %s",
@@ -223,8 +373,8 @@ def scan_server(server_url: str, token: str) -> int:
 
     logger.info(
         "Scanned %s: %d stream(s) total, %d new webhook(s) registered, %d stale entry(ies) removed, "
-        "%d stream(s) reconciled",
-        server_url, len(stream_ids), registered, removed, reconciled,
+        "%d stream(s) reconciled, %d model(s) purged via deletion-reconciliation",
+        server_url, len(stream_ids), registered, removed, reconciled, purged,
     )
     return registered
 
