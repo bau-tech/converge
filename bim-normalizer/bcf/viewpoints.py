@@ -18,26 +18,47 @@ def _require_topic(project_id: str, topic_guid: str) -> None:
         raise HTTPException(status_code=404, detail="Topic not found")
 
 
-def _components_for(viewpoint_guid: str) -> dict:
+def _components_for(model_id: str, viewpoint_guid: str) -> dict:
+    # Resolves each ifc_guid (= application_id, the native source-app GUID) to
+    # the dashboard's speckle_id server-side, so any consumer of this endpoint
+    # gets a ready-to-use reference instead of re-deriving it client-side.
+    # LATERAL ... LIMIT 1 picks one arbitrary match if application_id is
+    # duplicated within the model (a known, separately-tracked data-quality
+    # issue) rather than fanning out extra rows or erroring.
     rows = fetch_all(
-        "SELECT ifc_guid, component_type, color FROM bcf_viewpoint_components WHERE viewpoint_guid = %s",
-        (viewpoint_guid,),
+        """
+        SELECT vpc.ifc_guid, vpc.component_type, vpc.color, be.speckle_id
+        FROM bcf_viewpoint_components vpc
+        LEFT JOIN LATERAL (
+            SELECT speckle_id FROM bim_elements
+            WHERE model_id = %s AND application_id = vpc.ifc_guid
+            LIMIT 1
+        ) be ON true
+        WHERE vpc.viewpoint_guid = %s
+        """,
+        (model_id, viewpoint_guid),
     )
     return {
-        "selection": [r["ifc_guid"] for r in rows if r["component_type"] == "selection"],
+        "selection": [
+            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"]}
+            for r in rows
+            if r["component_type"] == "selection"
+        ],
         "visibility_exceptions": [
-            r["ifc_guid"] for r in rows if r["component_type"] == "visibility_exception"
+            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"]}
+            for r in rows
+            if r["component_type"] == "visibility_exception"
         ],
         "coloring": [
-            {"ifc_guid": r["ifc_guid"], "color": r["color"]}
+            {"ifc_guid": r["ifc_guid"], "color": r["color"], "speckle_id": r["speckle_id"]}
             for r in rows
             if r["component_type"] == "coloring"
         ],
     }
 
 
-def _viewpoint_with_components(row: dict) -> dict:
-    return {**row, **_components_for(str(row["guid"]))}
+def _viewpoint_with_components(model_id: str, row: dict) -> dict:
+    return {**row, **_components_for(model_id, str(row["guid"]))}
 
 
 @router.get("/projects/{project_id}/topics/{topic_guid}/viewpoints")
@@ -52,7 +73,7 @@ def list_viewpoints(project_id: str, topic_guid: str):
         """,
         (topic_guid,),
     )
-    return [_viewpoint_with_components(r) for r in rows]
+    return [_viewpoint_with_components(project_id, r) for r in rows]
 
 
 @router.get("/projects/{project_id}/topics/{topic_guid}/viewpoints/{viewpoint_guid}")
@@ -69,7 +90,7 @@ def get_viewpoint(project_id: str, topic_guid: str, viewpoint_guid: str):
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Viewpoint not found")
-    return _viewpoint_with_components(row)
+    return _viewpoint_with_components(project_id, row)
 
 
 @router.get("/projects/{project_id}/topics/{topic_guid}/viewpoints/{viewpoint_guid}/snapshot")
@@ -147,7 +168,7 @@ def create_viewpoint(project_id: str, topic_guid: str, body: ViewpointCreate):
             (viewpoint_guid, item["ifc_guid"], item.get("color")),
         )
 
-    return _viewpoint_with_components(row)
+    return _viewpoint_with_components(project_id, row)
 
 
 @router.delete(

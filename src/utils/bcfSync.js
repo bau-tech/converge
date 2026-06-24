@@ -52,15 +52,6 @@ function buildElementMap(elements) {
     return map
 }
 
-// application_id (IFC GUID) -> speckle scene id (the reverse lookup, for push)
-function buildSceneIdMap(elements) {
-    const map = new Map()
-    for (const el of elements || []) {
-        if (el.application_id) map.set(el.application_id, el.speckle_id || el.id)
-    }
-    return map
-}
-
 function vecFrom(v) {
     if (!v) return null
     if (Array.isArray(v)) return { x: v[0], y: v[1], z: v[2] }
@@ -231,15 +222,14 @@ export async function pullFromSpeckle(projectId, speckleComments, elements, spec
 // camera.position/target and resources.request.resourceIdString are the
 // only genuinely required leaves (confirmed against a real comment's stored
 // viewerState) — everything else just needs to be present with sane defaults.
-async function buildViewerState(viewpoint, sceneIdMap, { streamId, modelId, versionId }) {
+async function buildViewerState(viewpoint, { streamId, modelId, versionId }) {
     if (!viewpoint?.camera_view_point || !viewpoint?.camera_direction) return null
     const p = viewpoint.camera_view_point
     const d = viewpoint.camera_direction
 
     const selection = {}
-    for (const ifcGuid of viewpoint.selection || []) {
-        const sceneId = sceneIdMap.get(ifcGuid)
-        if (sceneId) selection[sceneId] = ifcGuid
+    for (const s of viewpoint.selection || []) {
+        if (s.speckle_id) selection[s.speckle_id] = s.ifc_guid
     }
 
     return {
@@ -321,9 +311,8 @@ mutation ReplyBcfComment($input: CreateCommentReplyInput!) {
 //    Speckle comment, never a new one): skip creating anything, just relay
 //    any BCF comments that haven't been relayed yet. This is what keeps
 //    later edits/replies showing up on Speckle instead of being one-shot.
-export async function pushToSpeckle(projectId, topics, { streamId, modelId, versionId, elements, serverUrl, token }) {
+export async function pushToSpeckle(projectId, topics, { streamId, modelId, versionId, serverUrl, token }) {
     const speckleServer = { serverUrl, token }
-    const sceneIdMap = buildSceneIdMap(elements)
     const syncRecords = await listSyncRecords(projectId)
     const threadIdByTopic = new Map()
     for (const r of syncRecords) {
@@ -345,7 +334,7 @@ export async function pushToSpeckle(projectId, topics, { streamId, modelId, vers
 
             if (!threadId) {
                 if (!modelId || !versionId) continue // need both for resourceIdString — can't create yet
-                const viewerState = await buildViewerState(topic.viewpoint, sceneIdMap, { streamId, modelId, versionId })
+                const viewerState = await buildViewerState(topic.viewpoint, { streamId, modelId, versionId })
                 const screenshot = topic.viewpoint
                     ? await snapshotBase64(projectId, topic.guid, topic.viewpoint.guid)
                     : null

@@ -1209,7 +1209,6 @@ function App() {
                 streamId: data?.project_id,
                 modelId: data?.model_id,
                 versionId: data?.version_id,
-                elements,
                 ...speckleServer,
             })
             if (pushed.length) {

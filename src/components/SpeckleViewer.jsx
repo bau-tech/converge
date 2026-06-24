@@ -358,7 +358,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             try {
                 selectedBcfTopicGuidRef.current = topicGuid
                 const ids = (viewpoint.selection || [])
-                    .map((guid) => elementByAppIdRef.current.get(guid)?.speckle_id)
+                    .map((s) => s.speckle_id ?? elementByAppIdRef.current.get(s.ifc_guid)?.speckle_id)
                     .filter(Boolean)
                 if (ids.length) {
                     viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
@@ -1229,7 +1229,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             if (!topic.viewpoint) return
 
             const ids = (topic.viewpoint.selection || [])
-                .map((guid) => elementByAppIdRef.current.get(guid)?.speckle_id)
+                .map((s) => s.speckle_id ?? elementByAppIdRef.current.get(s.ifc_guid)?.speckle_id)
                 .filter(Boolean)
             if (ids.length) {
                 viewerRef.current.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
