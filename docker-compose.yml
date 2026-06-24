@@ -22,9 +22,19 @@ services:
       - speckle-net
 
   # ── BIM Normalizer ───────────────────────────────────────────────────────────
+  # speckle-mcp and bcf-server below share this same image: bim-normalizer:latest
+  # tag (same codebase, different entrypoint command) — all three also need
+  # pull_policy: build, otherwise Compose's default policy tries to PULL that
+  # tag from Docker Hub first (since an explicit image: name makes Compose
+  # treat it as pullable) and only built it after racing/failing on the
+  # pull — confirmed: "pull access denied for bim-normalizer" spam on a clean
+  # `up` after `down --rmi all`, even with build: present on every service.
+  # pull_policy: build skips the pull attempt entirely.
   bim-normalizer:
     build:
       context: ./bim-normalizer
+    image: bim-normalizer:latest
+    pull_policy: build
     container_name: bim-normalizer
     ports:
       - "8002:8002"
@@ -60,6 +70,8 @@ services:
   speckle-mcp:
     build:
       context: ./bim-normalizer
+    image: bim-normalizer:latest
+    pull_policy: build
     container_name: speckle-mcp
     command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
@@ -85,6 +97,8 @@ services:
   bcf-server:
     build:
       context: ./bim-normalizer
+    image: bim-normalizer:latest
+    pull_policy: build
     container_name: bcf-server
     command: ["python", "bcf_server.py"]
     ports:
@@ -100,6 +114,15 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-debug}
     depends_on:
       postgres:
+        condition: service_healthy
+      # bcf-server has no Speckle-sync logic of its own — bim-normalizer's
+      # background catch-up scan (main.py's _auto_sync_loop) is what keeps
+      # the shared bim_models/bcf_topics tables current. Waiting for it to
+      # be healthy at least sequences startup so bcf-server doesn't begin
+      # serving before bim-normalizer is up and its scan loop has started
+      # (the scan itself still runs async in the background, so this narrows
+      # the stale-data window on a full restart rather than eliminating it).
+      bim-normalizer:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
