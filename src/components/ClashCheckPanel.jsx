@@ -154,7 +154,11 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                     creation_author: authorName,
                     topic_type: 'Clash',
                     topic_status: 'Open',
-                    priority: 'Normal',
+                    // 'clearance' is a minimum-distance proximity warning, not an
+                    // actual overlap — real geometric clashes ('collision'/
+                    // 'intersection') get flagged Critical instead of a uniform
+                    // 'Normal' that gave every auto-created topic the same weight.
+                    priority: rule.mode === 'clearance' ? 'High' : 'Critical',
                 })
                 let enriched = topic
                 try {

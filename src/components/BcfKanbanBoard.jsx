@@ -6,7 +6,10 @@ import {
     updateTopic, deleteTopic, listComments, createComment,
     listViewpoints, getSnapshotUrl,
 } from '../utils/bcfClient'
-import { COLUMNS, topicToColumn, columnToUpdates } from '../utils/bcfWorkflow'
+import {
+    COLUMNS, topicToColumn, columnToUpdates,
+    PRIORITIES, PRIORITY_COLOR, PRIORITY_BORDER, priorityRank, isOverdue,
+} from '../utils/bcfWorkflow'
 import { BcfLogoIcon } from './BcfLogoIcon'
 
 const COLUMN_COLOR = {
@@ -41,8 +44,9 @@ function Column({ id, title, count, children }) {
 }
 
 function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing }) {
+    const overdue = isOverdue(topic)
     return (
-        <div className={`glass-card p-0 overflow-hidden group ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'}`}>
+        <div className={`glass-card p-0 overflow-hidden group border-l-2 ${PRIORITY_BORDER[topic.priority] || 'border-l-transparent'} ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'}`}>
             <div
                 className="aspect-video bg-[var(--speckle-outline-3)] flex items-center justify-center overflow-hidden"
                 onClick={() => onOpen?.(topic)}
@@ -64,8 +68,13 @@ function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing }) {
                     </button>
                 </div>
                 <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                    {topic.priority && <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]">{topic.priority}</span>}
+                    {topic.priority && <span className={`text-[9px] px-1 py-0.5 rounded ${PRIORITY_COLOR[topic.priority] || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]'}`}>{topic.priority}</span>}
                     {topic.topic_type && <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]">{topic.topic_type}</span>}
+                    {topic.due_date && (
+                        <span className={`text-[9px] px-1 py-0.5 rounded ${overdue ? 'bg-red-500/20 text-red-400' : 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]'}`}>
+                            {overdue ? 'Overdue · ' : ''}{new Date(topic.due_date).toLocaleDateString()}
+                        </span>
+                    )}
                 </div>
                 <p className="text-[10px] text-[var(--speckle-foreground-3)] mt-1 truncate">{topic.creation_author}</p>
             </div>
@@ -135,6 +144,14 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
         const map = {}
         COLUMNS.forEach(c => { map[c] = [] })
         topics.forEach(t => { map[topicToColumn(t)].push(t) })
+        // Critical-first within each column; ties broken by soonest due date
+        // (unset due dates sort last), then newest first.
+        const dueTime = (t) => (t.due_date ? new Date(t.due_date).getTime() : Infinity)
+        Object.values(map).forEach((items) => items.sort((a, b) =>
+            priorityRank(b) - priorityRank(a)
+            || dueTime(a) - dueTime(b)
+            || new Date(b.creation_date) - new Date(a.creation_date)
+        ))
         return map
     }, [topics])
 
@@ -158,6 +175,20 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
         updateTopic(projectId, topicGuid, updates).catch(() => {
             onTopicsChange(topics.map(t => (t.guid === topicGuid ? { ...t, ...prevFields } : t)))
         })
+    }, [topics, projectId, onTopicsChange])
+
+    // Same optimistic-update-with-rollback shape as handleDragEnd above, but
+    // for arbitrary field edits (priority/due_date) made from the detail
+    // panel rather than a column drop. Also patches selectedTopic so the open
+    // panel reflects the change immediately instead of waiting for a re-open.
+    const updateTopicField = useCallback((topic, updates) => {
+        const prevFields = Object.fromEntries(Object.keys(updates).map((k) => [k, topic[k]]))
+        const apply = (fields) => {
+            onTopicsChange(topics.map(t => (t.guid === topic.guid ? { ...t, ...fields } : t)))
+            setSelectedTopic(prev => (prev && prev.guid === topic.guid ? { ...prev, ...fields } : prev))
+        }
+        apply(updates)
+        updateTopic(projectId, topic.guid, updates).catch(() => apply(prevFields))
     }, [topics, projectId, onTopicsChange])
 
     const openTopic = async (topic) => {
@@ -253,7 +284,28 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                         <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">{topicToColumn(selectedTopic)}</span>
                             {selectedTopic.topic_type && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]">{selectedTopic.topic_type}</span>}
-                            {selectedTopic.priority && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]">{selectedTopic.priority}</span>}
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0">Priority</label>
+                            <select
+                                value={selectedTopic.priority || ''}
+                                onChange={(e) => updateTopicField(selectedTopic, { priority: e.target.value || null })}
+                                className={`text-[10px] px-1.5 py-0.5 rounded border-none outline-none ${PRIORITY_COLOR[selectedTopic.priority] || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]'}`}
+                            >
+                                <option value="">Unset</option>
+                                {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0">Due date</label>
+                            <input
+                                type="date"
+                                value={selectedTopic.due_date ? selectedTopic.due_date.slice(0, 10) : ''}
+                                onChange={(e) => updateTopicField(selectedTopic, {
+                                    due_date: e.target.value ? new Date(e.target.value).toISOString() : null,
+                                })}
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] outline-none"
+                            />
                         </div>
                         {selectedTopic.description && <p className="text-xs text-[var(--speckle-foreground-3)] whitespace-pre-wrap">{selectedTopic.description}</p>}
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">{selectedTopic.creation_author} · {new Date(selectedTopic.creation_date).toLocaleString()}</p>

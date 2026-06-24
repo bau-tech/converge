@@ -1,14 +1,7 @@
 import { useMemo } from 'react'
 import EChart from './EChart'
 import { baseOption, legendStyle } from '../lib/echartsTheme'
-import { COLUMNS, COLUMN_HEX, topicToColumn } from '../utils/bcfWorkflow'
-
-const PRIORITY_COLOR = {
-    Critical: 'bg-red-500/20 text-red-400',
-    High: 'bg-orange-500/20 text-orange-400',
-    Normal: 'bg-blue-500/20 text-blue-400',
-    Low: 'bg-zinc-500/20 text-zinc-400',
-}
+import { COLUMNS, COLUMN_HEX, topicToColumn, PRIORITY_COLOR, isOverdue } from '../utils/bcfWorkflow'
 
 function Tile({ label, value, warn }) {
     return (
@@ -49,13 +42,12 @@ export function BcfStatsWidget({ topics = [], darkMode = true, displayOptions = 
         COLUMNS.forEach(c => { byColumn[c] = 0 })
         const byPriority = {}
         let overdue = 0
-        const now = Date.now()
         topics.forEach(t => {
             const col = topicToColumn(t)
             byColumn[col] += 1
             const p = t.priority || 'Unset'
             byPriority[p] = (byPriority[p] || 0) + 1
-            if (t.due_date && col !== 'Done' && new Date(t.due_date).getTime() < now) overdue += 1
+            if (isOverdue(t)) overdue += 1
         })
         return {
             total: topics.length,

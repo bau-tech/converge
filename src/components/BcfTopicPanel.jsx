@@ -3,15 +3,15 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Flag, X, Plus, Camera, Send, Trash2, Download, Upload, ChevronLeft } from 'lucide-react'
 import { BcfLogoIcon } from './BcfLogoIcon'
 import {
-    createTopic, deleteTopic,
+    createTopic, updateTopic, deleteTopic,
     listComments, createComment,
     listTopics, listViewpoints, createViewpoint, getSnapshotUrl,
     exportBcfzip, importBcfzip,
 } from '../utils/bcfClient'
 import { archiveLinkedSpeckleComment } from '../utils/bcfSync'
+import { PRIORITIES, PRIORITY_COLOR } from '../utils/bcfWorkflow'
 
 const TOPIC_TYPES = ['Issue', 'Clash', 'Request', 'Remark']
-const PRIORITIES = ['Low', 'Normal', 'High', 'Critical']
 
 const STATUS_COLOR = {
     Open: 'bg-amber-500/20 text-amber-400',
@@ -187,6 +187,19 @@ export function BcfTopicPanel({
         }
     }
 
+    // Optimistic update with rollback on failure — same shape as
+    // BcfKanbanBoard's drag-and-drop status updates, applied here to the
+    // priority/due_date fields edited from this panel's detail view.
+    const updateTopicField = (topic, updates) => {
+        const prevFields = Object.fromEntries(Object.keys(updates).map((k) => [k, topic[k]]))
+        const apply = (fields) => {
+            onTopicsChange?.(topics.map((t) => (t.guid === topic.guid ? { ...t, ...fields } : t)))
+            setSelectedTopic((prev) => (prev && prev.guid === topic.guid ? { ...prev, ...fields } : prev))
+        }
+        apply(updates)
+        updateTopic(projectId, topic.guid, updates).catch(() => apply(prevFields))
+    }
+
     const handleImportFile = async (e) => {
         const file = e.target.files?.[0]
         e.target.value = ''
@@ -323,7 +336,28 @@ export function BcfTopicPanel({
                                             </span>
                                         )}
                                         {selectedTopic.topic_type && <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">{selectedTopic.topic_type}</span>}
-                                        {selectedTopic.priority && <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">{selectedTopic.priority}</span>}
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <label className="text-[10px] text-zinc-500 shrink-0">Priority</label>
+                                        <select
+                                            value={selectedTopic.priority || ''}
+                                            onChange={(e) => updateTopicField(selectedTopic, { priority: e.target.value || null })}
+                                            className={`text-[10px] px-1.5 py-0.5 rounded border-none outline-none ${PRIORITY_COLOR[selectedTopic.priority] || 'bg-white/10 text-zinc-300'}`}
+                                        >
+                                            <option value="">Unset</option>
+                                            {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <label className="text-[10px] text-zinc-500 shrink-0">Due date</label>
+                                        <input
+                                            type="date"
+                                            value={selectedTopic.due_date ? selectedTopic.due_date.slice(0, 10) : ''}
+                                            onChange={(e) => updateTopicField(selectedTopic, {
+                                                due_date: e.target.value ? new Date(e.target.value).toISOString() : null,
+                                            })}
+                                            className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300 outline-none"
+                                        />
                                     </div>
                                     {selectedTopic.description && <p className="text-xs text-zinc-400 whitespace-pre-wrap">{selectedTopic.description}</p>}
                                     <p className="text-[10px] text-zinc-500">{selectedTopic.creation_author} · {new Date(selectedTopic.creation_date).toLocaleString()}</p>
