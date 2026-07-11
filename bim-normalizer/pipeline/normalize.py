@@ -9,7 +9,10 @@ from db.insert import (
     upsert_element,
     upsert_geometry,
     extract_and_upsert_parameters,
+    get_element_ids_missing_embedding,
+    upsert_element_embedding,
 )
+from db.query import get_elements_with_params_for_embedding
 from ifc.classify import classify_element, compute_element_hash
 from ifc.geometry import extract_geometry
 from ifc.schema import length_to_m
@@ -17,6 +20,55 @@ from ifc.spatial import get_storey, get_application_id
 from speckle.fetch import fetch_commit, flatten_elements, detect_source, collect_instance_definitions, build_object_map
 
 logger = logging.getLogger(__name__)
+
+_EMBED_BATCH_SIZE = 256
+
+
+def _build_missing_embeddings(conn, model_id: str) -> tuple[int, int]:
+    """
+    Embed any elements in this model without a bim_element_embeddings row yet
+    (new elements from this ingest, or a model ingested before this feature
+    existed). Best-effort and batched — a batch failure (e.g. the embedding
+    model failing to load) is logged and skipped rather than raised, since
+    semantic search is a nice-to-have on top of ingest, not a required stage.
+    Returns (embedded_count, skip_count).
+    """
+    from search.embeddings import build_embed_text, embed_many
+
+    embedded = 0
+    skipped = 0
+    try:
+        missing_ids = get_element_ids_missing_embedding(conn, model_id)
+    except Exception as exc:
+        logger.warning("Could not determine elements missing embeddings for model %s: %s", model_id, exc)
+        return 0, 0
+    if not missing_ids:
+        return 0, 0
+
+    for i in range(0, len(missing_ids), _EMBED_BATCH_SIZE):
+        batch_ids = missing_ids[i:i + _EMBED_BATCH_SIZE]
+        try:
+            data = get_elements_with_params_for_embedding(conn, batch_ids)
+            ids_in_order, texts = [], []
+            for eid in batch_ids:
+                el = data.get(eid)
+                if el is None:
+                    skipped += 1
+                    continue
+                ids_in_order.append(eid)
+                texts.append(build_embed_text(el, el["params"]))
+
+            for eid, text, vector in zip(ids_in_order, texts, embed_many(texts)):
+                upsert_element_embedding(conn, eid, text, vector)
+            conn.commit()
+            embedded += len(ids_in_order)
+        except Exception as exc:
+            conn.rollback()
+            logger.warning("Embedding batch failed for model %s (%d elements): %s",
+                            model_id, len(batch_ids), exc)
+            skipped += len(batch_ids)
+
+    return embedded, skipped
 
 
 def ingest_commit(
@@ -30,7 +82,11 @@ def ingest_commit(
     Full pipeline: receive Speckle commit → normalise → persist.
 
     Returns:
-        {model_id, element_count, skipped_count, duration_s}
+        {model_id, element_count, skipped_count, skip_geo_count, skip_param_count, duration_s}
+
+    skipped_count    — elements that never got a bim_elements row (classification/upsert_element failed)
+    skip_geo_count   — element row exists, but geometry extraction/upsert failed
+    skip_param_count — element row exists, but parameter extraction failed
     """
     t0 = time.monotonic()
     token = token or SPECKLE_TOKEN
@@ -85,7 +141,9 @@ def ingest_commit(
         )
 
         element_count = 0
-        skipped_count = 0
+        skipped_count = 0      # classification/upsert_element failed — no DB row at all
+        skip_geo_count = 0     # element row exists, but geometry extraction/upsert failed
+        skip_param_count = 0   # element row exists, but parameter extraction failed
         geo_count = 0
         no_geo_by_type: dict[str, int] = {}
         _prop_debug_quota = 10  # log at most this many "no prop values found" lines
@@ -98,6 +156,8 @@ def ingest_commit(
 
             speckle_type = getattr(obj, "speckle_type", "") or ""
 
+            # ── Stage 1: classify + upsert_element — without an element_id, ─
+            # nothing else for this element can proceed.
             try:
                 classification = classify_element(speckle_type, obj, category_hint, source=source)
                 ifc_class    = classification["ifc_class"]
@@ -119,7 +179,17 @@ def ingest_commit(
                     storey=storey,
                     elem_hash=elem_hash,
                 )
+            except Exception as exc:
+                logger.warning("Element %s: classification/upsert_element failed (%s): %s",
+                                speckle_id, type(exc).__name__, exc)
+                skipped_count += 1
+                continue
 
+            element_count += 1
+
+            # ── Stage 2: geometry — independent of stage 3, a failure here ──
+            # must not discard parameters that would otherwise extract fine.
+            try:
                 geo = extract_geometry(obj, instance_defs=instance_defs)
 
                 # IFC files: mesh geometry is often absent or non-watertight, so
@@ -161,30 +231,43 @@ def ingest_commit(
                     # Track which types are missing geometry
                     short = speckle_type.split(".")[-1] or speckle_type
                     no_geo_by_type[short] = no_geo_by_type.get(short, 0) + 1
-
-                extract_and_upsert_parameters(conn, element_id, obj)
-
-                element_count += 1
-
             except Exception as exc:
-                logger.warning("Skipping element %s: %s", speckle_id, exc)
-                skipped_count += 1
-                continue
+                logger.warning("Element %s: geometry extraction failed (%s): %s",
+                                speckle_id, type(exc).__name__, exc)
+                skip_geo_count += 1
+
+            # ── Stage 3: parameters — independent of stage 2's outcome. ─────
+            try:
+                extract_and_upsert_parameters(conn, element_id, obj)
+            except Exception as exc:
+                logger.warning("Element %s: parameter extraction failed (%s): %s",
+                                speckle_id, type(exc).__name__, exc)
+                skip_param_count += 1
 
         conn.commit()
+
+        embedded_count, skip_embed_count = _build_missing_embeddings(conn, model_id)
+
         duration = round(time.monotonic() - t0, 2)
         logger.info(
-            "Ingested %d elements (%d with geometry, %d skipped) in %.1fs — model_id=%s",
-            element_count, geo_count, skipped_count, duration, model_id,
+            "Ingested %d elements (%d with geometry, %d classify-skipped, "
+            "%d geo-failed, %d param-failed, %d embedded, %d embed-failed) "
+            "in %.1fs — model_id=%s",
+            element_count, geo_count, skipped_count, skip_geo_count, skip_param_count,
+            embedded_count, skip_embed_count, duration, model_id,
         )
         if no_geo_by_type:
             for t, cnt in sorted(no_geo_by_type.items(), key=lambda x: -x[1]):
                 logger.info("  no geometry: %s × %d", t, cnt)
         return {
-            "model_id":      model_id,
-            "element_count": element_count,
-            "skipped_count": skipped_count,
-            "duration_s":    duration,
+            "model_id":         model_id,
+            "element_count":    element_count,
+            "skipped_count":    skipped_count,
+            "skip_geo_count":   skip_geo_count,
+            "skip_param_count": skip_param_count,
+            "embedded_count":   embedded_count,
+            "skip_embed_count": skip_embed_count,
+            "duration_s":       duration,
         }
 
     except Exception:

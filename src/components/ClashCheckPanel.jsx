@@ -48,11 +48,31 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
     const [checking, setChecking] = useState(false)
     const [result, setResult] = useState(null)   // { rules: [...], total_count }
     const [ifcSource, setIfcSource] = useState(null)
+    const [compareInfo, setCompareInfo] = useState(null)   // { model_b_id, ifc_source_a, ifc_source_b } | null
     const [error, setError] = useState(null)
     const [selected, setSelected] = useState(new Set())   // keys: "<ruleIndex>:<clashIndex>"
     const [pushing, setPushing] = useState(false)
     const [pushedMsg, setPushedMsg] = useState(null)
     const pollRef = useRef(null)
+
+    // Other already-ingested models this model can be cross-checked against
+    // (clash-check operates on bim_models rows, so the candidate model must
+    // already be ingested — same precondition as the active model itself).
+    const [availableModels, setAvailableModels] = useState([])
+    const [compareModel, setCompareModel] = useState(null)   // a row from availableModels, or null for single-model mode
+
+    useEffect(() => {
+        if (!base) return
+        let cancelled = false
+        fetch(`${base}/models`)
+            .then(res => res.ok ? res.json() : [])
+            .then(models => { if (!cancelled) setAvailableModels(Array.isArray(models) ? models : []) })
+            .catch(() => { if (!cancelled) setAvailableModels([]) })
+        return () => { cancelled = true }
+    }, [base])
+
+    const otherModels = availableModels.filter(m => m.model_id !== projectId)
+    const compareLabel = (m) => `${m.branch_name || m.stream_id} · ${m.source || 'unknown'} · ${m.ingested_at ? new Date(m.ingested_at).toLocaleDateString() : ''}`
 
     // Seed any still-blank rule's selectors with real IFC classes once they load
     // (a fresh rule starts blank since there's no model-agnostic sensible default).
@@ -82,6 +102,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
         setError(null)
         setResult(null)
         setIfcSource(null)
+        setCompareInfo(null)
         setSelected(new Set())
         setPushedMsg(null)
         try {
@@ -100,6 +121,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                     })),
                     server_url: serverUrl || undefined,
                     token: serverToken || undefined,
+                    compare_model_id: compareModel?.model_id || undefined,
                 }),
             })
             if (!startRes.ok) throw new Error(`Could not start check (${startRes.status})`)
@@ -111,6 +133,9 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                 if (status.status === 'complete') {
                     setResult(status.result)
                     setIfcSource(status.ifc_source || null)
+                    setCompareInfo(status.compare
+                        ? { ...status.compare, label: compareModel ? compareLabel(compareModel) : status.compare.model_b_id }
+                        : null)
                     setChecking(false)
                 } else if (status.status === 'failed') {
                     setError(status.error || 'Clash check failed')
@@ -150,7 +175,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
             try {
                 const topic = await createTopic(projectId, {
                     title: `Clash${rule.name ? ` (${rule.name})` : ''}: ${clash.a_ifc_class}${clash.a_name ? ` "${clash.a_name}"` : ''} × ${clash.b_ifc_class}${clash.b_name ? ` "${clash.b_name}"` : ''}`,
-                    description: `${rule.mode} clash (distance ${clash.distance.toFixed(3)})\n\nA GlobalId: ${clash.a_global_id}\nB GlobalId: ${clash.b_global_id}`,
+                    description: `${rule.mode} clash (distance ${clash.distance.toFixed(3)})${compareInfo ? `\nModel A vs Model B (${compareInfo.label})` : ''}\n\nA GlobalId: ${clash.a_global_id}\nB GlobalId: ${clash.b_global_id}`,
                     creation_author: authorName,
                     topic_type: 'Clash',
                     topic_status: 'Open',
@@ -217,6 +242,23 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
 
             <div className="flex-1 overflow-y-auto p-5">
                 <div className="space-y-4">
+                    <div className="rounded-xl border border-[var(--speckle-outline-3)] p-3 space-y-1.5">
+                        <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Compare against (optional)</label>
+                        <select
+                            value={compareModel?.model_id || ''}
+                            onChange={e => setCompareModel(otherModels.find(m => m.model_id === e.target.value) || null)}
+                            className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-full"
+                        >
+                            <option value="">This model only (default)</option>
+                            {otherModels.map(m => <option key={m.model_id} value={m.model_id}>{compareLabel(m)}</option>)}
+                        </select>
+                        <p className="text-[10px] text-[var(--speckle-foreground-3)]">
+                            {compareModel
+                                ? 'Cross-model check: Group A is matched in this model, Group B in the model selected above.'
+                                : 'Pick another already-ingested model to clash this one against it, instead of against itself.'}
+                        </p>
+                    </div>
+
                     <div className="rounded-xl border border-[var(--speckle-outline-3)] p-3 space-y-3">
                         {rules.map((rule, idx) => (
                             <div key={rule.id} className="flex items-center gap-2 flex-wrap pb-3 border-b border-[var(--speckle-outline-3)] last:border-b-0 last:pb-0">
@@ -230,7 +272,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                     />
                                 </div>
                                 <div className="flex flex-col gap-1">
-                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Group A</label>
+                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">{compareModel ? 'Model A' : 'Group A'}</label>
                                     <select
                                         value={rule.selectorA}
                                         onChange={e => updateRule(rule.id, { selectorA: e.target.value })}
@@ -242,14 +284,14 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                     </select>
                                 </div>
                                 <div className="flex flex-col gap-1">
-                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Group B (optional)</label>
+                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">{compareModel ? 'Model B' : 'Group B (optional)'}</label>
                                     <select
                                         value={rule.selectorB}
                                         onChange={e => updateRule(rule.id, { selectorB: e.target.value })}
                                         disabled={ifcClasses.length === 0}
                                         className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-52 disabled:opacity-50"
                                     >
-                                        <option value="">— None (clash A against itself) —</option>
+                                        <option value="">{compareModel ? '— Same class as Model A —' : '— None (clash A against itself) —'}</option>
                                         {ifcClasses.map(c => <option key={c} value={c}>{c}</option>)}
                                     </select>
                                 </div>
@@ -311,7 +353,8 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                             </button>
                         </div>
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">
-                            Groups list every IFC class actually present in this model. Collision finds overlapping solids — the standard hard-clash check. All rules run together against the same exported model.
+                            Groups list every IFC class actually present in this model{compareModel ? ' (Model A only — Model B isn\'t checked against this list, so a class missing there just reports zero clashes)' : ''}. Collision finds overlapping solids — the standard hard-clash check. All rules run together against the same exported model{compareModel ? 's' : ''}.
+                            {compareModel && ' For cross-model checks, only the side belonging to the model currently open in the viewer can be highlighted/snapshotted.'}
                         </p>
                     </div>
 
@@ -331,8 +374,14 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                 <AlertTriangle className={`w-4 h-4 shrink-0 ${result.total_count > 0 ? 'text-amber-400' : 'text-emerald-400'}`} />
                                 <div className="text-sm text-[var(--speckle-foreground)] font-medium">
                                     {result.total_count} clash{result.total_count === 1 ? '' : 'es'} across {result.rules.length} rule{result.rules.length === 1 ? '' : 's'}
+                                    {compareInfo && <span className="text-[var(--speckle-foreground-3)] font-normal"> · vs {compareInfo.label}</span>}
                                 </div>
                             </div>
+                            {compareInfo && (
+                                <p className="text-[11px] text-[var(--speckle-foreground-3)] -mt-1">
+                                    Model A source: {compareInfo.ifc_source_a === 'original_ifc' ? 'original IFC' : 'reconstructed IFC'} · Model B source: {compareInfo.ifc_source_b === 'original_ifc' ? 'original IFC' : 'reconstructed IFC'}
+                                </p>
+                            )}
                             {ifcSource && (
                                 <p className="text-[11px] text-[var(--speckle-foreground-3)] -mt-1">
                                     {ifcSource === 'original_ifc'
@@ -348,7 +397,9 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                             {rule.name || `Rule ${ruleIdx + 1}`}
                                         </span>
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">
-                                            {rule.selector_a}{rule.selector_b ? ` vs ${rule.selector_b}` : ' (self)'} · {rule.mode}
+                                            {compareInfo
+                                                ? `A: ${rule.selector_a} vs B: ${rule.selector_b}`
+                                                : `${rule.selector_a}${rule.selector_b ? ` vs ${rule.selector_b}` : ' (self)'}`} · {rule.mode}
                                         </span>
                                         <span className={`text-[10px] ml-auto ${rule.count > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
                                             {rule.count} clash{rule.count === 1 ? '' : 'es'}
@@ -372,8 +423,10 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                                 />
                                                 <div className="min-w-0 flex-1">
                                                     <p className="text-[var(--speckle-foreground)]">
+                                                        {compareInfo && <span className="text-[var(--speckle-foreground-3)]">A: </span>}
                                                         {c.a_ifc_class}{c.a_name ? ` "${c.a_name}"` : ''}
                                                         {' × '}
+                                                        {compareInfo && <span className="text-[var(--speckle-foreground-3)]">B: </span>}
                                                         {c.b_ifc_class}{c.b_name ? ` "${c.b_name}"` : ''}
                                                     </p>
                                                     <p className="text-[var(--speckle-foreground-3)]">distance {c.distance.toFixed(3)}m</p>

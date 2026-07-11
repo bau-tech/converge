@@ -158,12 +158,31 @@ ON CONFLICT DO NOTHING;
 """
 
 
+# Topics created before "index" started being populated on create (see
+# bcf/topics.py's create_topic) have it NULL. BCF 3.0's server_assigned_id
+# is derived from "index" and is a required string field, so a NULL would
+# serialize as the literal string "None" — backfill once per project,
+# oldest-first, so every row has a value. Safe to re-run: only touches rows
+# still NULL.
+BACKFILL_INDEX_SQL = """
+WITH numbered AS (
+    SELECT guid, ROW_NUMBER() OVER (PARTITION BY model_id ORDER BY creation_date) AS rn
+    FROM bcf_topics
+    WHERE "index" IS NULL
+)
+UPDATE bcf_topics t SET "index" = numbered.rn
+FROM numbered
+WHERE t.guid = numbered.guid;
+"""
+
+
 def init_bcf_schema() -> None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
             cur.execute(BACKFILL_SYNC_SQL)
+            cur.execute(BACKFILL_INDEX_SQL)
         conn.commit()
     except Exception:
         conn.rollback()

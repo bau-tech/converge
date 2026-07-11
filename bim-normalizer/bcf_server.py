@@ -21,6 +21,7 @@ Configuration (env, same vars as bim-normalizer):
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -30,6 +31,7 @@ from db.connection import init_pool, close_pool
 from bcf.db_schema import init_bcf_schema
 from bcf.db import execute
 from bcf.password import hash_password
+from bcf import request_log
 from bcf.versions import router as versions_router, BCF_VERSION, BCF_LEGACY_VERSION
 from bcf.auth_discovery import router as auth_discovery_router
 from bcf.foundation import router as foundation_router
@@ -90,6 +92,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _log_requests(request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    # /health is polled every few seconds by Docker and would otherwise
+    # drown out the handful of real BCF client requests this log exists to
+    # show (see the admin panel's "Recent requests" view).
+    if request.url.path != "/health":
+        request_log.record(
+            request.method,
+            request.url.path,
+            response.status_code,
+            request.client.host if request.client else None,
+            (time.perf_counter() - start) * 1000,
+        )
+    return response
+
 
 app.include_router(versions_router)
 app.include_router(auth_discovery_router)

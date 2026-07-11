@@ -35,9 +35,9 @@ def get_storey(obj: Base) -> str | None:
     if isinstance(props, dict):
         for key in ("PHASE", "Phase", "MAIN_PART.PHASE", "BUILDING_STOREY", "Level", "level", "Floor"):
             val = props.get(key)
-            if val and isinstance(val, (str, int, float)):
+            if val is not None and isinstance(val, (str, int, float)):
                 s = str(val).strip()
-                if s and s not in ("0", ""):
+                if s != "":
                     return s
 
     # Tekla: PHASE in udas
@@ -45,9 +45,9 @@ def get_storey(obj: Base) -> str | None:
     if isinstance(udas, dict):
         for key in ("PHASE", "Phase", "BUILDING_STOREY"):
             val = udas.get(key)
-            if val and isinstance(val, (str, int, float)):
+            if val is not None and isinstance(val, (str, int, float)):
                 s = str(val).strip()
-                if s and s not in ("0", ""):
+                if s != "":
                     return s
 
     # Revit parameters dict

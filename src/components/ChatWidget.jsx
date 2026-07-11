@@ -276,28 +276,28 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                        className="pointer-events-auto w-[350px] h-[500px] glass-card flex flex-col overflow-hidden mb-4 shadow-2xl"
+                        className="pointer-events-auto w-[350px] h-[500px] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
                     >
                         {/* Header */}
                         <div
-                            className="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-white/5 cursor-move"
+                            className="px-3 py-2 border-b border-white/10 flex items-center justify-between bg-white/5 cursor-move"
                             onPointerDown={(e) => dragControls.start(e)}
                         >
-                            <div className="flex items-center gap-2">
-                                <div className="p-1.5 rounded-lg bg-cyan-500/20 text-cyan-400">
-                                    <Sparkles className="w-4 h-4" />
+                            <div className="flex items-center gap-1.5">
+                                <div className="p-1 rounded-md bg-cyan-500/20 text-cyan-400">
+                                    <Sparkles className="w-3.5 h-3.5" />
                                 </div>
                                 <div>
-                                    <h3 className="font-semibold text-sm">AI Assistant</h3>
-                                    <p className="text-[10px] text-zinc-400">
+                                    <h3 className="font-medium text-xs">AI Assistant</h3>
+                                    <p className="text-[9px] text-zinc-400">
                                         {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
                                     </p>
                                 </div>
                             </div>
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-0.5">
                                 <button
                                     onClick={(e) => { e.stopPropagation(); exportMarkdown(messages) }}
-                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400"
+                                    className="p-1 hover:bg-white/10 rounded-md transition-colors text-zinc-400"
                                     title="Export chat as Markdown"
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
@@ -305,7 +305,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 </button>
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleReset() }}
-                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400"
+                                    className="p-1 hover:bg-white/10 rounded-md transition-colors text-zinc-400"
                                     title="Clear chat"
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
@@ -316,7 +316,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                         e.stopPropagation()
                                         setShowSettings(!showSettings)
                                     }}
-                                    className={`p-1.5 rounded-lg transition-colors ${showSettings ? 'bg-cyan-500/20 text-cyan-400' : 'hover:bg-white/10 text-zinc-400'}`}
+                                    className={`p-1 rounded-md transition-colors ${showSettings ? 'bg-cyan-500/20 text-cyan-400' : 'hover:bg-white/10 text-zinc-400'}`}
                                     title="AI Settings"
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
@@ -324,10 +324,10 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 </button>
                                 <button
                                     onClick={() => setIsOpen(false)}
-                                    className="p-1 hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
+                                    className="p-1 hover:bg-white/10 rounded-md transition-colors cursor-pointer"
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <X className="w-4 h-4 text-zinc-400" />
+                                    <X className="w-3.5 h-3.5 text-zinc-400" />
                                 </button>
                             </div>
                         </div>
@@ -341,45 +341,45 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                     exit={{ height: 0, opacity: 0 }}
                                     className="border-b border-white/10 bg-black/20 overflow-hidden"
                                 >
-                                    <div className="p-3 space-y-3">
-                                        <div className="space-y-2">
-                                            <label className="text-xs font-medium text-zinc-400">AI Provider</label>
-                                            <div className="grid grid-cols-2 gap-2">
+                                    <div className="p-2 space-y-2">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">AI Provider</label>
+                                            <div className="grid grid-cols-2 gap-1.5">
                                                 <button
                                                     onClick={() => setProvider('openai')}
-                                                    className={`flex items-center justify-center gap-1.5 py-1.5 rounded text-xs transition-colors ${provider === 'openai' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'openai' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
-                                                    <Cpu className="w-3 h-3" />
+                                                    <Cpu className="w-2.5 h-2.5" />
                                                     OpenAI
                                                 </button>
                                                 <button
                                                     onClick={() => setProvider('mistral')}
-                                                    className={`flex items-center justify-center gap-1.5 py-1.5 rounded text-xs transition-colors ${provider === 'mistral' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'mistral' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
-                                                    <Cpu className="w-3 h-3" />
+                                                    <Cpu className="w-2.5 h-2.5" />
                                                     Mistral
                                                 </button>
                                                 <button
                                                     onClick={() => setProvider('ollama')}
-                                                    className={`flex items-center justify-center gap-1.5 py-1.5 rounded text-xs transition-colors ${provider === 'ollama' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'ollama' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
-                                                    <Database className="w-3 h-3" />
+                                                    <Database className="w-2.5 h-2.5" />
                                                     Ollama
                                                 </button>
                                                 <button
                                                     onClick={() => setProvider('lmstudio')}
-                                                    className={`flex items-center justify-center gap-1.5 py-1.5 rounded text-xs transition-colors ${provider === 'lmstudio' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'lmstudio' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
-                                                    <Cpu className="w-3 h-3" />
+                                                    <Cpu className="w-2.5 h-2.5" />
                                                     LM Studio
                                                 </button>
                                             </div>
                                         </div>
 
                                         {provider === 'ollama' && (
-                                            <div className="space-y-2 pt-1">
+                                            <div className="space-y-1.5 pt-1">
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">Ollama URL</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Ollama URL</label>
                                                     <input
                                                         type="text"
                                                         value={ollamaConfig.baseUrl}
@@ -389,7 +389,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">Model</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
                                                     <input
                                                         type="text"
                                                         value={ollamaConfig.model}
@@ -402,9 +402,9 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                         )}
 
                                         {provider === 'lmstudio' && (
-                                            <div className="space-y-2 pt-1">
+                                            <div className="space-y-1.5 pt-1">
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">LM Studio URL</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">LM Studio URL</label>
                                                     <input
                                                         type="text"
                                                         value={lmStudioConfig.baseUrl}
@@ -414,7 +414,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">Model</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
                                                     <input
                                                         type="text"
                                                         value={lmStudioConfig.model}
@@ -427,9 +427,9 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                         )}
 
                                         {provider === 'mistral' && (
-                                            <div className="space-y-2 pt-1">
+                                            <div className="space-y-1.5 pt-1">
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">Mistral API Key</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Mistral API Key</label>
                                                     <input
                                                         type="password"
                                                         value={mistralConfig.apiKey}
@@ -439,7 +439,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
-                                                    <label className="text-xs font-medium text-zinc-400">Model</label>
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
                                                     <input
                                                         type="text"
                                                         value={mistralConfig.model}
@@ -453,9 +453,9 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
 
                                         <button
                                             onClick={handleSaveSettings}
-                                            className="w-full flex items-center justify-center gap-2 py-1.5 bg-cyan-500 hover:bg-cyan-600 text-white rounded text-xs font-medium transition-colors"
+                                            className="w-full flex items-center justify-center gap-1.5 py-1 bg-cyan-500 hover:bg-cyan-600 text-white rounded text-[11px] font-medium transition-colors"
                                         >
-                                            <Save className="w-3 h-3" />
+                                            <Save className="w-2.5 h-2.5" />
                                             Save
                                         </button>
                                     </div>
@@ -554,19 +554,19 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                         </div>
 
                         {/* Input */}
-                        <form onSubmit={handleSubmit} className="p-3 border-t border-white/10 bg-white/5">
+                        <form onSubmit={handleSubmit} className="p-2 border-t border-white/10 bg-white/5">
                             <div className="relative">
                                 <input
                                     type="text"
                                     value={input}
                                     onChange={(e) => setInput(e.target.value)}
                                     placeholder="Ask about your model..."
-                                    className="w-full bg-zinc-900/50 border border-white/10 rounded-xl pl-4 pr-10 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all placeholder:text-zinc-500"
+                                    className="w-full bg-zinc-900/50 border border-white/10 rounded-lg pl-3 pr-9 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all placeholder:text-zinc-500"
                                 />
                                 <button
                                     type="submit"
                                     disabled={!input.trim() || isLoading}
-                                    className="absolute right-1.5 top-1.5 p-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg disabled:opacity-50 disabled:hover:bg-cyan-600 transition-colors cursor-pointer"
+                                    className="absolute right-1 top-1 p-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md disabled:opacity-50 disabled:hover:bg-cyan-600 transition-colors cursor-pointer"
                                 >
                                     <Send className="w-3.5 h-3.5" />
                                 </button>

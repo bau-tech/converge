@@ -182,10 +182,6 @@ export default function ViewerToolbar({
     hiddenCount = 0,
     onHideSelected,
     onShowAllHidden,
-    // Colour by property
-    activeColorField = null,
-    onColorByProperty,
-    onRemoveColorFilter,
     // Lighting
     lightConfig,
     onSetLighting,
@@ -208,14 +204,12 @@ export default function ViewerToolbar({
     const [showMeasurements,setShowMeasurements]= useState(false)
     const [showCamViews,    setShowCamViews]    = useState(false)
     const [showLighting,    setShowLighting]    = useState(false)
-    const [showColorBy,     setShowColorBy]     = useState(false)
 
     const modesRef     = useRef(null)
     const explodeRef   = useRef(null)
     const measRef      = useRef(null)
     const camViewsRef  = useRef(null)
     const lightingRef  = useRef(null)
-    const colorByRef   = useRef(null)
 
     const currentMode = VIEW_MODES.find(m => m.mode === viewMode) || VIEW_MODES[0]
 
@@ -229,7 +223,6 @@ export default function ViewerToolbar({
         if (measurementsActive) setShowMeasurements(true)
     }, [measurementsActive])
 
-    useOutsideClick(colorByRef,   showColorBy,      () => setShowColorBy(false))
     useOutsideClick(modesRef,     showModes,        () => setShowModes(false))
     useOutsideClick(explodeRef,   showExplode,      () => setShowExplode(false))
     useOutsideClick(measRef,      showMeasurements, () => setShowMeasurements(false))
@@ -242,19 +235,7 @@ export default function ViewerToolbar({
         setShowMeasurements(false)
         setShowCamViews(false)
         setShowLighting(false)
-        setShowColorBy(false)
     }
-
-    // Available fields for colour-by
-    const COLOR_BY_FIELDS = [
-        { label: 'Category',    value: 'category'     },
-        { label: 'Level',       value: 'level'        },
-        { label: 'Material',    value: 'material'     },
-        { label: 'IFC Type',    value: 'ifc_type'     },
-        { label: 'Grade',       value: 'grade_short'  },
-        { label: 'Profile',     value: 'profile_name' },
-        { label: 'Discipline',  value: 'discipline'   },
-    ]
 
     const handleSelectMode = (mode) => { onViewMode(mode); setShowModes(false) }
 
@@ -276,66 +257,99 @@ export default function ViewerToolbar({
         exit:       { opacity: 0, y: 8, scale: 0.96 },
         transition: { duration: 0.15 },
     }
+    // Side-anchored variant for the vertical rail's popovers (open to the
+    // right of the rail instead of above the bottom pill).
+    const popoverAnimSide = {
+        initial:    { opacity: 0, x: -8, scale: 0.96 },
+        animate:    { opacity: 1, x: 0, scale: 1 },
+        exit:       { opacity: 0, x: -8, scale: 0.96 },
+        transition: { duration: 0.15 },
+    }
     const popoverCls = "glass rounded-xl shadow-2xl"
 
     return (
+        <>
+        {/* ── Vertical rail — Display/Appearance (View mode, Edges, Lighting,
+            Colour by property): scene-appearance toggles set once and left,
+            as opposed to the bottom pill's repeated-interaction tools. Split
+            out so the bottom pill stays narrow on small/mobile widths. ──── */}
         <div
-            className={`absolute ${isTimelineActive ? 'top-4' : 'bottom-4'} right-1/2 translate-x-1/2 z-[200] flex flex-col items-center gap-2`}
+            className="absolute left-4 top-1/2 -translate-y-1/2 z-[200] flex items-center gap-2"
             style={{ pointerEvents: 'auto' }}
         >
+            <div className="glass rounded-full overflow-hidden shadow-lg p-1.5 flex flex-col gap-1 items-center">
+                {/* View Mode */}
+                <button
+                    className={`p-2 rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    onClick={() => { closeAll(); setShowModes(v => !v) }}
+                    disabled={!isViewerReady}
+                    title={`View mode: ${currentMode.label}`}
+                >
+                    {currentMode.icon}
+                </button>
 
-            {/* ── Camera Views popover ──────────────────────────────────────── */}
+                {/* Edges */}
+                <button
+                    className={`p-2 rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    onClick={onToggleEdges}
+                    disabled={!isViewerReady}
+                    title={edgesEnabled ? 'Hide edges' : 'Show edges'}
+                >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <line x1="3" y1="9" x2="21" y2="9" />
+                        <line x1="3" y1="15" x2="21" y2="15" />
+                        <line x1="9" y1="3" x2="9" y2="21" />
+                        <line x1="15" y1="3" x2="15" y2="21" />
+                    </svg>
+                </button>
+
+                {/* Lighting */}
+                <button
+                    className={`p-2 rounded-full transition-all ${
+                        showLighting
+                            ? 'bg-amber-500/80 text-white'
+                            : lc.enabled
+                                ? 'text-amber-300 hover:bg-[var(--speckle-outline-3)]'
+                                : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-amber-300'
+                    }`}
+                    onClick={() => { closeAll(); setShowLighting(v => !v) }}
+                    disabled={!isViewerReady}
+                    title="Sun lighting"
+                >
+                    <Sun className="w-5 h-5" />
+                </button>
+            </div>
+
+            {/* ── View mode popover ─────────────────────────────────────── */}
             <AnimatePresence>
-                {showCamViews && (
-                    <motion.div ref={camViewsRef} {...popoverAnim} className={`${popoverCls} p-3 w-64`}>
-                        <div className="flex items-center justify-between mb-2.5">
-                            <span className="text-xs font-semibold text-sky-400 flex items-center gap-1.5">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                                Camera Views
-                            </span>
-                            <button onClick={() => setShowCamViews(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors">
-                                <X className="w-3.5 h-3.5" />
-                            </button>
-                        </div>
-
-                        {/* Canonical preset grid */}
-                        <div className="grid grid-cols-3 gap-1 mb-2">
-                            {CANONICAL_VIEWS.map(({ id, label }) => (
+                {showModes && (
+                    <motion.div ref={modesRef} {...popoverAnimSide} className={`${popoverCls} p-2 absolute left-full ml-2`}>
+                        <div className="flex flex-col gap-1">
+                            {VIEW_MODES.map(({ mode, label, icon }) => (
                                 <button
-                                    key={id}
-                                    onClick={() => { onCameraView(id); setShowCamViews(false) }}
-                                    className="py-1.5 rounded-lg text-[11px] font-medium text-[var(--speckle-foreground-2)] hover:bg-sky-500/20 hover:text-sky-300 transition-all border border-[var(--speckle-outline-3)] hover:border-sky-500/30"
+                                    key={mode}
+                                    onClick={() => handleSelectMode(mode)}
+                                    title={label}
+                                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${
+                                        viewMode === mode
+                                            ? 'bg-blue-500 text-white'
+                                            : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
+                                    }`}
                                 >
+                                    {icon}
                                     {label}
                                 </button>
                             ))}
                         </div>
-
-                        {/* Named views from model */}
-                        {namedViews.length > 0 && (
-                            <>
-                                <p className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider mb-1.5">Model Views</p>
-                                <div className="max-h-36 overflow-y-auto space-y-0.5 custom-scrollbar">
-                                    {namedViews.map((view, idx) => (
-                                        <button
-                                            key={view.id || view.name || idx}
-                                            onClick={() => { onCameraView(view); setShowCamViews(false) }}
-                                            className="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-2)] hover:bg-sky-500/15 hover:text-sky-300 transition-all truncate"
-                                        >
-                                            {view.name || view.id || `View ${idx + 1}`}
-                                        </button>
-                                    ))}
-                                </div>
-                            </>
-                        )}
                     </motion.div>
                 )}
             </AnimatePresence>
 
-            {/* ── Lighting popover ──────────────────────────────────────────── */}
+            {/* ── Lighting popover ──────────────────────────────────────── */}
             <AnimatePresence>
                 {showLighting && (
-                    <motion.div ref={lightingRef} {...popoverAnim} className={`${popoverCls} p-3 w-60`}>
+                    <motion.div ref={lightingRef} {...popoverAnimSide} className={`${popoverCls} p-3 w-60 absolute left-full ml-2`}>
                         <div className="flex items-center justify-between mb-3">
                             <span className="text-xs font-semibold text-amber-400 flex items-center gap-1.5">
                                 <Sun className="w-3.5 h-3.5" />
@@ -408,27 +422,57 @@ export default function ViewerToolbar({
                 )}
             </AnimatePresence>
 
-            {/* ── View mode popover ─────────────────────────────────────────── */}
+        </div>
+
+        <div
+            className={`absolute ${isTimelineActive ? 'top-4' : 'bottom-4'} right-1/2 translate-x-1/2 z-[200] flex flex-col items-center gap-2`}
+            style={{ pointerEvents: 'auto' }}
+        >
+
+            {/* ── Camera Views popover ──────────────────────────────────────── */}
             <AnimatePresence>
-                {showModes && (
-                    <motion.div ref={modesRef} {...popoverAnim} className={`${popoverCls} p-2`}>
-                        <div className="flex gap-1">
-                            {VIEW_MODES.map(({ mode, label, icon }) => (
+                {showCamViews && (
+                    <motion.div ref={camViewsRef} {...popoverAnim} className={`${popoverCls} p-3 w-64`}>
+                        <div className="flex items-center justify-between mb-2.5">
+                            <span className="text-xs font-semibold text-sky-400 flex items-center gap-1.5">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                Camera Views
+                            </span>
+                            <button onClick={() => setShowCamViews(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors">
+                                <X className="w-3.5 h-3.5" />
+                            </button>
+                        </div>
+
+                        {/* Canonical preset grid */}
+                        <div className="grid grid-cols-3 gap-1 mb-2">
+                            {CANONICAL_VIEWS.map(({ id, label }) => (
                                 <button
-                                    key={mode}
-                                    onClick={() => handleSelectMode(mode)}
-                                    title={label}
-                                    className={`flex flex-col items-center gap-1 px-3 py-2 rounded-lg text-[10px] font-medium transition-all ${
-                                        viewMode === mode
-                                            ? 'bg-blue-500 text-white'
-                                            : 'text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
-                                    }`}
+                                    key={id}
+                                    onClick={() => { onCameraView(id); setShowCamViews(false) }}
+                                    className="py-1.5 rounded-lg text-[11px] font-medium text-[var(--speckle-foreground-2)] hover:bg-sky-500/20 hover:text-sky-300 transition-all border border-[var(--speckle-outline-3)] hover:border-sky-500/30"
                                 >
-                                    {icon}
                                     {label}
                                 </button>
                             ))}
                         </div>
+
+                        {/* Named views from model */}
+                        {namedViews.length > 0 && (
+                            <>
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] font-medium uppercase tracking-wider mb-1.5">Model Views</p>
+                                <div className="max-h-36 overflow-y-auto space-y-0.5 custom-scrollbar">
+                                    {namedViews.map((view, idx) => (
+                                        <button
+                                            key={view.id || view.name || idx}
+                                            onClick={() => { onCameraView(view); setShowCamViews(false) }}
+                                            className="w-full text-left px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-2)] hover:bg-sky-500/15 hover:text-sky-300 transition-all truncate"
+                                        >
+                                            {view.name || view.id || `View ${idx + 1}`}
+                                        </button>
+                                    ))}
+                                </div>
+                            </>
+                        )}
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -639,39 +683,16 @@ export default function ViewerToolbar({
                 )}
             </AnimatePresence>
 
-            {/* ── Colour-by popover ─────────────────────────────────────────── */}
-            <AnimatePresence>
-                {showColorBy && (
-                    <motion.div ref={colorByRef} {...popoverAnim} className={`${popoverCls} p-3 w-48`}>
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-semibold text-violet-400">Colour by</span>
-                            <button onClick={() => setShowColorBy(false)} className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]">
-                                <X className="w-3.5 h-3.5" />
-                            </button>
-                        </div>
-                        <div className="space-y-0.5">
-                            {COLOR_BY_FIELDS.map(({ label, value }) => (
-                                <button key={value}
-                                    onClick={() => { onColorByProperty(activeColorField === value ? null : value); setShowColorBy(false) }}
-                                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-all ${
-                                        activeColorField === value
-                                            ? 'bg-violet-500/25 text-violet-300 ring-1 ring-violet-500/40'
-                                            : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'
-                                    }`}
-                                >{label}</button>
-                            ))}
-                        </div>
-                        {activeColorField && (
-                            <button onClick={() => { onRemoveColorFilter(); setShowColorBy(false) }}
-                                className="mt-2 w-full py-1 rounded-lg text-[10px] text-[var(--speckle-foreground-3)] hover:text-red-400 hover:bg-[var(--speckle-outline-3)] transition-colors"
-                            >✕ Clear colour filter</button>
-                        )}
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            {/* ── Toolbar pill ──────────────────────────────────────────────── */}
-            <div className="glass rounded-full overflow-hidden shadow-lg p-1.5 flex gap-1 items-center">
+            {/* ── Toolbar pill ──────────────────────────────────────────────────
+                max-w + overflow-x-auto: at 8 buttons this pill's natural content
+                width (~362px) exceeds the viewer panel itself on narrow phones
+                (iPhone 7 is 375px wide, panel ~321px) — without a cap it overflows
+                past the panel's own edges on both sides. 85vw (not a percentage of
+                this absolutely-positioned pill's own containing block, which on
+                mobile resolves wider than the visible panel and undershoots the
+                fix) reliably fits inside the panel on phones while never engaging
+                on desktop, where the pill's natural width is far below 85vw. */}
+            <div className="glass rounded-full shadow-lg p-1.5 flex gap-1 items-center max-w-[85vw] overflow-x-auto no-scrollbar">
 
                 {/* Section Box */}
                 <button
@@ -729,50 +750,6 @@ export default function ViewerToolbar({
 
                 <div className="w-px bg-[var(--speckle-outline-3)] mx-0.5 self-stretch" />
 
-                {/* View Mode */}
-                <button
-                    className={`p-2 rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
-                    onClick={() => { closeAll(); setShowModes(v => !v) }}
-                    disabled={!isViewerReady}
-                    title={`View mode: ${currentMode.label}`}
-                >
-                    {currentMode.icon}
-                </button>
-
-                {/* Edges */}
-                <button
-                    className={`p-2 rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
-                    onClick={onToggleEdges}
-                    disabled={!isViewerReady}
-                    title={edgesEnabled ? 'Hide edges' : 'Show edges'}
-                >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <rect x="3" y="3" width="18" height="18" rx="2" />
-                        <line x1="3" y1="9" x2="21" y2="9" />
-                        <line x1="3" y1="15" x2="21" y2="15" />
-                        <line x1="9" y1="3" x2="9" y2="21" />
-                        <line x1="15" y1="3" x2="15" y2="21" />
-                    </svg>
-                </button>
-
-                {/* Lighting */}
-                <button
-                    className={`p-2 rounded-full transition-all ${
-                        showLighting
-                            ? 'bg-amber-500/80 text-white'
-                            : lc.enabled
-                                ? 'text-amber-300 hover:bg-[var(--speckle-outline-3)]'
-                                : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-amber-300'
-                    }`}
-                    onClick={() => { closeAll(); setShowLighting(v => !v) }}
-                    disabled={!isViewerReady}
-                    title="Sun lighting"
-                >
-                    <Sun className="w-5 h-5" />
-                </button>
-
-                <div className="w-px bg-[var(--speckle-outline-3)] mx-0.5 self-stretch" />
-
                 {/* Fly-through mode */}
                 <button
                     className={`p-2 rounded-full transition-all ${isFlyMode ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
@@ -816,20 +793,6 @@ export default function ViewerToolbar({
                     </button>
                 )}
 
-                {/* Colour by property */}
-                <button
-                    className={`p-2 rounded-full transition-all ${activeColorField || showColorBy ? 'bg-violet-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-violet-300'}`}
-                    onClick={() => { closeAll(); setShowColorBy(v => !v) }}
-                    disabled={!isViewerReady}
-                    title={activeColorField ? `Colour by: ${activeColorField}` : 'Colour by property'}
-                >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="13.5" cy="6.5" r="0.5" fill="currentColor"/><circle cx="17.5" cy="10.5" r="0.5" fill="currentColor"/>
-                        <circle cx="8.5" cy="7.5" r="0.5" fill="currentColor"/><circle cx="6.5" cy="12.5" r="0.5" fill="currentColor"/>
-                        <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>
-                    </svg>
-                </button>
-
                 {/* Measurements */}
                 <button
                     className={`p-2 rounded-full transition-all relative ${
@@ -869,5 +832,6 @@ export default function ViewerToolbar({
                 </button>
             </div>
         </div>
+        </>
     )
 }

@@ -29,34 +29,38 @@ function Popover({ open, children }) {
     )
 }
 
-function Segment({ id, icon: Icon, category, label, sublabel, description, active, loading, disabled, open, onToggle, children }) {
+function Segment({ id, icon: Icon, category, label, sublabel, description, active, loading, disabled, open, onToggle, children, vertical }) {
     return (
-        <div className="relative">
+        <div className={`relative ${vertical ? 'w-full' : ''}`}>
             <button
                 onClick={() => !disabled && onToggle(id)}
                 disabled={disabled}
                 title={disabled ? 'Select previous step first' : description}
                 className={`flex flex-col items-start gap-0.5 px-2.5 py-1 rounded-lg text-sm transition-all select-none
-                    ${open ? 'bg-white/10' : 'hover:bg-white/5'}
+                    ${vertical ? 'w-full py-2.5 bg-white/5' : ''}
+                    ${open ? 'bg-white/10' : vertical ? '' : 'hover:bg-white/5'}
                     ${disabled ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'}
                     ${active && !disabled ? 'text-[var(--speckle-foreground)]' : 'text-[var(--speckle-foreground-3)]'}
                 `}
             >
                 {category && (
-                    <span className="text-[9px] uppercase tracking-wider leading-none text-zinc-600">{category}</span>
+                    <span className="text-[9px] uppercase tracking-wider leading-none text-[var(--speckle-foreground-2)]">{category}</span>
                 )}
                 <span className="flex items-center gap-1.5 leading-none">
                     {loading
                         ? <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" />
                         : <Icon className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
                     }
-                    <span className="max-w-[160px] truncate font-medium">{label}</span>
+                    <span className={`truncate font-medium ${vertical ? 'max-w-[260px]' : 'max-w-[160px]'}`}>{label}</span>
                     {sublabel && (
-                        <span className="text-zinc-600 text-[11px] hidden xl:inline truncate max-w-[80px]">{sublabel}</span>
+                        <span className={`text-zinc-600 text-[11px] truncate max-w-[80px] ${vertical ? 'inline' : 'hidden xl:inline'}`}>{sublabel}</span>
                     )}
                 </span>
             </button>
-            <Popover open={open}>{children}</Popover>
+            {vertical
+                ? open && <div className="mt-1">{children}</div>
+                : <Popover open={open}>{children}</Popover>
+            }
         </div>
     )
 }
@@ -81,6 +85,9 @@ export function BreadcrumbSelector({
     selectedVersion,
     loadingVersions,
     onSelectVersion,
+    // Stacks segments full-width with dividers instead of a horizontal
+    // chevron-separated row — used for the mobile full-screen picker sheet.
+    vertical = false,
 }) {
     const [openSeg, setOpenSeg] = useState(null)
     const [showAddServer, setShowAddServer] = useState(false)
@@ -155,8 +162,12 @@ export function BreadcrumbSelector({
         close()
     }
 
+    const Separator = vertical
+        ? () => <div className="h-px bg-white/5 my-1" />
+        : () => <ChevronRight className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0 mx-0.5" />
+
     return (
-        <div ref={containerRef} className="flex items-center gap-0.5 min-w-0">
+        <div ref={containerRef} className={vertical ? 'flex flex-col gap-1 w-full min-w-0' : 'flex items-center gap-0.5 min-w-0'}>
             {/* Server */}
             <Segment
                 id="server" icon={Globe}
@@ -166,6 +177,7 @@ export function BreadcrumbSelector({
                 active={true}
                 open={openSeg === 'server'}
                 onToggle={toggle}
+                vertical={vertical}
             >
                 <div className="p-2">
                     <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider px-2 pb-1.5">Speckle Server</p>
@@ -265,7 +277,7 @@ export function BreadcrumbSelector({
                 </div>
             </Segment>
 
-            <ChevronRight className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0 mx-0.5" />
+            <Separator />
 
             {/* Project */}
             <Segment
@@ -277,6 +289,7 @@ export function BreadcrumbSelector({
                 loading={loadingProjects}
                 open={openSeg === 'project'}
                 onToggle={toggle}
+                vertical={vertical}
             >
                 <div className="p-2">
                     <div className="relative mb-2">
@@ -314,7 +327,7 @@ export function BreadcrumbSelector({
             </Segment>
 
             {selectedProject && (<>
-                <ChevronRight className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0 mx-0.5" />
+                <Separator />
 
                 {/* Model */}
                 <Segment
@@ -327,6 +340,7 @@ export function BreadcrumbSelector({
                     disabled={!loadingModels && models.length === 0}
                     open={openSeg === 'model'}
                     onToggle={toggle}
+                    vertical={vertical}
                 >
                     <div className="p-2">
                         <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider px-2 pb-1.5">Models</p>
@@ -356,7 +370,7 @@ export function BreadcrumbSelector({
             </>)}
 
             {selectedModel && (<>
-                <ChevronRight className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0 mx-0.5" />
+                <Separator />
 
                 {/* Version */}
                 <Segment
@@ -369,6 +383,7 @@ export function BreadcrumbSelector({
                     loading={loadingVersions}
                     open={openSeg === 'version'}
                     onToggle={toggle}
+                    vertical={vertical}
                 >
                     <div className="p-2">
                         <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider px-2 pb-1.5">Versions</p>

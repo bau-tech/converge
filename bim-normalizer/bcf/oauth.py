@@ -15,10 +15,11 @@ import base64
 import hashlib
 import secrets
 import time
+from datetime import datetime, timezone
 
 import jwt
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from config import settings
 from bcf.db import fetch_one
@@ -70,6 +71,10 @@ def _issue_tokens(base: str, client_id: str, email: str, name: str) -> dict:
     now = int(time.time())
     access_token = secrets.token_urlsafe(32)
     refresh_token = secrets.token_urlsafe(32)
+    # Shared by both stores below so revoke_session() can tell which refresh
+    # token belongs to a given access token without ever exposing either
+    # credential in the admin UI.
+    session_id = secrets.token_urlsafe(8)
     id_token = jwt.encode(
         {
             "iss": base,
@@ -83,8 +88,16 @@ def _issue_tokens(base: str, client_id: str, email: str, name: str) -> dict:
         _SIGNING_KEY,
         algorithm="HS256",
     )
-    _issued_tokens[access_token] = {"sub": email, "name": name, "email": email, "exp": now + TOKEN_TTL_SECONDS}
-    _refresh_tokens[refresh_token] = {"email": email, "name": name}
+    _issued_tokens[access_token] = {
+        "sub": email,
+        "name": name,
+        "email": email,
+        "exp": now + TOKEN_TTL_SECONDS,
+        "session_id": session_id,
+        "client_id": client_id,
+        "issued_at": now,
+    }
+    _refresh_tokens[refresh_token] = {"email": email, "name": name, "session_id": session_id}
     return {
         "access_token": access_token,
         "token_type": "Bearer",
@@ -211,15 +224,30 @@ async def _token_impl(
 ):
     base = str(request.base_url).rstrip("/")
 
+    # RFC 6749 §5.2 requires error responses to use HTTP 400 — returning these
+    # error bodies with the default 200 (as this used to) means a spec-
+    # compliant client that checks the status code before the body sees
+    # "success", finds no access_token, and carries on with no valid
+    # credential, surfacing as a 401 on the next call instead of a clean
+    # re-auth prompt.
+    def _error(description: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=400, content={"error": "invalid_grant", "error_description": description}
+        )
+
     if grant_type == "refresh_token":
-        identity = _refresh_tokens.get(refresh_token or "")
+        # Single-use: popping (not get) means a refresh token can't be replayed
+        # after it's been exchanged, so the only live refresh token for a given
+        # session is always the most recently issued one — required for
+        # revoke_session() below to actually cut a client off.
+        identity = _refresh_tokens.pop(refresh_token or "", None)
         if identity is None:
-            return {"error": "invalid_grant", "error_description": "unknown refresh token"}
+            return _error("unknown refresh token")
         return _issue_tokens(base, client_id or "unknown", identity["email"], identity["name"])
 
     pending = _pending_codes.pop(code or "", None)
     if pending is None:
-        return {"error": "invalid_grant", "error_description": "unknown or already-used code"}
+        return _error("unknown or already-used code")
 
     if pending["code_challenge"]:
         method = pending["code_challenge_method"]
@@ -228,7 +256,7 @@ async def _token_impl(
             _b64url_sha256(verifier) if method == "S256" else verifier
         )
         if expected != pending["code_challenge"]:
-            return {"error": "invalid_grant", "error_description": "PKCE verification failed"}
+            return _error("PKCE verification failed")
 
     return _issue_tokens(base, client_id or pending["client_id"], pending["user_email"], pending["user_name"])
 
@@ -260,3 +288,48 @@ def current_user(access_token: str) -> dict:
     if issued is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return {"id": issued["sub"], "name": issued.get("name", ""), "email": issued.get("email", "")}
+
+
+def _iso(epoch_seconds: int) -> str:
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+
+
+def list_active_sessions() -> list[dict]:
+    # Used by the admin panel's "active sessions" view — surfaces exactly
+    # the in-memory state that determines whether a connecting BCF client's
+    # Bearer token still works, without needing to SSH in and grep logs.
+    now = int(time.time())
+    expired = [t for t, v in _issued_tokens.items() if v["exp"] < now]
+    for t in expired:
+        del _issued_tokens[t]
+    return sorted(
+        (
+            {
+                "session_id": v["session_id"],
+                "client_id": v["client_id"],
+                "email": v["email"],
+                "name": v["name"],
+                "issued_at": _iso(v["issued_at"]),
+                "expires_at": _iso(v["exp"]),
+            }
+            for v in _issued_tokens.values()
+        ),
+        key=lambda s: s["issued_at"],
+        reverse=True,
+    )
+
+
+def revoke_session(session_id: str) -> bool:
+    # Must clear both stores — leaving the refresh token behind would let the
+    # client silently mint a fresh access token via grant_type=refresh_token
+    # right after being "revoked".
+    revoked = False
+    for token, v in list(_issued_tokens.items()):
+        if v["session_id"] == session_id:
+            del _issued_tokens[token]
+            revoked = True
+    for token, v in list(_refresh_tokens.items()):
+        if v.get("session_id") == session_id:
+            del _refresh_tokens[token]
+            revoked = True
+    return revoked

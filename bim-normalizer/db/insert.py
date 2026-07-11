@@ -6,6 +6,7 @@ from typing import Any
 from psycopg2.extras import execute_values
 
 from ifc.classify import classify_material_category
+from ifc.schema import sanitize_float, sanitize_floats
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,19 @@ def upsert_element(conn, model_id: str, application_id: str | None,
 def upsert_geometry(conn, element_id: str, geo: dict) -> None:
     """Insert or replace geometry row for an element."""
     mesh_json = json.dumps(geo.get("mesh")) if geo.get("mesh") else None
+    # Defense-in-depth: extract_geometry() already sanitizes NaN/Inf, but guard
+    # here too in case a future caller bypasses it — NaN/Inf would otherwise
+    # land in a Postgres FLOAT column or break downstream range queries silently.
+    bbox_min    = sanitize_floats(geo.get("bbox_min"))
+    bbox_max    = sanitize_floats(geo.get("bbox_max"))
+    centroid    = sanitize_floats(geo.get("centroid"))
+    centroid_si = sanitize_floats(geo.get("centroid_si"))
+    volume_m3   = sanitize_float(geo.get("volume_m3"))
+    area_m2     = sanitize_float(geo.get("area_m2"))
+    if (bbox_min != geo.get("bbox_min") or bbox_max != geo.get("bbox_max")
+            or centroid != geo.get("centroid") or centroid_si != geo.get("centroid_si")
+            or volume_m3 != geo.get("volume_m3") or area_m2 != geo.get("area_m2")):
+        logger.warning("upsert_geometry: non-finite value(s) sanitized to None for element %s", element_id)
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_geometry
@@ -128,14 +142,42 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
                 mesh        = EXCLUDED.mesh
         """, (
             element_id,
-            geo.get("bbox_min"),
-            geo.get("bbox_max"),
-            geo.get("centroid"),
-            geo.get("centroid_si"),
-            geo.get("volume_m3"),
-            geo.get("area_m2"),
+            bbox_min,
+            bbox_max,
+            centroid,
+            centroid_si,
+            volume_m3,
+            area_m2,
             mesh_json,
         ))
+
+
+# ---------------------------------------------------------------------------
+# Semantic search embeddings
+# ---------------------------------------------------------------------------
+
+def get_element_ids_missing_embedding(conn, model_id: str) -> list[str]:
+    """Element ids for this model with no bim_element_embeddings row yet."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.element_id::text
+            FROM bim_elements e
+            LEFT JOIN bim_element_embeddings emb ON emb.element_id = e.element_id
+            WHERE e.model_id = %s AND emb.element_id IS NULL
+        """, (model_id,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def upsert_element_embedding(conn, element_id: str, embed_text: str, vector: list[float]) -> None:
+    vector = sanitize_floats(vector)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO bim_element_embeddings (element_id, embed_text, embedding)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (element_id) DO UPDATE SET
+                embed_text = EXCLUDED.embed_text,
+                embedding  = EXCLUDED.embedding
+        """, (element_id, embed_text, vector))
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +274,31 @@ def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None 
                 "value_si":      value_si,
                 "unit_si":       unit_si,
             })
+        elif isinstance(v, (list, tuple)):
+            # Array-valued parameter (e.g. Revit's INSTANCE_FREE_HOST list of
+            # element ids) — previously dropped silently. JSON-encode it instead
+            # of losing it; list items may themselves be SpecklePy Base objects.
+            key = str(k)
+            canonical = _resolve_canonical(pset, key)
+            try:
+                json_val = json.dumps([_speckle_obj_to_dict(item) or item for item in v], default=str)
+            except Exception:
+                json_val = json.dumps([str(item) for item in v])
+            rows.append({
+                "pset":          pset,
+                "key":           key,
+                "value":         json_val,
+                "datatype":      "json",
+                "value_numeric": None,
+                "canonical_key": canonical,
+                "value_si":      None,
+                "unit_si":       None,
+            })
+        else:
+            logger.warning(
+                "Unhandled parameter value type %s for key=%r pset=%r — dropping",
+                type(v).__name__, k, pset,
+            )
     return rows
 
 
@@ -501,5 +568,23 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
             "datatype": "string", "value_numeric": None,
             "canonical_key": "material_category",
         })
+
+    # Collision check: same canonical_key resolved from more than one pset with
+    # different values. Precedence is implicit in insertion order above
+    # (parameters > typeParameters > properties > udas > psets > archicadParameters
+    # > qtos > derived) — no row is dropped, this only makes silent collisions
+    # discoverable for a consumer that naively queries by canonical_key alone.
+    by_canonical: dict[str, list[dict]] = {}
+    for r in all_rows:
+        ck = r.get("canonical_key")
+        if ck:
+            by_canonical.setdefault(ck, []).append(r)
+    for ck, group in by_canonical.items():
+        distinct = {(r.get("pset"), r.get("value")) for r in group}
+        if len({v for _, v in distinct}) > 1:
+            logger.warning(
+                "Parameter collision for element %s: canonical_key=%r has conflicting values across psets: %s",
+                element_id, ck, sorted(distinct, key=lambda x: (x[0] or "", x[1] or "")),
+            )
 
     upsert_parameters(conn, element_id, all_rows)

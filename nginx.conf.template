@@ -47,4 +47,14 @@ server {
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
     }
+
+    # bcf-server's own standalone admin page (bcf/admin.py) — no trailing
+    # slash so this also matches the bare /admin path itself, not just
+    # /admin/* sub-routes (login, api, etc.).
+    location /admin {
+        proxy_pass ${BCF_SERVER_URL}admin;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
 }

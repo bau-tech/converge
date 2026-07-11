@@ -91,6 +91,17 @@ CREATE INDEX IF NOT EXISTS idx_bim_params_numeric   ON bim_parameters(element_id
 CREATE INDEX IF NOT EXISTS idx_bim_params_canonical ON bim_parameters(element_id, canonical_key)
     WHERE canonical_key IS NOT NULL;
 
+-- Per-element text embedding for semantic search (speckle_semantic_search MCP
+-- tool). embed_text is stored alongside the vector for debuggability — lets
+-- you see exactly what was embedded without re-deriving it. No pgvector: at
+-- current model sizes (hundreds-to-low-thousands of elements) brute-force
+-- cosine similarity in Python is fast enough and avoids a Postgres image swap.
+CREATE TABLE IF NOT EXISTS bim_element_embeddings (
+    element_id  UUID PRIMARY KEY REFERENCES bim_elements(element_id) ON DELETE CASCADE,
+    embed_text  TEXT NOT NULL,
+    embedding   FLOAT[] NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS bim_relationships (
     id             BIGSERIAL PRIMARY KEY,
     element_id     UUID NOT NULL REFERENCES bim_elements(element_id) ON DELETE CASCADE,
@@ -201,6 +212,22 @@ CREATE TABLE IF NOT EXISTS stream_webhooks (
     created_at         TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (server_url, stream_id)
 );
+
+-- Async job state (ingest/export/IDS-check/clash-check/filter-publish), moved
+-- out of in-memory dicts so a backend restart doesn't strand polling clients
+-- with an unrecoverable 404 for a job that may have already completed.
+CREATE TABLE IF NOT EXISTS bim_jobs (
+    job_id      UUID PRIMARY KEY,
+    job_type    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'running',
+    payload     JSONB,
+    result      JSONB,
+    error       TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_bim_jobs_type_status ON bim_jobs(job_type, status);
+CREATE INDEX IF NOT EXISTS idx_bim_jobs_created ON bim_jobs(created_at);
 """
 
 

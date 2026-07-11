@@ -213,13 +213,13 @@ export default function ElementPanel({ element, onClose, onFilter, darkMode = tr
             exit={{ x: 400, opacity: 0 }}
             transition={{ duration: isResizing ? 0 : 0.3 }} // Disable transition during drag
             style={{ width: isAutoWidth ? 'fit-content' : width, minWidth: 300, maxWidth: isAutoWidth ? '60vw' : '90vw' }}
-            className={`fixed right-0 top-0 bottom-0 shadow-2xl z-50 flex flex-col border-l
+            className={`fixed right-0 top-0 bottom-0 shadow-2xl z-[160] flex flex-col border-l
                 ${darkMode ? 'bg-[#1e1e1e] border-[#333]' : 'bg-white border-gray-200'}
             `}
         >
             {/* Resize Handle */}
             <div
-                className="absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-cyan-500/50 transition-colors z-[60]"
+                className="absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-cyan-500/50 transition-colors z-10"
                 onMouseDown={startResizing}
                 onDoubleClick={toggleAutoWidth}
                 title="Drag to resize, Double-click to auto-adjust"

@@ -352,6 +352,10 @@ def flatten_elements(
     present in _REVIT_CATEGORY_MAP propagate downward.
     """
     if _depth > _max_depth:
+        logger.warning(
+            "flatten_elements: max depth %d exceeded at id=%s type=%s — subtree truncated",
+            _max_depth, getattr(root, "id", "?"), getattr(root, "speckle_type", "?"),
+        )
         return []
 
     results: list[tuple] = []
@@ -431,8 +435,8 @@ def build_object_map(root: Base) -> dict:
                     for item in v:
                         if isinstance(item, Base):
                             _walk(item)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("build_object_map: failed walking object %s: %s", obj_id or "?", exc)
 
     _walk(root)
     return obj_map
@@ -452,7 +456,8 @@ def collect_instance_definitions(root: Base) -> dict:
 
     try:
         raw_dict = root.__dict__
-    except Exception:
+    except Exception as exc:
+        logger.warning("collect_instance_definitions: could not read root.__dict__: %s", exc)
         return defs
 
     for _attr, val in raw_dict.items():

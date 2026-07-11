@@ -797,6 +797,37 @@ def get_element_details(conn, model_id: str, reference: str) -> dict | None:
     return element
 
 
+def get_elements_with_params_for_embedding(conn, element_ids: list[str]) -> dict[str, dict]:
+    """
+    Batched element + parameter fetch for building semantic-search embed text
+    (see search/embeddings.py:build_embed_text). Returns
+    {element_id: {ifc_class, category, name, storey, params: [{pset, key, value}, ...]}}.
+    """
+    if not element_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT element_id::text, ifc_class, category, name, storey
+            FROM bim_elements
+            WHERE element_id = ANY(%s::uuid[])
+        """, (element_ids,))
+        result = {
+            eid: {"ifc_class": ifc_class, "category": category, "name": name,
+                  "storey": storey, "params": []}
+            for eid, ifc_class, category, name, storey in cur.fetchall()
+        }
+
+        cur.execute("""
+            SELECT element_id::text, pset, key, value
+            FROM bim_parameters
+            WHERE element_id = ANY(%s::uuid[])
+        """, (element_ids,))
+        for eid, pset, key, value in cur.fetchall():
+            if eid in result:
+                result[eid]["params"].append({"pset": pset, "key": key, "value": value})
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Parameter completeness — fill-rate per parameter, worst-covered first
 # ---------------------------------------------------------------------------
@@ -1001,3 +1032,54 @@ def find_nearby_elements(conn, model_id: str, origin, radius_m: float,
             }
             for r in cur.fetchall()
         ]
+
+
+# ---------------------------------------------------------------------------
+# Semantic search — see search/embeddings.py for the embedding model itself
+# ---------------------------------------------------------------------------
+
+def semantic_search_elements(conn, model_id: str, query: str, limit: int = 10) -> list[dict]:
+    """
+    Rank this model's elements by cosine similarity between `query` and each
+    element's stored embedding (bim_element_embeddings, built at ingest time).
+
+    Returns [] if the model has no embeddings yet (ingested before this
+    feature existed, or the embed step failed at ingest) — caller is
+    responsible for turning that into a helpful message (e.g. "try
+    re-ingesting"), this function doesn't know *why* there's nothing to rank.
+    """
+    from search.embeddings import embed_query, cosine_top_k
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT element_id::text, embedding
+            FROM bim_element_embeddings
+            WHERE element_id IN (SELECT element_id FROM bim_elements WHERE model_id = %s)
+        """, (model_id,))
+        rows = [(r[0], r[1]) for r in cur.fetchall()]
+        if not rows:
+            return []
+
+        query_vec = embed_query(query)
+        ranked = cosine_top_k(query_vec, rows, limit)
+        if not ranked:
+            return []
+
+        ids = [eid for eid, _ in ranked]
+        cur.execute("""
+            SELECT element_id::text, speckle_id, ifc_class, category, name, storey
+            FROM bim_elements
+            WHERE element_id = ANY(%s::uuid[])
+        """, (ids,))
+        by_id = {
+            eid: {"speckle_id": sid, "ifc_class": ifc, "category": cat, "name": name, "storey": storey}
+            for eid, sid, ifc, cat, name, storey in cur.fetchall()
+        }
+
+    results = []
+    for element_id, score in ranked:
+        info = by_id.get(element_id)
+        if info is None:
+            continue
+        results.append({"element_id": element_id, "score": round(score, 4), **info})
+    return results

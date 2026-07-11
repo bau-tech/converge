@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from bcf.auth import get_bearer_token
 from bcf.db import fetch_all, fetch_one
 from bcf.oauth import current_user
+from bcf.versions import is_bcf_v3
 
 router = APIRouter(tags=["bcf-projects"])
 
@@ -25,10 +26,12 @@ _DEFAULT_EXTENSIONS = {
     "topic_label": [],
     "snippet_type": [],
     "stage": [],
-    # user_id_type is filled in live from bcf_users at request time (see
-    # _user_id_type() / get_extensions() below) — this placeholder is
-    # overwritten on every call, never served as-is.
-    "user_id_type": [],
+    # The assignable-user list is filled in live from bcf_users at request
+    # time (see _assignable_users() / get_extensions() below) — this placeholder
+    # is overwritten on every call, never served as-is. Note the key itself
+    # differs by BCF version: 2.1 calls it "user_id_type", 3.0 renamed it to
+    # "users" (confirmed against the official BCF-API schemas) — get_extensions()
+    # sets whichever key applies for the version the request came in on.
     "project_actions": ["update", "createTopic", "createDocument"],
     "topic_actions": [
         "update",
@@ -41,6 +44,15 @@ _DEFAULT_EXTENSIONS = {
     ],
     "comment_actions": ["update"],
 }
+
+# The kinds bcf_extensions actually stores per-project (matches the CHECK
+# constraint in bcf/db_schema.py) — also used by the admin panel's
+# per-project extensions editor.
+EXTENSION_KINDS = ("topic_type", "topic_status", "priority", "topic_label", "stage")
+
+
+def default_extension_values(kind: str) -> list[str]:
+    return list(_DEFAULT_EXTENSIONS.get(kind, []))
 
 
 @router.get("/current-user")
@@ -82,28 +94,36 @@ def get_project(project_id: str):
     }
 
 
-def _user_id_type() -> list[str]:
+def _assignable_users() -> list[str]:
     rows = fetch_all("SELECT email FROM bcf_users ORDER BY email")
     return [r["email"] for r in rows]
 
 
-@router.get("/projects/{project_id}/extensions")
-def get_extensions(project_id: str):
+def extension_value_lists(project_id: str) -> dict[str, list[str]]:
+    # Shared by the BCF-API extensions endpoint below and the admin panel's
+    # per-project extensions editor, so both ever agree on the "any custom
+    # row switches every kind to DB-only mode" rule (see the comment below).
     rows = fetch_all(
         "SELECT kind, value FROM bcf_extensions WHERE model_id = %s ORDER BY kind, sort_order",
         (project_id,),
     )
-    if not rows:
-        extensions = dict(_DEFAULT_EXTENSIONS)
-        extensions["user_id_type"] = _user_id_type()
-        return extensions
-    # The fixed action arrays aren't user-configurable (no DB rows ever exist
-    # for them — see the CHECK constraint in bcf/db_schema.py), only the
-    # value-list kinds below are overridden per-project from bcf_extensions.
+    lists = {k: default_extension_values(k) for k in EXTENSION_KINDS}
+    if rows:
+        # The fixed action arrays aren't user-configurable (no DB rows ever
+        # exist for them — see the CHECK constraint in bcf/db_schema.py),
+        # only the value-list kinds below are overridden per-project from
+        # bcf_extensions.
+        for k in EXTENSION_KINDS:
+            lists[k] = []
+        for r in rows:
+            lists.setdefault(r["kind"], []).append(r["value"])
+    return lists
+
+
+@router.get("/projects/{project_id}/extensions")
+def get_extensions(project_id: str, request: Request):
     extensions = dict(_DEFAULT_EXTENSIONS)
-    extensions["user_id_type"] = _user_id_type()
-    for k in ("topic_type", "topic_status", "priority", "topic_label", "stage"):
-        extensions[k] = []
-    for r in rows:
-        extensions.setdefault(r["kind"], []).append(r["value"])
+    extensions.update(extension_value_lists(project_id))
+    user_key = "users" if is_bcf_v3(request) else "user_id_type"
+    extensions[user_key] = _assignable_users()
     return extensions

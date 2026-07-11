@@ -2,11 +2,32 @@ import logging
 from typing import Any
 
 from specklepy.objects import Base
-from ifc.schema import length_to_m, MM2_TO_M2
+from ifc.schema import length_to_m, MM2_TO_M2, sanitize_float, sanitize_floats
 
 logger = logging.getLogger(__name__)
 
 _MESH_VERTEX_LIMIT = 30_000  # trim large meshes to avoid bloating JSONB
+
+
+def _sanitize_geo_values(obj, **values: dict) -> dict:
+    """
+    Run sanitize_float/sanitize_floats over a dict of geometry values
+    (bbox_min, bbox_max, centroid, etc.), logging once if any value was
+    actually non-finite (NaN/Inf) and had to be dropped to None.
+    """
+    sanitized = {}
+    changed_keys = []
+    for key, val in values.items():
+        new_val = sanitize_floats(val) if isinstance(val, list) else sanitize_float(val)
+        if new_val != val:
+            changed_keys.append(key)
+        sanitized[key] = new_val
+    if changed_keys:
+        logger.warning(
+            "extract_geometry: non-finite value(s) sanitized to None for object %s (type=%s): %s",
+            getattr(obj, "id", "?"), getattr(obj, "speckle_type", "?"), sorted(changed_keys),
+        )
+    return sanitized
 
 
 def _decode_face_count(n: int) -> int:
@@ -301,7 +322,13 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
     have one mesh per face).  Returns None if no geometry is available.
     instance_defs — map of id → InstanceDefinitionProxy for v3 instance resolution.
     """
-    units = getattr(obj, "units", "mm") or "mm"
+    _raw_units = getattr(obj, "units", None)
+    units = _raw_units or "mm"
+    if not _raw_units:
+        logger.warning(
+            "extract_geometry: no units on object id=%s type=%s — defaulting to mm",
+            getattr(obj, "id", "?"), getattr(obj, "speckle_type", "?"),
+        )
 
     meshes = _get_all_meshes(obj, _instance_defs=instance_defs)
     vertices_flat, faces = _merge_meshes(meshes)  # flat [x,y,z,...] + run-length faces
@@ -319,15 +346,17 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
                     float(bbox.get("y", {}).get("max", 0)),
                     float(bbox.get("z", {}).get("max", 0))]
             centroid = _centroid(bmin, bmax)
-            return {
-                "bbox_min": bmin,
-                "bbox_max": bmax,
-                "centroid": centroid,
-                "centroid_si": [length_to_m(c, units) for c in centroid],
-                "volume_m3": _bbox_volume_m3(bmin, bmax, units),
-                "area_m2": None,
-                "mesh": None,
-            }
+            geo = _sanitize_geo_values(
+                obj,
+                bbox_min=bmin,
+                bbox_max=bmax,
+                centroid=centroid,
+                centroid_si=[length_to_m(c, units) for c in centroid],
+                volume_m3=_bbox_volume_m3(bmin, bmax, units),
+                area_m2=None,
+            )
+            geo["mesh"] = None
+            return geo
         except Exception:
             return None
 
@@ -351,17 +380,28 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
                          len(pts), _MESH_VERTEX_LIMIT, getattr(obj, "id", "?"))
         valid_faces = _filter_faces(list(faces), len(trimmed_pts))
         # Store vertices as list of [x,y,z] triplets (compact, matches export parser)
-        mesh_json = {"vertices": trimmed_pts, "faces": valid_faces} if trimmed_pts else None
+        if valid_faces:
+            mesh_json = {"vertices": trimmed_pts, "faces": valid_faces}
+        else:
+            mesh_json = None
+            if faces:
+                logger.warning(
+                    "extract_geometry: mesh truncation left 0 valid faces for object %s (type=%s) — "
+                    "falling back to bbox-only shape (bbox/volume/area unaffected)",
+                    getattr(obj, "id", "?"), getattr(obj, "speckle_type", "?"),
+                )
 
-        return {
-            "bbox_min": bbox_min,
-            "bbox_max": bbox_max,
-            "centroid": centroid,
-            "centroid_si": [length_to_m(c, units) for c in centroid],
-            "volume_m3": volume_m3,
-            "area_m2": area_m2,
-            "mesh": mesh_json,
-        }
+        geo = _sanitize_geo_values(
+            obj,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            centroid=centroid,
+            centroid_si=[length_to_m(c, units) for c in centroid],
+            volume_m3=volume_m3,
+            area_m2=area_m2,
+        )
+        geo["mesh"] = mesh_json
+        return geo
     except Exception as e:
         obj_id = getattr(obj, "id", "unknown")
         logger.debug("Geometry extraction failed for %s: %s", obj_id, e)

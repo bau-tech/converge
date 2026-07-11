@@ -20,3 +20,6 @@ bim-normalizer/**/__pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Playwright MCP session artifacts
+.playwright-mcp/

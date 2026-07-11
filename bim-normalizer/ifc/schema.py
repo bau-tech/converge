@@ -1,6 +1,7 @@
 """
 IFC schema constants, known Pset names, and unit conversion helpers.
 """
+import math
 
 # Known Pset names by IFC class (non-exhaustive, extend as needed)
 PSET_BY_IFC_CLASS: dict[str, list[str]] = {
@@ -60,3 +61,22 @@ def area_to_m2(value: float, units: str) -> float:
     u = (units or "mm").lower()
     factors = {"mm": MM2_TO_M2, "cm": CM2_TO_M2, "m": 1.0, "in": IN2_TO_M2, "ft": FT2_TO_M2}
     return value * factors.get(u, MM2_TO_M2)
+
+
+def sanitize_float(v):
+    """Return v as a finite float, or None if v is None/NaN/Inf/unparseable.
+    Guards against degenerate geometry (e.g. zero-area triangles) producing
+    NaN/Inf values that would otherwise break JSON serialization or get
+    written into a Postgres FLOAT column."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def sanitize_floats(seq):
+    """Apply sanitize_float() to each element of a sequence, or return None."""
+    return None if seq is None else [sanitize_float(x) for x in seq]

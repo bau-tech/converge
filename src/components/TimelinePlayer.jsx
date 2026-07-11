@@ -44,6 +44,7 @@ export function TimelinePlayer({
     onParamSelect,
 }) {
     const [showParamPicker, setShowParamPicker] = useState(false)
+    const selectedParamLabel = params.find(p => p.key === selectedParam)?.label || selectedParam
     const step = steps[currentStep]
     const builtCount = step?.cumulative_count ?? 0
     const pct = totalElements > 0 ? Math.round((builtCount / totalElements) * 100) : 0
@@ -70,7 +71,7 @@ export function TimelinePlayer({
                                 onClick={() => setShowParamPicker(v => !v)}
                                 className="flex items-center gap-1 text-[10px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground-2)] bg-[var(--speckle-foundation)] border border-[var(--speckle-outline-3)] rounded px-1.5 py-0.5 transition-colors"
                             >
-                                <span className="max-w-[120px] truncate">{selectedParam || 'select param'}</span>
+                                <span className="max-w-[120px] truncate">{selectedParamLabel || 'select param'}</span>
                                 <ChevronDown className={`w-3 h-3 transition-transform ${showParamPicker ? 'rotate-180' : ''}`} />
                             </button>
                             <AnimatePresence>
@@ -87,7 +88,7 @@ export function TimelinePlayer({
                                                 onClick={() => { onParamSelect(p.key); setShowParamPicker(false) }}
                                                 className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-[var(--speckle-outline-3)] transition-colors ${p.key === selectedParam ? 'text-amber-400' : 'text-[var(--speckle-foreground-2)]'}`}
                                             >
-                                                <span className="font-medium">{p.key}</span>
+                                                <span className="font-medium">{p.label || p.key}</span>
                                                 <span className="text-[var(--speckle-foreground-3)] ml-1.5">({p.element_count} elements)</span>
                                             </button>
                                         ))}

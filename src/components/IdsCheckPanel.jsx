@@ -8,6 +8,7 @@ import { createTopic, createViewpoint } from '../utils/bcfClient'
 import { useDrawerWidth } from '../utils/useDrawerWidth'
 import { IdsGraphEditor } from './IdsGraphEditor'
 import { parseIdsXmlToGraph } from '../utils/idsXmlToGraph'
+import { IdsLogoIcon } from './IdsLogoIcon'
 
 function failureKey(specIdx, reqIdx, entity) {
     return `${specIdx}-${reqIdx}-${entity.global_id || entity.id}`
@@ -353,7 +354,10 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
                 className="absolute left-0 top-0 h-full w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-amber-500/40 active:bg-amber-500/60 transition-colors z-10"
             />
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--speckle-outline-3)] shrink-0">
-                <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">IDS Check</h2>
+                <div className="flex items-center gap-2">
+                    <IdsLogoIcon className="w-6 h-6" />
+                    <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">IDS Check</h2>
+                </div>
                 <button onClick={handleClose} className="p-1.5 hover:bg-[var(--speckle-outline-3)] rounded-lg transition-colors">
                     <X className="w-4 h-4 text-[var(--speckle-foreground-3)]" />
                 </button>

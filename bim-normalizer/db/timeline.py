@@ -13,6 +13,17 @@ _ISO_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}')
 _DMY_DATE = re.compile(r'^\d{2}[./]\d{2}[./]\d{4}')
 _MDY_DATE = re.compile(r'^\d{2}/\d{2}/\d{4}')
 
+# Date fields sourced from imported IFC schedules (bim_tasks), exposed as extra
+# timeline parameters alongside whatever turns up in bim_parameters. Namespaced
+# keys avoid colliding with real parameter names; column names come only from
+# this whitelist, never from request input.
+_TASK_DATE_FIELDS = {
+    '__task__planned_start':  ('planned_start',  'Task: Planned Start'),
+    '__task__planned_finish': ('planned_finish', 'Task: Planned Finish'),
+    '__task__actual_start':   ('actual_start',   'Task: Actual Start'),
+    '__task__actual_finish':  ('actual_finish',  'Task: Actual Finish'),
+}
+
 
 def _looks_like_date(val: str) -> bool:
     return bool(_ISO_DATE.match(val) or _DMY_DATE.match(val) or _MDY_DATE.match(val))
@@ -82,6 +93,7 @@ def get_timeline_params(conn, model_id: str) -> list:
 
         result.append({
             'key':            key,
+            'label':          key,
             'type':           param_type,
             'element_count':  elem_count,
             'distinct_values': distinct_values,
@@ -89,9 +101,40 @@ def get_timeline_params(conn, model_id: str) -> list:
             'sample_max':     sample_max,
         })
 
+    result.extend(_get_task_date_params(conn, model_id))
+
     # Prioritize: date > sequence > text, then by element coverage
     type_rank = {'date': 0, 'sequence': 1, 'text': 2}
     return sorted(result, key=lambda x: (type_rank[x['type']], -x['element_count']))
+
+
+def _get_task_date_params(conn, model_id: str) -> list:
+    """Expose date fields from imported IFC schedules (bim_tasks) as timeline params."""
+    result = []
+    with conn.cursor() as cur:
+        for key, (field, label) in _TASK_DATE_FIELDS.items():
+            cur.execute(f"""
+                SELECT COUNT(DISTINCT te.element_id),
+                       COUNT(DISTINCT t.{field}),
+                       MIN(t.{field}),
+                       MAX(t.{field})
+                FROM bim_tasks t
+                JOIN bim_task_elements te ON te.task_id = t.task_id
+                WHERE t.model_id = %s AND t.{field} IS NOT NULL
+            """, (model_id,))
+            elem_count, distinct_values, sample_min, sample_max = cur.fetchone()
+            if not elem_count:
+                continue
+            result.append({
+                'key':             key,
+                'label':           label,
+                'type':            'date',
+                'element_count':   elem_count,
+                'distinct_values': distinct_values,
+                'sample_min':      sample_min.isoformat() if sample_min else None,
+                'sample_max':      sample_max.isoformat() if sample_max else None,
+            })
+    return result
 
 
 def get_timeline_data(conn, model_id: str, param_key: str) -> dict:
@@ -99,18 +142,33 @@ def get_timeline_data(conn, model_id: str, param_key: str) -> dict:
     Return elements grouped by param_key value, sorted chronologically.
     Shape: { steps: [{value, element_ids, cumulative_count}], total_elements }
     """
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT p.value, array_agg(DISTINCT e.speckle_id) AS speckle_ids
-            FROM bim_parameters p
-            JOIN bim_elements e ON e.element_id = p.element_id
-            WHERE e.model_id = %s
-              AND p.key = %s
-              AND p.value IS NOT NULL AND p.value <> ''
-              AND e.speckle_id IS NOT NULL
-            GROUP BY p.value
-        """, (model_id, param_key))
-        rows = cur.fetchall()
+    if param_key in _TASK_DATE_FIELDS:
+        field, _label = _TASK_DATE_FIELDS[param_key]
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT t.{field} AS value, array_agg(DISTINCT e.speckle_id) AS speckle_ids
+                FROM bim_tasks t
+                JOIN bim_task_elements te ON te.task_id = t.task_id
+                JOIN bim_elements e ON e.element_id = te.element_id
+                WHERE t.model_id = %s
+                  AND t.{field} IS NOT NULL
+                  AND e.speckle_id IS NOT NULL
+                GROUP BY t.{field}
+            """, (model_id,))
+            rows = [(value.isoformat(), speckle_ids) for value, speckle_ids in cur.fetchall()]
+    else:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT p.value, array_agg(DISTINCT e.speckle_id) AS speckle_ids
+                FROM bim_parameters p
+                JOIN bim_elements e ON e.element_id = p.element_id
+                WHERE e.model_id = %s
+                  AND p.key = %s
+                  AND p.value IS NOT NULL AND p.value <> ''
+                  AND e.speckle_id IS NOT NULL
+                GROUP BY p.value
+            """, (model_id, param_key))
+            rows = cur.fetchall()
 
     if not rows:
         return {'steps': [], 'total_elements': 0, 'param_key': param_key}

@@ -21,8 +21,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from config import settings
 from bcf.db import execute, fetch_all, fetch_one, execute_returning
+from bcf.oauth import list_active_sessions, revoke_session
 from bcf.password import hash_password, verify_password
-from bcf.schemas import UserCreate
+from bcf.projects import EXTENSION_KINDS, default_extension_values, extension_value_lists
+from bcf.request_log import recent as recent_requests
+from bcf.schemas import ExtensionValueCreate, UserCreate
 from db.purge import purge_speckle_models
 
 router = APIRouter(tags=["bcf-admin"])
@@ -150,13 +153,24 @@ def _admin_page_html(email: str) -> str:
   .topbar {{ display: flex; justify-content: space-between; align-items: baseline; }}
   .muted {{ color: #888; font-size: 0.8rem; }}
   a {{ color: #d97706; text-decoration: none; }}
-  .issues-body {{ padding: 0.5rem 0.2rem; }}
+  .issues-body, .ext-body {{ padding: 0.5rem 0.2rem; }}
   .issue {{ padding: 0.6rem 0; border-bottom: 1px solid #232323; }}
   .issue:last-child {{ border-bottom: none; }}
   .issue-head {{ display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; font-size: 0.82rem; }}
   .issue-snaps {{ display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }}
   .issue-snaps img {{ width: 84px; height: 60px; object-fit: cover; border-radius: 4px; border: 1px solid #2a2a2a; }}
   .error {{ color: #f87171; font-size: 0.85rem; }}
+  .ext-group {{ margin-bottom: 0.9rem; }}
+  .ext-group h3 {{ font-size: 0.78rem; color: #888; margin: 0 0 0.35rem; text-transform: uppercase; letter-spacing: 0.03em; }}
+  .ext-values {{ display: flex; gap: 0.4rem; flex-wrap: wrap; }}
+  .ext-pill {{ display: inline-flex; align-items: center; gap: 0.35rem; background: #232323; border-radius: 999px;
+               padding: 0.2rem 0.3rem 0.2rem 0.7rem; font-size: 0.78rem; }}
+  .ext-pill button {{ background: none; padding: 0 0.35rem; line-height: 1; color: #f87171; }}
+  .ext-add {{ display: flex; gap: 0.4rem; margin-top: 0.4rem; }}
+  .ext-add input {{ font-size: 0.78rem; padding: 0.25rem 0.5rem; }}
+  .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .toolbar {{ display: flex; align-items: baseline; gap: 0.6rem; }}
+  .toolbar label {{ font-size: 0.8rem; color: #aaa; }}
 </style></head><body>
   <div class="topbar">
     <h1>bcf-server admin</h1>
@@ -173,10 +187,25 @@ def _admin_page_html(email: str) -> str:
   <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
 
+  <h2>Active sessions</h2>
+  <p class="muted">Tokens issued by the OAuth2 shim (bcf/oauth.py). These live in memory only and are lost on every
+    bcf-server restart — a client showing 401 right after a redeploy usually just needs to log in again.</p>
+  <table id="sessions-table"><thead><tr><th>Client</th><th>User</th><th>Issued</th><th>Expires</th><th></th></tr></thead>
+    <tbody></tbody></table>
+
   <h2>Ingested models &amp; sync status</h2>
   <table id="servers-table"><thead><tr><th>Server</th><th>Auto-sync</th><th>Watched streams</th><th>Last scanned</th></tr></thead>
     <tbody></tbody></table>
   <table id="models-table"><thead><tr><th>Stream</th><th>Commit</th><th>Server</th><th>Topics</th><th>Ingested</th><th></th></tr></thead>
+    <tbody></tbody></table>
+
+  <h2>Recent requests</h2>
+  <div class="toolbar">
+    <p class="muted">Last 100 requests this process has handled (excluding /health polls).</p>
+    <label><input type="checkbox" id="requests-auto" checked> auto-refresh</label>
+    <button id="requests-refresh">Refresh now</button>
+  </div>
+  <table id="requests-table"><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Client IP</th><th>ms</th></tr></thead>
     <tbody></tbody></table>
 
 <script>
@@ -187,7 +216,9 @@ async function api(path, options) {{
     return res.status === 204 ? null : res.json();
 }}
 
-function esc(s) {{ return (s ?? '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;'); }}
+function esc(s) {{
+    return (s ?? '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}}
 
 async function loadUsers() {{
     const users = await api('/admin/api/users');
@@ -217,6 +248,24 @@ document.getElementById('create-user-form').addEventListener('submit', async (e)
     loadUsers();
 }});
 
+async function loadSessions() {{
+    const sessions = await api('/admin/api/sessions');
+    const tbody = document.querySelector('#sessions-table tbody');
+    tbody.innerHTML = sessions.map(s => `<tr>
+        <td class="mono">${{esc(s.client_id)}}</td>
+        <td>${{esc(s.name)}} &lt;${{esc(s.email)}}&gt;</td>
+        <td>${{esc(new Date(s.issued_at).toLocaleString())}}</td>
+        <td>${{esc(new Date(s.expires_at).toLocaleString())}}</td>
+        <td><button class="danger" data-session="${{s.session_id}}" onclick="revokeSession(this)">Revoke</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">No active sessions.</td></tr>';
+}}
+
+async function revokeSession(btn) {{
+    if (!confirm('Revoke this session? The client will need to log in again.')) return;
+    await api(`/admin/api/sessions/${{btn.dataset.session}}`, {{ method: 'DELETE' }});
+    loadSessions();
+}}
+
 async function loadOverview() {{
     const {{ models, servers }} = await api('/admin/api/overview');
 
@@ -240,11 +289,15 @@ async function loadOverview() {{
                 <td>${{m.topic_count}}</td><td>${{esc(new Date(m.ingested_at).toLocaleString())}}</td>
                 <td>
                     <button data-model="${{m.model_id}}" onclick="toggleIssues(this)">Issues</button>
+                    <button data-model="${{m.model_id}}" onclick="toggleExtensions(this)">Extensions</button>
                     <button class="danger" data-model="${{m.model_id}}" onclick="purgeModel(this)">Delete version</button>
                 </td>
             </tr>`);
             rows.push(`<tr class="issues-row" data-issues-for="${{m.model_id}}" style="display:none">
                 <td colspan="6"><div class="issues-body muted">Loading…</div></td>
+            </tr>`);
+            rows.push(`<tr class="ext-row" data-ext-for="${{m.model_id}}" style="display:none">
+                <td colspan="6"><div class="ext-body muted">Loading…</div></td>
             </tr>`);
         }}
     }}
@@ -286,6 +339,61 @@ async function loadIssuesInto(row, modelId) {{
     }}
 }}
 
+const EXT_KIND_LABELS = {{
+    topic_type: 'Topic type', topic_status: 'Topic status', priority: 'Priority',
+    topic_label: 'Label', stage: 'Stage',
+}};
+
+async function toggleExtensions(btn) {{
+    const modelId = btn.dataset.model;
+    const row = document.querySelector(`tr.ext-row[data-ext-for="${{modelId}}"]`);
+    if (row.style.display === 'none') {{
+        row.style.display = '';
+        await loadExtensionsInto(row, modelId);
+    }} else {{
+        row.style.display = 'none';
+    }}
+}}
+
+async function loadExtensionsInto(row, modelId) {{
+    const body = row.querySelector('.ext-body');
+    body.innerHTML = 'Loading…';
+    try {{
+        const lists = await api(`/admin/api/models/${{modelId}}/extensions`);
+        body.innerHTML = Object.entries(EXT_KIND_LABELS).map(([kind, label]) => `
+            <div class="ext-group">
+                <h3>${{label}}</h3>
+                <div class="ext-values">${{(lists[kind] || []).map(v => `
+                    <span class="ext-pill">${{esc(v)}}<button data-model="${{modelId}}" data-kind="${{kind}}"
+                        data-value="${{esc(v)}}" onclick="deleteExtensionValue(this)">&times;</button></span>
+                `).join('') || '<span class="muted">(none)</span>'}}</div>
+                <form class="ext-add" data-model="${{modelId}}" data-kind="${{kind}}">
+                    <input type="text" placeholder="Add value…" required>
+                    <button type="submit">Add</button>
+                </form>
+            </div>
+        `).join('');
+        body.querySelectorAll('form.ext-add').forEach(f => f.addEventListener('submit', async (e) => {{
+            e.preventDefault();
+            const input = f.querySelector('input');
+            await api(`/admin/api/models/${{f.dataset.model}}/extensions`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ kind: f.dataset.kind, value: input.value }}),
+            }});
+            loadExtensionsInto(row, modelId);
+        }}));
+    }} catch (e) {{
+        body.innerHTML = `<span class="error">Failed to load extensions: ${{esc(e.message)}}</span>`;
+    }}
+}}
+
+async function deleteExtensionValue(btn) {{
+    const {{ model, kind, value }} = btn.dataset;
+    await api(`/admin/api/models/${{model}}/extensions/${{kind}}/${{encodeURIComponent(value)}}`, {{ method: 'DELETE' }});
+    loadExtensionsInto(document.querySelector(`tr.ext-row[data-ext-for="${{model}}"]`), model);
+}}
+
 async function purgeModel(btn) {{
     if (!confirm('Permanently delete this version and any linked BCF topics?')) return;
     await api(`/admin/api/models/${{btn.dataset.model}}`, {{ method: 'DELETE' }});
@@ -298,8 +406,32 @@ async function purgeStream(btn) {{
     loadOverview();
 }}
 
+async function loadRequests() {{
+    const entries = await api('/admin/api/requests');
+    const tbody = document.querySelector('#requests-table tbody');
+    tbody.innerHTML = entries.map(r => `<tr>
+        <td>${{esc(new Date(r.time * 1000).toLocaleTimeString())}}</td>
+        <td>${{esc(r.method)}}</td>
+        <td class="mono">${{esc(r.path)}}</td>
+        <td>${{r.status}}</td>
+        <td class="mono">${{esc(r.client_ip)}}</td>
+        <td>${{r.duration_ms}}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="muted">No requests recorded yet.</td></tr>';
+}}
+
+let requestsTimer = null;
+function scheduleRequestsRefresh() {{
+    if (requestsTimer) clearInterval(requestsTimer);
+    requestsTimer = document.getElementById('requests-auto').checked ? setInterval(loadRequests, 3000) : null;
+}}
+document.getElementById('requests-auto').addEventListener('change', scheduleRequestsRefresh);
+document.getElementById('requests-refresh').addEventListener('click', loadRequests);
+
 loadUsers();
+loadSessions();
 loadOverview();
+loadRequests();
+scheduleRequestsRefresh();
 </script>
 </body></html>"""
 
@@ -483,3 +615,87 @@ def admin_purge_model(model_id: str, _email: str = Depends(require_admin_session
 def admin_purge_stream(stream_id: str, _email: str = Depends(require_admin_session)):
     deleted = purge_speckle_models(stream_id)
     return {"deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Active sessions — surfaces bcf/oauth.py's in-memory token store, so
+# diagnosing a connecting BCF client's 401s doesn't require SSH + grepping
+# docker logs.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/api/sessions")
+def admin_list_sessions(_email: str = Depends(require_admin_session)):
+    return list_active_sessions()
+
+
+@router.delete("/admin/api/sessions/{session_id}", status_code=204)
+def admin_revoke_session(session_id: str, _email: str = Depends(require_admin_session)):
+    if not revoke_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found or already expired")
+
+
+# ---------------------------------------------------------------------------
+# Recent requests — bcf/request_log.py's ring buffer.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/api/requests")
+def admin_recent_requests(_email: str = Depends(require_admin_session)):
+    return recent_requests()
+
+
+# ---------------------------------------------------------------------------
+# Per-project (per-model) extensions editor — bcf_extensions rows that drive
+# the BCF-API GET .../extensions endpoint's topic_type/topic_status/priority/
+# topic_label/stage value lists (bcf/projects.py).
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admin/api/models/{model_id}/extensions")
+def admin_get_extensions(model_id: str, _email: str = Depends(require_admin_session)):
+    return extension_value_lists(model_id)
+
+
+@router.post("/admin/api/models/{model_id}/extensions", status_code=201)
+def admin_add_extension(
+    model_id: str, body: ExtensionValueCreate, _email: str = Depends(require_admin_session)
+):
+    if body.kind not in EXTENSION_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {EXTENSION_KINDS}")
+    if not body.value.strip():
+        raise HTTPException(status_code=400, detail="value must not be empty")
+    # Once a project has ANY bcf_extensions row, get_extensions() switches
+    # ALL kinds to DB-only mode (no more defaults) — see extension_value_lists()
+    # in bcf/projects.py. Seed every kind (including the one being changed)
+    # with its current defaults first, on a project's very first customization,
+    # so e.g. adding one extra topic_type doesn't wipe out the other defaults
+    # for topic_type itself or silently blank out the other kinds entirely.
+    if fetch_one("SELECT 1 FROM bcf_extensions WHERE model_id = %s LIMIT 1", (model_id,)) is None:
+        for kind in EXTENSION_KINDS:
+            for i, value in enumerate(default_extension_values(kind)):
+                execute(
+                    """
+                    INSERT INTO bcf_extensions (model_id, kind, value, sort_order)
+                    VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+                    """,
+                    (model_id, kind, value, i),
+                )
+    execute(
+        """
+        INSERT INTO bcf_extensions (model_id, kind, value, sort_order)
+        VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+        """,
+        (model_id, body.kind, body.value.strip(), body.sort_order),
+    )
+    return extension_value_lists(model_id)
+
+
+@router.delete("/admin/api/models/{model_id}/extensions/{kind}/{value}", status_code=204)
+def admin_delete_extension(
+    model_id: str, kind: str, value: str, _email: str = Depends(require_admin_session)
+):
+    execute(
+        "DELETE FROM bcf_extensions WHERE model_id = %s AND kind = %s AND value = %s",
+        (model_id, kind, value),
+    )

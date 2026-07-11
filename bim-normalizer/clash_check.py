@@ -57,6 +57,42 @@ def _resolve_id(check_file, global_id: str, resolve_application_ids: bool) -> st
         return global_id
 
 
+def _apply_mode_settings(clash_set: dict, mode: str, tolerance: float, clearance: float, allow_touching: bool) -> None:
+    if mode == "intersection":
+        clash_set["tolerance"] = tolerance
+        clash_set["check_all"] = True
+    elif mode == "collision":
+        clash_set["allow_touching"] = allow_touching
+    elif mode == "clearance":
+        clash_set["clearance"] = clearance
+        clash_set["check_all"] = True
+    else:
+        raise ValueError(f"Unknown clash mode: {mode!r}")
+
+
+def _extract_clashes(clash_set: dict, check_file_a, resolve_a: bool, check_file_b, resolve_b: bool) -> list[dict]:
+    # check_file_a/check_file_b are the same object for a same-model rule, or
+    # two different ifcopenshell files for a cross-model rule — each side's
+    # GlobalId is only ever meaningful (and only ever resolved) against the
+    # file it actually came from.
+    clashes = []
+    for c in clash_set.get("clashes", {}).values():
+        clash_type = c.get("type")
+        clashes.append({
+            "a_global_id": _resolve_id(check_file_a, c["a_global_id"], resolve_a),
+            "b_global_id": _resolve_id(check_file_b, c["b_global_id"], resolve_b),
+            "a_ifc_class": c["a_ifc_class"],
+            "b_ifc_class": c["b_ifc_class"],
+            "a_name": c["a_name"],
+            "b_name": c["b_name"],
+            "type": getattr(clash_type, "name", str(clash_type)),
+            "p1": list(c["p1"]),
+            "p2": list(c["p2"]),
+            "distance": c["distance"],
+        })
+    return clashes
+
+
 def _run_one_rule(check_file, tmp_path: str, rule: dict, resolve_application_ids: bool = False) -> dict:
     """
     Run a single clash rule against an already-open ifcopenshell file backed
@@ -94,36 +130,12 @@ def _run_one_rule(check_file, tmp_path: str, rule: dict, resolve_application_ids
     }
     if selector_b and selector_b != selector_a:
         clash_set["b"] = [{"file": tmp_path, "mode": "i", "selector": selector_b}]
-    if mode == "intersection":
-        clash_set["tolerance"] = tolerance
-        clash_set["check_all"] = True
-    elif mode == "collision":
-        clash_set["allow_touching"] = allow_touching
-    elif mode == "clearance":
-        clash_set["clearance"] = clearance
-        clash_set["check_all"] = True
-    else:
-        raise ValueError(f"Unknown clash mode: {mode!r}")
+    _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
 
     clasher.clash_sets = [clash_set]
     clasher.clash()
 
-    clashes = []
-    for c in clash_set.get("clashes", {}).values():
-        clash_type = c.get("type")
-        clashes.append({
-            "a_global_id": _resolve_id(check_file, c["a_global_id"], resolve_application_ids),
-            "b_global_id": _resolve_id(check_file, c["b_global_id"], resolve_application_ids),
-            "a_ifc_class": c["a_ifc_class"],
-            "b_ifc_class": c["b_ifc_class"],
-            "a_name": c["a_name"],
-            "b_name": c["b_name"],
-            "type": getattr(clash_type, "name", str(clash_type)),
-            "p1": list(c["p1"]),
-            "p2": list(c["p2"]),
-            "distance": c["distance"],
-        })
-
+    clashes = _extract_clashes(clash_set, check_file, resolve_application_ids, check_file, resolve_application_ids)
     return {**base_result, "count": len(clashes), "clashes": clashes}
 
 
@@ -171,6 +183,98 @@ def run_clash_checks(ifc_bytes: bytes, rules: list[dict], resolve_application_id
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _run_one_cross_rule(
+    check_file_a, tmp_path_a: str, check_file_b, tmp_path_b: str, rule: dict,
+    resolve_a: bool = False, resolve_b: bool = False,
+) -> dict:
+    """
+    Like _run_one_rule, but group "a" and group "b" always come from two
+    different IFC files (different models) instead of the same one — there
+    is no same-file self-clash fallback here, since A and B are never the
+    same model. selector_b defaults to selector_a when omitted, meaning
+    "the same IFC class on both sides" rather than "self-clash".
+    """
+    selector_a = rule["selector_a"]
+    selector_b = rule.get("selector_b") or selector_a
+    mode = rule.get("mode", "collision")
+    tolerance = rule.get("tolerance", 0.01)
+    clearance = rule.get("clearance", 0.1)
+    allow_touching = rule.get("allow_touching", True)
+
+    base_result = {
+        "name": rule.get("name"),
+        "mode": mode,
+        "selector_a": selector_a,
+        "selector_b": selector_b,
+    }
+
+    count_a = _with_geometry_count(check_file_a, selector_a)
+    count_b = _with_geometry_count(check_file_b, selector_b)
+    if count_a == 0 or count_b == 0:
+        return {**base_result, "count": 0, "clashes": []}
+
+    settings = ClashSettings()
+    settings.logger = logger
+    clasher = Clasher(settings)
+
+    clash_set = {
+        "name": rule.get("name") or "clash",
+        "a": [{"file": tmp_path_a, "mode": "i", "selector": selector_a}],
+        "b": [{"file": tmp_path_b, "mode": "i", "selector": selector_b}],
+        "mode": mode,
+    }
+    _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
+
+    clasher.clash_sets = [clash_set]
+    clasher.clash()
+
+    clashes = _extract_clashes(clash_set, check_file_a, resolve_a, check_file_b, resolve_b)
+    return {**base_result, "count": len(clashes), "clashes": clashes}
+
+
+def run_cross_model_clash_checks(
+    ifc_bytes_a: bytes, ifc_bytes_b: bytes, rules: list[dict],
+    resolve_a: bool = False, resolve_b: bool = False,
+) -> list[dict]:
+    """
+    Like run_clash_checks, but checks model A's elements against model B's
+    elements instead of one model against itself — the standard
+    cross-discipline clash workflow (e.g. structure vs architecture). Each
+    rule's selector_a is matched within model A and selector_b (or
+    selector_a again, if selector_b is omitted) within model B.
+
+    Both files are written to temp files and opened with ifcopenshell once,
+    shared across every rule, same as run_clash_checks.
+
+    resolve_a / resolve_b: pass True for whichever side's ifc_bytes came
+    from bim-normalizer's own synthetic export rather than a real original
+    IFC — see _resolve_id's docstring. The two sides are resolved
+    independently since either model can have its own IFC source.
+    """
+    tmp_path_a = tmp_path_b = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as f:
+            f.write(ifc_bytes_a)
+            tmp_path_a = f.name
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as f:
+            f.write(ifc_bytes_b)
+            tmp_path_b = f.name
+
+        check_file_a = ifcopenshell.open(tmp_path_a)
+        check_file_b = ifcopenshell.open(tmp_path_b)
+        return [
+            _run_one_cross_rule(check_file_a, tmp_path_a, check_file_b, tmp_path_b, rule, resolve_a, resolve_b)
+            for rule in rules
+        ]
+    finally:
+        for tmp_path in (tmp_path_a, tmp_path_b):
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 def run_clash_check(

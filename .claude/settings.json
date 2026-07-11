@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(python -c ' *)",
+      "mcp__playwright__browser_evaluate",
+      "Skill(artifact-design)",
+      "Skill(artifact-design:*)"
     ]
   }
 }

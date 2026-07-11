@@ -235,19 +235,19 @@ export function BcfTopicPanel({
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                        className="pointer-events-auto w-[350px] h-[500px] glass-card flex flex-col overflow-hidden mb-4 shadow-2xl"
+                        className="pointer-events-auto w-[350px] h-[500px] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
                     >
                         {/* Header */}
-                        <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-white/5">
-                            <div className="flex items-center gap-2">
-                                <BcfLogoIcon className="w-7 h-7" />
-                                <h3 className="font-semibold text-sm">BCF Topics</h3>
+                        <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between bg-white/5">
+                            <div className="flex items-center gap-1.5">
+                                <BcfLogoIcon className="w-5 h-5" />
+                                <h3 className="font-medium text-xs">BCF Topics</h3>
                             </div>
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-0.5">
                                 <button
                                     onClick={() => projectId && exportBcfzip(projectId)}
                                     disabled={!projectId || topics.length === 0}
-                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400 disabled:opacity-30"
+                                    className="p-1 hover:bg-white/10 rounded-md transition-colors text-zinc-400 disabled:opacity-30"
                                     title="Export all topics as .bcfzip"
                                 >
                                     <Download className="w-3.5 h-3.5" />
@@ -255,14 +255,14 @@ export function BcfTopicPanel({
                                 <button
                                     onClick={() => importInputRef.current?.click()}
                                     disabled={!projectId}
-                                    className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-zinc-400 disabled:opacity-30"
+                                    className="p-1 hover:bg-white/10 rounded-md transition-colors text-zinc-400 disabled:opacity-30"
                                     title="Import a .bcfzip"
                                 >
                                     <Upload className="w-3.5 h-3.5" />
                                 </button>
                                 <input ref={importInputRef} type="file" accept=".bcfzip,.zip" className="hidden" onChange={handleImportFile} />
-                                <button onClick={() => setIsOpen(false)} className="p-1 hover:bg-white/10 rounded-lg transition-colors">
-                                    <X className="w-4 h-4 text-zinc-400" />
+                                <button onClick={() => setIsOpen(false)} className="p-1 hover:bg-white/10 rounded-md transition-colors">
+                                    <X className="w-3.5 h-3.5 text-zinc-400" />
                                 </button>
                             </div>
                         </div>
@@ -274,11 +274,11 @@ export function BcfTopicPanel({
                                     Load a model to use BCF topics
                                 </p>
                             ) : creating ? (
-                                <div className="p-4 space-y-3">
+                                <div className="p-3 space-y-2">
                                     <button onClick={() => setCreating(false)} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200">
                                         <ChevronLeft className="w-3.5 h-3.5" /> Back
                                     </button>
-                                    <div className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded ${pendingViewpoint ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 bg-white/5'}`}>
+                                    <div className={`flex items-center gap-2 text-xs px-2 py-1 rounded ${pendingViewpoint ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 bg-white/5'}`}>
                                         <Camera className="w-3.5 h-3.5" />
                                         {pendingViewpoint ? 'Current view captured' : 'Capturing view…'}
                                     </div>
@@ -286,7 +286,7 @@ export function BcfTopicPanel({
                                         value={newTitle}
                                         onChange={(e) => setNewTitle(e.target.value)}
                                         placeholder="Title"
-                                        className="w-full px-2.5 py-1.5 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
+                                        className="w-full px-2 py-1 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
                                         autoFocus
                                     />
                                     <textarea
@@ -294,13 +294,13 @@ export function BcfTopicPanel({
                                         onChange={(e) => setNewDescription(e.target.value)}
                                         placeholder="Description (optional)"
                                         rows={3}
-                                        className="w-full px-2.5 py-1.5 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none resize-none"
+                                        className="w-full px-2 py-1 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none resize-none"
                                     />
-                                    <div className="flex gap-2">
-                                        <select value={newType} onChange={(e) => setNewType(e.target.value)} className="flex-1 px-2 py-1.5 text-xs rounded bg-black/20 border border-white/10">
+                                    <div className="flex gap-1.5">
+                                        <select value={newType} onChange={(e) => setNewType(e.target.value)} className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10">
                                             {TOPIC_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                                         </select>
-                                        <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} className="flex-1 px-2 py-1.5 text-xs rounded bg-black/20 border border-white/10">
+                                        <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10">
                                             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
                                         </select>
                                     </div>
@@ -308,23 +308,23 @@ export function BcfTopicPanel({
                                         value={author}
                                         onChange={(e) => setAuthor(e.target.value)}
                                         placeholder="Your name"
-                                        className="w-full px-2.5 py-1.5 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
+                                        className="w-full px-2 py-1 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
                                     />
                                     <button
                                         onClick={submitNewTopic}
                                         disabled={!newTitle.trim()}
-                                        className="w-full py-1.5 text-sm rounded bg-amber-500 text-black font-medium disabled:opacity-40"
+                                        className="w-full py-1 text-xs rounded bg-amber-500 text-black font-medium disabled:opacity-40"
                                     >
                                         Create Topic
                                     </button>
                                 </div>
                             ) : selectedTopic ? (
-                                <div className="p-4 space-y-3">
+                                <div className="p-3 space-y-2">
                                     <button onClick={() => setSelectedTopic(null)} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200">
                                         <ChevronLeft className="w-3.5 h-3.5" /> Back
                                     </button>
                                     <div className="flex items-start justify-between gap-2">
-                                        <h4 className="text-sm font-semibold text-zinc-200">{selectedTopic.title}</h4>
+                                        <h4 className="text-xs font-medium text-zinc-200">{selectedTopic.title}</h4>
                                         <button onClick={() => removeTopic(selectedTopic)} className="text-zinc-500 hover:text-red-400 shrink-0">
                                             <Trash2 className="w-3.5 h-3.5" />
                                         </button>
@@ -365,9 +365,9 @@ export function BcfTopicPanel({
                                         <img src={snapshotUrl} className="w-full rounded-lg border border-white/10" alt="Viewpoint snapshot" />
                                     )}
 
-                                    <div className="border-t border-white/10 pt-3 space-y-2">
+                                    <div className="border-t border-white/10 pt-2 space-y-1.5">
                                         {topicComments.map((c) => (
-                                            <div key={c.guid} className="text-xs bg-white/5 rounded-lg p-2">
+                                            <div key={c.guid} className="text-xs bg-white/5 rounded-md p-1.5">
                                                 <p className="text-zinc-300 whitespace-pre-wrap">{c.comment}</p>
                                                 <p className="text-[10px] text-zinc-500 mt-1">{c.author} · {new Date(c.date).toLocaleString()}</p>
                                             </div>
@@ -378,16 +378,16 @@ export function BcfTopicPanel({
                                                 onChange={(e) => setNewComment(e.target.value)}
                                                 onKeyDown={(e) => { if (e.key === 'Enter') submitComment() }}
                                                 placeholder="Add a comment…"
-                                                className="flex-1 px-2.5 py-1.5 text-xs rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
+                                                className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
                                             />
-                                            <button onClick={submitComment} disabled={!newComment.trim()} className="p-1.5 rounded bg-amber-500/20 text-amber-400 disabled:opacity-30">
+                                            <button onClick={submitComment} disabled={!newComment.trim()} className="p-1 rounded-md bg-amber-500/20 text-amber-400 disabled:opacity-30">
                                                 <Send className="w-3.5 h-3.5" />
                                             </button>
                                         </div>
                                     </div>
                                 </div>
                             ) : (
-                                <div className="p-2">
+                                <div className="p-1.5">
                                     {error && <p className="text-xs text-red-400 px-2 py-2">{error}</p>}
                                     {topics.length === 0 && (
                                         <p className="text-xs text-zinc-500 px-2 py-6 text-center">No BCF topics yet</p>
@@ -396,7 +396,7 @@ export function BcfTopicPanel({
                                         <button
                                             key={t.guid}
                                             onClick={() => openTopic(t)}
-                                            className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 transition-colors flex items-start gap-2"
+                                            className="w-full text-left px-2 py-1.5 rounded-md hover:bg-white/5 transition-colors flex items-start gap-2"
                                         >
                                             <Flag className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
                                             <div className="min-w-0 flex-1">
@@ -418,10 +418,10 @@ export function BcfTopicPanel({
 
                         {/* New Topic button */}
                         {projectId && !creating && !selectedTopic && (
-                            <div className="p-3 border-t border-white/10">
+                            <div className="p-2 border-t border-white/10">
                                 <button
                                     onClick={startCreating}
-                                    className="w-full flex items-center justify-center gap-1.5 py-1.5 text-sm rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
+                                    className="w-full flex items-center justify-center gap-1.5 py-1 text-xs rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
                                 >
                                     <Plus className="w-3.5 h-3.5" /> New Topic from current view
                                 </button>

@@ -25,6 +25,12 @@ import { AnimatePresence } from 'framer-motion'
 import ViewerToolbar from './ViewerToolbar'
 import { DiffBar } from './DiffBar'
 import { TimelinePlayer } from './TimelinePlayer'
+import { getNestedValue } from '../utils/propertyScanner'
+
+// Fallback color for elements whose field value isn't in the chart's colour
+// map (e.g. it fell outside the chart's top-N cutoff) — keeps the whole
+// model painted instead of leaving a confusing mix of coloured/original.
+const CHART_COLOR_OTHER = '#71717a'
 
 const MeasurementType = { PERPENDICULAR: 0, POINTTOPOINT: 1, AREA: 2, POINT: 3 }
 const DEFAULT_LIGHT = { enabled: true, castShadow: false, elevation: 1.33, azimuth: 0.75 }
@@ -124,7 +130,6 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     const [isFlyMode, setIsFlyMode] = useState(false)
     const [hiddenIds, setHiddenIds] = useState([])
     const [selectionCount, setSelectionCount] = useState(0)
-    const [activeColorField, setActiveColorField] = useState(null)
     const [measurementsActive, setMeasurementsActive] = useState(false)
     const [measurements, setMeasurements] = useState([])
     const [measurementOptions, setMeasurementOptions] = useState({
@@ -374,6 +379,20 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 }
             } catch (e) { console.warn('[SpeckleViewer] restoreBcfViewpoint error:', e) }
         },
+        // Paints every object by the value → colour mapping a chart panel is
+        // currently displaying (see the chart's "colour viewer by this chart"
+        // toggle). `valueColorMap` is built by AdaptiveCharts' buildValueColorMap
+        // so the model matches that chart's bars/slices exactly.
+        applyChartColors(field, valueColorMap) {
+            handleApplyChartColors(field, valueColorMap)
+        },
+        clearChartColors() {
+            handleClearChartColors()
+        },
+        // handleApplyChartColors/handleClearChartColors (useCallback([], ...) below) are
+        // deliberately omitted from deps: they're declared later in this render, so listing
+        // them here would read the binding before its own initializer runs.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }), [])
 
     // ─────────────────────────────────────────────────────────────
@@ -618,20 +637,35 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             // empty set — silently clearing the highlight the extension just applied.
             viewer.requestRender()  // ensure the auto-selection paints immediately at 30 FPS
 
-            setSelectionCount(1)
+            // Read the extension's own accumulated selection (it already handles
+            // ctrl/shift multi-select internally via event.multiple) instead of
+            // only ever reporting this single click's hit — otherwise React state
+            // never sees more than one selected element even when the 3D view
+            // clearly shows several highlighted.
+            const selectedRaws = viewer.getExtension(SelectionExtension)?.getSelectedObjects() || []
+            const selectedIds  = selectedRaws.map((r) => r?.id).filter(Boolean)
+            const idsToReport  = selectedIds.length ? selectedIds : [id]
+
+            setSelectionCount(idsToReport.length)
             // FilteringExtension's visibilityWalk matches against node.model.id
             // (= nodeId), not model.raw.id (= rawId). For instanced/duplicated
             // objects these differ, so hideObjects needs nodeId to take effect.
             lastSelectedSceneIdRef.current = nodeId || rawId
 
-            const element = elementMapRef.current.get(id)
-                         || elementMapRef.current.get(rawId)
-                         || elementMapRef.current.get(nodeId)
-            if (element) {
-                if (onElementClick) onElementClick(element)
-                if (onSelectionChange) onSelectionChange([element.id || element.speckle_id])
-            } else if (onElementClick && hit.node?.model?.raw) {
-                onElementClick({ id, speckle_type: hit.node.model.raw.speckle_type, ...hit.node.model.raw })
+            if (onSelectionChange) onSelectionChange(idsToReport)
+
+            // Only drive the single-element side panel when exactly one element
+            // is selected — refreshing it on every additional ctrl/shift-click
+            // would fight the user's intent to keep building up a selection.
+            if (idsToReport.length === 1 && onElementClick) {
+                const element = elementMapRef.current.get(id)
+                             || elementMapRef.current.get(rawId)
+                             || elementMapRef.current.get(nodeId)
+                if (element) {
+                    onElementClick(element)
+                } else if (hit.node?.model?.raw) {
+                    onElementClick({ id, speckle_type: hit.node.model.raw.speckle_type, ...hit.node.model.raw })
+                }
             }
         })
 
@@ -708,7 +742,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             setIsOrtho(false)
             setIsFlyMode(false)
             setHiddenIds([])
-            setActiveColorField(null)
+            viewer.getExtension(FilteringExtension)?.removeUserObjectColors()
             lastSelectedSceneIdRef.current = null
             if (onReadyRef.current) onReadyRef.current()
         } catch (error) {
@@ -1042,45 +1076,33 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         } catch (e) { log('showAllHidden', e) }
     }, [hiddenIds])
 
-    // ── Colour by property ───────────────────────────────────────────────────
-    // Assigns a distinct colour to each unique value of `field` across all elements.
-    const handleColorByProperty = useCallback((field) => {
+    // ── Colour by chart ───────────────────────────────────────────────────────
+    // Paints objects using the *exact* value → colour mapping a chart panel is
+    // currently rendering (built by AdaptiveCharts' buildValueColorMap), so the
+    // model matches that chart's bars/slices instead of an independent palette.
+    const handleApplyChartColors = useCallback((field, valueColorMap) => {
         try {
             const filterExt = viewerRef.current?.getExtension(FilteringExtension)
-            if (!filterExt) return
+            if (!filterExt || !field || !valueColorMap) return
 
-            if (!field) {
-                filterExt.removeUserObjectColors()
-                setActiveColorField(null)
-                return
-            }
-
-            // Group speckle IDs by field value using existing elementMapRef data
             const groups = {}
             for (const el of (speckleIdsRef.current.map(id => elementMapRef.current.get(id)).filter(Boolean))) {
-                const val = String(el[field] ?? 'Unknown')
-                if (!groups[val]) groups[val] = []
-                if (el.speckle_id) groups[val].push(el.speckle_id)
+                if (!el.speckle_id) continue
+                const val = String(getNestedValue(el, field) ?? 'Unknown')
+                const color = valueColorMap[val] || CHART_COLOR_OTHER
+                if (!groups[color]) groups[color] = []
+                groups[color].push(el.speckle_id)
             }
 
-            const palette = ['#A855F7','#3B82F6','#10B981','#F59E0B','#EC4899',
-                             '#6366F1','#0EA5E9','#EF4444','#14B8A6','#F97316',
-                             '#8B5CF6','#22D3EE','#4ADE80','#FB923C','#F472B6']
-            const colorGroups = Object.entries(groups).map(([, ids], i) => ({
-                objectIds: ids,
-                color: palette[i % palette.length],
-            }))
-
+            const colorGroups = Object.entries(groups).map(([color, ids]) => ({ objectIds: ids, color }))
             filterExt.setUserObjectColors(colorGroups)
-            setActiveColorField(field)
-        } catch (e) { log('colorByProperty', e) }
+        } catch (e) { log('applyChartColors', e) }
     }, [])
 
-    const handleRemoveColorFilter = useCallback(() => {
+    const handleClearChartColors = useCallback(() => {
         try {
             viewerRef.current?.getExtension(FilteringExtension)?.removeUserObjectColors()
-            setActiveColorField(null)
-        } catch (e) { log('removeColorFilter', e) }
+        } catch (e) { log('clearChartColors', e) }
     }, [])
 
     const handleScreenshot = useCallback(async () => {
@@ -1363,9 +1385,6 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     hiddenCount={hiddenIds.length}
                     onHideSelected={handleHideSelected}
                     onShowAllHidden={handleShowAllHidden}
-                    activeColorField={activeColorField}
-                    onColorByProperty={handleColorByProperty}
-                    onRemoveColorFilter={handleRemoveColorFilter}
                     lightConfig={lightConfig}
                     onSetLighting={handleLighting}
                     measurementsActive={measurementsActive}

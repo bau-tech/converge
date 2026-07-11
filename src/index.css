@@ -87,10 +87,12 @@
 body {
   min-height: 100vh;
   transition: background-color 0.3s ease, color 0.3s ease;
-  overflow-x: hidden;
-  overflow-y: auto;
 }
 
+/* overflow lives on html alone, not also on body — having both declare it
+   makes `position: sticky` unreliable for descendants (notably in Mobile
+   Safari), since the browser can't cleanly resolve a single nearest
+   scrolling ancestor when both html and body establish a scroll container. */
 html {
   overflow-x: hidden;
   overflow-y: auto;
@@ -445,6 +447,17 @@ html {
 }
 .light .custom-scrollbar {
   scrollbar-color: rgba(0,0,0,0.35) rgba(0,0,0,0.08);
+}
+
+/* Fully hides the scrollbar while leaving the element scrollable (touch/
+   trackpad/keyboard) — used by the viewer toolbar pill, where a visible
+   scrollbar track would cut through its rounded-full shape. */
+.no-scrollbar {
+  scrollbar-width: none;             /* Firefox */
+  -ms-overflow-style: none;          /* IE/Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;                     /* Chrome/Safari/WebKit */
 }
 
 /* Select styling - dark default */

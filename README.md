@@ -33,7 +33,7 @@ A React dashboard for BIM analysis, coordination, and validation connected to a 
 └──────────────┬───────────────────────────────────────────┘
                │ stdio (local)  or  HTTPS/streamable-HTTP (remote)
   ┌────────────▼────────────┐
-  │  speckle_mcp.py  :8003  │   FastMCP — 40+ tools
+  │  speckle_mcp.py  :8003  │   FastMCP — 50+ tools + 2 resources
   │  (speckle-ifc server)   │   ifcopenshell in-memory IFC session
   └────────────┬────────────┘
                │ REST
@@ -107,7 +107,7 @@ The `.mcp.json` in the project root is picked up automatically by Claude Code. S
 | `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile |
 | `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL, e.g. `http://localhost:8002` |
 | `PUBLIC_BASE_URL` | No | Publicly reachable base URL ending in `/normalizer`, used by nginx for the webhook auto-sync feature. Leave blank to disable auto-sync |
-| `AUTO_SYNC_SCAN_INTERVAL_S` | No | How often (seconds) to re-scan watched servers for new projects without a webhook yet (default `900`) |
+| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries (default `3600`). A project someone actually opens is scanned immediately via the frontend's on-load `POST /auto-sync/scan` instead of waiting for this interval |
 | `MCP_API_KEY` | No | Shared secret for remote streamable-HTTP MCP access; empty disables auth (local stdio only) |
 | `MCP_ALLOWED_HOSTS` | No | Comma-separated Host-header allow-list (DNS-rebinding protection) for the remote MCP server |
 | `BCF_API_KEY` | Yes (for BCF) | Shared Bearer credential between bcf-server and the dashboard's BCF panel. Required — an empty value sends `Authorization: Bearer ` and bcf-server rejects it |
@@ -125,7 +125,7 @@ The `.mcp.json` in the project root is picked up automatically by Claude Code. S
 | `SPECKLE_SERVER_URL` | Yes | Speckle server URL |
 | `SPECKLE_TOKEN` | Yes | Personal access token |
 | `PUBLIC_BASE_URL` | No | Publicly reachable base URL (through your reverse proxy) for the webhook auto-sync feature. Leave blank to disable |
-| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Re-scan interval in seconds for new projects (default `900`) |
+| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries (new-stream registration, missed commits, missed deletions). Default `3600` |
 | `PG_HOST` | Yes | PostgreSQL host — service refuses to start if unset |
 | `PG_PORT` | No | PostgreSQL port (default `5432`) |
 | `PG_USER` | Yes | PostgreSQL user — service refuses to start if unset |
@@ -145,8 +145,9 @@ The `.mcp.json` in the project root is picked up automatically by Claude Code. S
 |----------|----------|-------------|
 | `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | Yes | Same Postgres instance as bim-normalizer |
 | `PORT` | No | BCF server listen port (default `8004`) |
-| `BCF_API_KEY` | Yes | Shared Bearer credential checked on every BCF request |
-| `BCF_OIDC_SECRET` | No | Signs the fake `id_token` issued by the OAuth2/OIDC shim (`bcf/oauth.py`), needed for clients like BIMcollab ZOOM that require a real-looking login flow |
+| `BCF_API_KEY` | Yes | Shared Bearer credential checked on every BCF request; also gates the `/admin` panel |
+| `BCF_OIDC_SECRET` | No | Signs the `id_token` issued by the OAuth2/OIDC login flow (`bcf/oauth.py`) for clients like BIMcollab ZOOM that require a real-looking Authorization Code + PKCE flow. Falls back to `BCF_API_KEY`, then a hardcoded dev value, if unset |
+| `BCF_ADMIN_EMAIL` / `BCF_ADMIN_PASSWORD` | No | Idempotent startup seed for one `bcf_users` account, for convenience only — the `/admin` panel is always reachable via `BCF_API_KEY` regardless, so leaving these unset can't lock you out |
 
 ---
 
@@ -171,6 +172,10 @@ POST /ingest  {stream_id, commit_id}
   extract parameters       all property sets → bim_parameters rows
        │
   PostgreSQL upsert        bim_models + bim_elements + bim_geometry + bim_parameters
+       │
+  build embeddings         best-effort, batched — local CPU model (fastembed) embeds each new
+                           element's description into bim_element_embeddings for semantic search.
+                           Never fails the ingest; skipped elements are just missing from search.
 ```
 
 Re-running `/ingest` for a commit that is already stored returns immediately (idempotent fast path). Use `force: true` to re-classify from scratch. Speckle webhooks (`speckle/webhooks.py`) can drive this automatically — the backend registers webhooks on watched servers and re-ingests new commits with nobody's browser open (`PUBLIC_BASE_URL` + `AUTO_SYNC_SCAN_INTERVAL_S`).
@@ -180,11 +185,16 @@ Re-running `/ingest` for a commit that is already stored returns immediately (id
 ```
 bim_models          stream_id, commit_id, branch_name, source, author, ingested_at
   └── bim_elements  application_id, speckle_id, ifc_class, category, name, storey, hash
-        ├── bim_geometry      bbox, centroid, volume_m3, area_m2, mesh (JSONB)
-        ├── bim_parameters    pset, key, value, datatype
-        └── bim_relationships element_id → related_id, relation_type
+        ├── bim_geometry            bbox, centroid, volume_m3, area_m2, mesh (JSONB)
+        ├── bim_parameters          pset, key, value, datatype
+        ├── bim_relationships       element_id → related_id, relation_type
+        └── bim_element_embeddings  embed_text, embedding (FLOAT[]) — semantic search, search/embeddings.py
 
 bcf_*                projects, topics, comments, viewpoints (BCF-API 2.1/3.0 schema, bcf/db_schema.py)
+
+bim_jobs             job_id, job_type, status, payload, result, error (async job state — ingest/export/
+                     filter-publish/IDS-check/clash-check — DB-backed so a backend restart doesn't
+                     strand a polling client with an unrecoverable 404, db/jobs.py)
 ```
 
 ### REST API reference
@@ -196,8 +206,9 @@ bcf_*                projects, topics, comments, viewpoints (BCF-API 2.1/3.0 sch
 | `POST` | `/ingest` | Start async ingest job. Body: `{stream_id, commit_id, force?}` |
 | `GET` | `/ingest/status/{job_id}` | Poll job status |
 | `GET` | `/auto-sync/servers` | List servers watched for webhook-driven auto-sync |
-| `POST` | `/auto-sync/servers` | Add/update a watched server |
-| `POST` | `/webhooks/speckle/{webhook_row_id}` | Webhook receiver — Speckle calls this on new commits |
+| `POST` | `/auto-sync/servers` | Add/update a watched server. Enabling immediately triggers one scan rather than waiting for the periodic background pass |
+| `POST` | `/auto-sync/scan` | Fire an on-demand scan of every enabled server. Called by the frontend once on app load so a brand-new project's webhook registers immediately |
+| `POST` | `/webhooks/speckle/{webhook_row_id}` | Webhook receiver — Speckle calls this on `commit_create` (triggers ingest) as well as `stream_delete` / `commit_delete` / `branch_delete` (purges the matching local models and, for a deleted stream, their BCF topics too — Speckle is treated as the single source of truth) |
 
 #### Models
 
@@ -216,6 +227,7 @@ bcf_*                projects, topics, comments, viewpoints (BCF-API 2.1/3.0 sch
 | `GET` | `/models/{id}/elements/flat` | same + `limit`, `offset` | Elements enriched with geometry + material/profile/grade |
 | `GET` | `/models/{id}/elements/by-parameter` | parameter key/value filters | Elements matching arbitrary parameter values |
 | `GET` | `/models/{id}/elements/nearby` | `speckle_id`, `radius_m` | Elements within a radius of a given element's centroid |
+| `GET` | `/models/{id}/elements/semantic-search` | `query`, `limit` | Rank elements by meaning (cosine similarity over local embeddings) instead of exact text match — `[]` if the model predates this feature or the embed step failed at ingest |
 | `GET` | `/elements/{element_id}` | — | Single element with all parameters and geometry |
 | `GET` | `/models/{id}/parameters/keys` | — | Distinct parameter keys present on a model |
 | `GET` | `/models/{id}/parameters/completeness` | — | Per-parameter fill-rate across elements |
@@ -278,8 +290,8 @@ If the source is IFC, the original blob uploaded to the Speckle server is served
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/models/{id}/clash-check` | Run BVH mesh-level clash detection via `ifcclash` (same engine as BlenderBIM/Bonsai). Returns `{job_id}` |
-| `GET` | `/models/{id}/clash-check/{job_id}/status` | Poll clash job; results map clashing pairs to element `speckle_id`s for viewer highlight and optional BCF topic creation |
+| `POST` | `/models/{id}/clash-check` | Run BVH mesh-level clash detection via `ifcclash` (same engine as BlenderBIM/Bonsai). Body includes `rules[]` and an optional `compare_model_id` — when set, every rule's `selector_a` is checked against *this* model and `selector_b` against `compare_model_id` instead of the model against itself (cross-discipline clashes, e.g. structure vs architecture). Returns `{job_id}` |
+| `GET` | `/models/{id}/clash-check/{job_id}/status` | Poll clash job; results map clashing pairs to element `speckle_id`s for viewer highlight and optional BCF topic creation. For a cross-model check, `ifc_source` is null and `compare` holds `{model_b_id, ifc_source_a, ifc_source_b}` instead |
 
 #### AI Chat
 
@@ -330,11 +342,18 @@ docker network create speckle-network
 
 A standalone FastAPI process (`bcf_server.py`, same `bim-normalizer/` build context, separate container — mirrors how `speckle-mcp` is wired) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` since BIMcollab ZOOM only understands 2.1. Shares the same Postgres instance as bim-normalizer (`bcf_*` tables, initialised by `bcf/db_schema.py`).
 
+`bcf/projects.py` and `bcf/topics.py` share their router instances across both version mounts (`bcf_server.py`'s prefix loop), but the 2.1 and 3.0 schemas aren't identical — confirmed against the official `release_2_1`/`release_3_0` branches of the BCF-API spec, two fields differ and are branched at request time via `bcf.versions.is_bcf_v3(request)`: the assignable-users list in `GET .../extensions` is `user_id_type` in 2.1 but `users` in 3.0, and 3.0's `topic_GET`/`topic_POST` responses additionally require a `server_assigned_id` string (sourced from the otherwise-unused `"index"` column, backfilled for pre-existing rows by `BACKFILL_INDEX_SQL`). Getting either of these wrong under `/bcf/3.0/` is what made 3.0-based BIMcollab Manager plugins show "no assignable team members" when creating an issue, even though the same data is fine over `/bcf/2.1/`.
+
 | Module | Responsibility |
 |--------|-----------------|
 | `bcf/projects.py`, `bcf/topics.py`, `bcf/comments.py`, `bcf/viewpoints.py` | Core BCF-API resource routers |
 | `bcf/auth.py`, `bcf/auth_discovery.py` | Bearer-token auth + the `/auth` discovery endpoint |
-| `bcf/oauth.py` | Fake OAuth2/OIDC shim — some clients (confirmed: BIMcollab ZOOM) refuse the spec's Basic-Auth fallback and require a real-looking Authorization Code + PKCE flow with an `openid` scope. There are no real user accounts behind it; every request auto-approves a fixed identity |
+| `bcf/foundation.py` | OpenCDE Foundation API (`/foundation/{version}/auth`) — BCF 3.0 is an OpenCDE API and some clients look here before falling back to `/bcf/{version}/auth` |
+| `bcf/users.py` (`/bcf-bridge/users`) | `bcf_users` CRUD, backing both the admin panel and OAuth login |
+| `bcf/password.py` | bcrypt password hashing/verification for `bcf_users` |
+| `bcf/oauth.py` | Real OAuth2/OIDC login against `bcf_users` — some clients (confirmed: BIMcollab ZOOM) refuse the spec's Basic-Auth fallback and require a real-looking Authorization Code + PKCE flow with an `openid` scope. Issued tokens/sessions are in-memory only (lost on every restart) |
+| `bcf/admin.py` (`/admin`) | Standalone session-cookie-authenticated admin page (plain HTML/JS, no build step) — manage `bcf_users`, view/revoke active OAuth sessions, browse ingested models with their BCF topics (incl. snapshot thumbnails) and per-project `bcf_extensions` value lists, purge models/streams, and tail the last 100 non-`/health` requests this process has handled. Proxied at `/admin` by `nginx.conf.template` (same pattern as `/bcf/` and `/bcf-bridge/`) so it's reachable from the dashboard's own origin — linked from the "Admin" button in `BcfKanbanBoard.jsx`'s header, which opens it in a new tab |
+| `bcf/request_log.py` | In-memory ring buffer feeding the admin page's request log, fed by a middleware in `bcf_server.py` |
 | `bcf/bridge.py` (`/bcf-bridge/*`) | Resolves a Speckle `stream_id` to an ingested `model_id`, linking BCF projects to this app's own models |
 | `bcf/bcfxml.py` | `.bcfzip` file import/export (BCF-XML interop format every major BIM tool supports) |
 
@@ -414,6 +433,53 @@ Work on an in-memory `ifcopenshell` model loaded with `ifc_load` or `speckle_loa
 | `speckle_cost_estimate(model_id, rates_json, group_by?)` | Apply unit rates to quantities for a rough cost estimate |
 | `speckle_trend_analysis(model_id, limit?)` | Element/category counts across versions of a stream |
 
+#### Semantic search & agentic workflow tools
+Semantic search runs against embeddings computed automatically at ingest time (local CPU model,
+`search/embeddings.py` — no external API, no pgvector). The workflow tools are deterministic,
+hardcoded chains of the primitive tools above (no LLM reasoning happens inside the server) that
+return one consolidated report instead of requiring several separate calls.
+
+| Tool | Description |
+|------|-------------|
+| `speckle_semantic_search(model_id, query, limit?)` | Find elements by meaning rather than exact text — e.g. `"fire rated door"` matches even if those exact words never appear in the element's name/parameters |
+| `speckle_investigate_element(model_id, query, radius_m?)` | Resolves an element by name/description, then reports identity + parameters, nearby elements, and QA flags in one call — chains semantic search → `speckle_element_detail` → `speckle_find_nearby` → `speckle_qa_check` |
+| `speckle_full_qa_report(model_id)` | Full data-quality report: score, model context, real example elements per issue category (not just the 3 samples `speckle_qa_check` shows), and a fix list prioritized by weight × affected-count |
+| `speckle_investigate_clashes(model_id, rules_json, compare_model_id?)` | Runs clash detection and reports which categories/elements are actually colliding and where (grouped example pairs + distances), not just a count |
+| `speckle_schedule_status_report(model_id)` | Schedule health in one call: task counts by status, critical-path tasks, overdue tasks, and tasks with no elements linked |
+
+See [`bim-normalizer/testing-semantic-search.md`](bim-normalizer/testing-semantic-search.md) for how to verify these end-to-end after rebuilding.
+
+#### Clash & schedule tools
+Primitive building blocks the two workflow tools above are built on — use these directly when
+you just need the raw result rather than a synthesized report.
+
+| Tool | Description |
+|------|-------------|
+| `speckle_clash_check(model_id, rules_json, compare_model_id?)` | Run BVH mesh-level clash detection (ifcclash) and wait for the result (blocking, up to 5 min). `rules_json`: JSON array of `{name?, selector_a, selector_b?, mode?, tolerance?, clearance?}` |
+| `speckle_schedule(model_id)` | Full 4D task schedule tree — name, WBS code, status, dates, critical-path flag, linked element count |
+
+#### Cache maintenance
+Read-heavy tools (`speckle_get_summary`, `speckle_qa_check`, `speckle_qa_elements`,
+`speckle_semantic_search`, `speckle_parameter_keys`, `speckle_get_materials`,
+`speckle_get_profiles`, and the workflow tools' internal calls to those same endpoints) share a
+45-second in-process cache in `speckle_mcp.py` — smooths a burst of related calls in one exchange
+without ever risking staleness beyond well under a minute. Every write/mutating call bypasses it
+entirely.
+
+| Tool | Description |
+|------|-------------|
+| `speckle_cache_clear()` | Force-clear the cache — use right after a re-ingest if you need the very next read to be guaranteed-fresh |
+
+#### Resources (browsable context, not tool calls)
+| URI | Description |
+|-----|-------------|
+| `speckle://models` | All ingested models — id, stream, source, element count |
+| `speckle://models/{model_id}/summary` | One model's category/IFC-class/storey/material summary |
+
+See [`bim-normalizer/testing-clash-schedule-resources.md`](bim-normalizer/testing-clash-schedule-resources.md)
+for how to verify the clash/schedule tools, cache, and resources end-to-end. Unlike the semantic
+search round, this one only touches `speckle_mcp.py` — no `bim-normalizer` rebuild needed.
+
 #### 5D / Quantity tools (IFC session)
 Work on the model loaded with `ifc_load` or `speckle_load`.
 
@@ -480,7 +546,7 @@ npm run lint      # ESLint
 | `TimelinePlayer` | 4D build-up animation driven by date parameters |
 | `ValidationWidget` | BIM data quality checks |
 | `FilterWidget` / `ActiveFilters` / `filterRules.js` | Rule-based element filtering used across widgets, the viewer, and filter-publish |
-| `ClashCheckPanel` / `ClashLogoIcon` | Runs and displays `ifcclash` clash detection results, with click-to-highlight in the 3D viewer |
+| `ClashCheckPanel` / `ClashLogoIcon` | Runs and displays `ifcclash` clash detection results, with click-to-highlight in the 3D viewer. Supports checking a model against itself or against a second, separately selected model for cross-discipline clashes |
 | `IdsCheckPanel` / `IdsLogoIcon` | Runs and displays `ifctester` IDS validation results against stored specs |
 | `IdsGraphEditor` / `idsGraphNodeTypes` | Visual node-graph editor (`@xyflow/react`) for authoring IDS specifications without hand-writing XML |
 | `BcfTopicPanel` / `BcfLogoIcon` | BCF topic list/detail view — create, comment, and resolve issues |
@@ -598,8 +664,9 @@ speckle-dashboard/
 │       └── useDrawerWidth.js          Hook for resizable side-drawer width
 │
 ├── bim-normalizer/
-│   ├── main.py                        FastAPI app, all REST endpoints
-│   ├── speckle_mcp.py                 MCP server (40+ tools)
+│   ├── main.py                        FastAPI app: lifespan, middleware, /health, router wiring
+│   ├── job_registry.py                UUID validation + Content-Disposition header helpers shared by routers (job state itself lives in db/jobs.py, not here)
+│   ├── speckle_mcp.py                 MCP server (50+ tools + 2 resources)
 │   ├── bcf_server.py                  BCF-API 2.1/3.0 server (separate process/container)
 │   ├── clash_check.py                 Clash detection via ifcclash
 │   ├── ids_check.py                   IDS validation via ifctester
@@ -608,19 +675,31 @@ speckle-dashboard/
 │   ├── requirements.txt
 │   ├── .env                           secrets (not committed)
 │   ├── npm-mcp-setup.md               NPM reverse proxy setup guide
+│   ├── testing-semantic-search.md     How to verify semantic search + agentic QA/element tools
+│   ├── testing-clash-schedule-resources.md  How to verify clash/schedule tools, caching, resources
+│   ├── routers/                       One APIRouter module per REST API reference section below
+│   │   ├── dashboard.py, sync.py, chat.py, ingest.py, models.py, elements.py   Share links/layout, Speckle server config, AI chat, ingest, models, elements
+│   │   ├── analytics.py, timeline.py, debug.py, overrides.py                  Diff/summary/QA/CSV, 4D timeline/schedule, debug inspectors, classification overrides
+│   │   └── filter_publish.py, ifc_export.py, ids_check.py, clash_check.py     Filter-publish, IFC export/quantities, IDS checking, clash detection
 │   ├── bcf/
 │   │   ├── projects.py, topics.py, comments.py, viewpoints.py   Core BCF-API routers
 │   │   ├── auth.py, auth_discovery.py                            Bearer auth + discovery
-│   │   ├── oauth.py                                              Fake OIDC shim for BIMcollab ZOOM
+│   │   ├── foundation.py                                         OpenCDE Foundation API (/foundation/{version}/auth)
+│   │   ├── oauth.py                                              Real OAuth2/OIDC login against bcf_users, for BIMcollab ZOOM/Solibri
+│   │   ├── users.py, password.py                                 bcf_users CRUD + bcrypt hashing
+│   │   ├── admin.py                                              Standalone admin page (/admin) — users, sessions, models, extensions, request log
+│   │   ├── request_log.py                                        In-memory ring buffer of recent HTTP requests, surfaced in admin.py
 │   │   ├── bridge.py                                             Speckle stream_id ↔ model_id resolution
 │   │   ├── bcfxml.py                                             .bcfzip import/export
 │   │   ├── db.py, db_schema.py                                   BCF Postgres schema + queries
 │   │   ├── schemas.py                                            Pydantic models
-│   │   └── versions.py                                           BCF version constants
+│   │   └── versions.py                                           BCF version constants + is_bcf_v3() request-path detection
 │   ├── chat/
 │   │   └── agent.py                   Agentic chat backend (LLM + DB tools)
 │   ├── pipeline/
-│   │   └── normalize.py               Ingest pipeline orchestrator
+│   │   └── normalize.py               Ingest pipeline orchestrator (incl. best-effort embedding step)
+│   ├── search/
+│   │   └── embeddings.py              Local CPU embedding model (fastembed) + cosine similarity for semantic search
 │   ├── speckle/
 │   │   ├── fetch.py                   Speckle commit fetch + element flattening
 │   │   ├── client.py                  SpecklePy client wrapper
@@ -637,6 +716,8 @@ speckle-dashboard/
 │   │   ├── connection.py              Connection pool
 │   │   ├── insert.py                  Upsert helpers
 │   │   ├── query.py                   Summary, QA, flat element queries
+│   │   ├── jobs.py                    DB-backed async job tracking (bim_jobs table)
+│   │   ├── purge.py                   Deletes local models (+ cascaded data) mirroring a Speckle-side deletion
 │   │   ├── timeline.py                4D parameter discovery
 │   │   └── schedule.py                4D schedule: IFC work schedule + P6 XML import
 │   └── config/

@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import {
     Calendar, Upload, ChevronRight, ChevronDown,
-    Clock, Loader2, AlertCircle, Link
+    Clock, Loader2, AlertCircle, Link, Link2Off, Plus, X, Pencil, Trash2, Flame
 } from 'lucide-react'
 
 const GANTT_PX = 560
@@ -80,7 +80,7 @@ function TaskBar({ task, leftPct, widthPct, isActive }) {
     )
 }
 
-export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFilterElements }) {
+export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFilterElements, viewerSelectedIds }) {
     const [schedule, setSchedule]     = useState(null)
     const [loading, setLoading]       = useState(false)
     const [error, setError]           = useState(null)
@@ -88,6 +88,23 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
     const [collapsed, setCollapsed]   = useState(new Set())
     const [activeTaskId, setActiveTaskId] = useState(null)
     const [search, setSearch]         = useState('')
+    const [showNewTask, setShowNewTask] = useState(false)
+    const [newTaskName, setNewTaskName] = useState('')
+    const [newTaskStart, setNewTaskStart] = useState('')
+    const [newTaskFinish, setNewTaskFinish] = useState('')
+    const [newTaskParent, setNewTaskParent] = useState('')
+    const [newTaskWbs, setNewTaskWbs] = useState('')
+    const [creatingTask, setCreatingTask] = useState(false)
+    const [linking, setLinking] = useState(false)
+    const [editingTask, setEditingTask] = useState(false)
+    const [editName, setEditName] = useState('')
+    const [editStart, setEditStart] = useState('')
+    const [editFinish, setEditFinish] = useState('')
+    const [editParent, setEditParent] = useState('')
+    const [editWbs, setEditWbs] = useState('')
+    const [savingEdit, setSavingEdit] = useState(false)
+    const [deletingTask, setDeletingTask] = useState(false)
+    const [criticalHighlighted, setCriticalHighlighted] = useState(false)
     const fileInputRef = useRef(null)
     const base = normalizerUrl || ''
 
@@ -98,7 +115,41 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
         setSearch('')
         setError(null)
         setSchedule(null)
+        setShowNewTask(false)
+        setEditingTask(false)
+        setCriticalHighlighted(false)
     }, [normalizerModelId])
+
+    // Union of speckle_ids across every critical-path task, for the "Critical Path" toggle
+    const criticalElementIds = useMemo(() => {
+        if (!schedule?.tasks?.length) return []
+        const ids = new Set()
+        for (const t of schedule.tasks) {
+            if (t.is_critical) {
+                for (const id of (t.speckle_ids || [])) ids.add(id)
+            }
+        }
+        return Array.from(ids)
+    }, [schedule])
+
+    const toggleCriticalPath = () => {
+        if (criticalHighlighted) {
+            setCriticalHighlighted(false)
+            onFilterElements?.(null)
+        } else {
+            setActiveTaskId(null)
+            setCriticalHighlighted(true)
+            onFilterElements?.(criticalElementIds.length > 0 ? criticalElementIds : null)
+        }
+    }
+
+    const reloadSchedule = useCallback(async () => {
+        const res = await fetch(`${base}/models/${normalizerModelId}/schedule`)
+        if (!res.ok) throw new Error(`Reload failed: HTTP ${res.status}`)
+        const data = await res.json()
+        setSchedule(data)
+        return data
+    }, [base, normalizerModelId])
 
     useEffect(() => {
         if (!normalizerModelId) return
@@ -124,11 +175,7 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                 const body = await res.json().catch(() => ({}))
                 throw new Error(body.detail || `HTTP ${res.status}`)
             }
-            // Reload schedule, checking for errors
-            const reload = await fetch(`${base}/models/${normalizerModelId}/schedule`)
-            if (!reload.ok) throw new Error(`Reload failed: HTTP ${reload.status}`)
-            const data = await reload.json()
-            setSchedule(data)
+            await reloadSchedule()
             setCollapsed(new Set())
             setActiveTaskId(null)
         } catch (err) {
@@ -138,6 +185,179 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
             if (fileInputRef.current) fileInputRef.current.value = ''
         }
     }
+
+    // Suggest the next WBS code under a given parent (e.g. parent "1.2" with 7
+    // existing children -> "1.2.8"); blank when the parent has no code of its own.
+    const suggestWbsFor = (parentId) => {
+        if (!parentId || !schedule?.tasks) return ''
+        const parent = schedule.tasks.find(t => t.task_id === parentId)
+        if (!parent?.wbs_code) return ''
+        const siblingCount = schedule.tasks.filter(t => t.parent_task_id === parentId).length
+        return `${parent.wbs_code}.${siblingCount + 1}`
+    }
+
+    const handleCreateTask = async () => {
+        if (!newTaskName.trim() || !normalizerModelId) return
+        setCreatingTask(true)
+        setError(null)
+        try {
+            const res = await fetch(`${base}/models/${normalizerModelId}/schedule/tasks`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: newTaskName.trim(),
+                    planned_start: newTaskStart || null,
+                    planned_finish: newTaskFinish || null,
+                    parent_task_id: newTaskParent || null,
+                    wbs_code: newTaskWbs.trim() || null,
+                }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `HTTP ${res.status}`)
+            }
+            await reloadSchedule()
+            setNewTaskName('')
+            setNewTaskStart('')
+            setNewTaskFinish('')
+            setNewTaskParent('')
+            setNewTaskWbs('')
+            setShowNewTask(false)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setCreatingTask(false)
+        }
+    }
+
+    const handleLinkSelection = async (mode) => {
+        if (!activeTaskId || !viewerSelectedIds?.length || !normalizerModelId) return
+        setLinking(true)
+        setError(null)
+        try {
+            const res = await fetch(`${base}/models/${normalizerModelId}/schedule/tasks/${activeTaskId}/elements`, {
+                method: mode === 'link' ? 'POST' : 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ speckle_ids: viewerSelectedIds }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `HTTP ${res.status}`)
+            }
+            await reloadSchedule()
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setLinking(false)
+        }
+    }
+
+    const startEditingTask = (task) => {
+        setEditName(task.name || '')
+        setEditStart(task.planned_start || '')
+        setEditFinish(task.planned_finish || '')
+        setEditParent(task.parent_task_id || '')
+        setEditWbs(task.wbs_code || '')
+        setEditingTask(true)
+    }
+
+    const handleSaveEdit = async () => {
+        if (!activeTaskId || !editName.trim() || !normalizerModelId) return
+        setSavingEdit(true)
+        setError(null)
+        try {
+            const res = await fetch(`${base}/models/${normalizerModelId}/schedule/tasks/${activeTaskId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: editName.trim(),
+                    planned_start: editStart || null,
+                    planned_finish: editFinish || null,
+                    parent_task_id: editParent || null,
+                    wbs_code: editWbs.trim() || null,
+                }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `HTTP ${res.status}`)
+            }
+            await reloadSchedule()
+            setEditingTask(false)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setSavingEdit(false)
+        }
+    }
+
+    const handleDeleteTask = async () => {
+        if (!activeTaskId || !normalizerModelId) return
+        if (!window.confirm('Delete this task? This also removes it from the 4D timeline.')) return
+        setDeletingTask(true)
+        setError(null)
+        try {
+            const res = await fetch(`${base}/models/${normalizerModelId}/schedule/tasks/${activeTaskId}`, {
+                method: 'DELETE',
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `HTTP ${res.status}`)
+            }
+            await reloadSchedule()
+            setActiveTaskId(null)
+            setEditingTask(false)
+            onFilterElements?.(null)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setDeletingTask(false)
+        }
+    }
+
+    // Flat list of all tasks (independent of search/collapse) for parent-task pickers
+    const taskOptions = useMemo(() => {
+        if (!schedule?.tasks?.length) return []
+        const byId = new Map(schedule.tasks.map(t => [t.task_id, t]))
+        const depthOf = (task) => {
+            let depth = 0
+            let current = task
+            const seen = new Set()
+            while (current?.parent_task_id && !seen.has(current.task_id)) {
+                seen.add(current.task_id)
+                current = byId.get(current.parent_task_id)
+                depth++
+            }
+            return depth
+        }
+        return schedule.tasks
+            .slice()
+            .sort((a, b) => a.sort_order - b.sort_order)
+            .map(t => ({ ...t, depth: depthOf(t) }))
+    }, [schedule])
+
+    // When editing a task, its own subtree can't become its parent (would create a cycle)
+    const editExcludedIds = useMemo(() => {
+        if (!activeTaskId || !schedule?.tasks?.length) return new Set()
+        const childrenOf = {}
+        for (const t of schedule.tasks) {
+            if (t.parent_task_id) {
+                if (!childrenOf[t.parent_task_id]) childrenOf[t.parent_task_id] = []
+                childrenOf[t.parent_task_id].push(t.task_id)
+            }
+        }
+        const excluded = new Set([activeTaskId])
+        const stack = [activeTaskId]
+        while (stack.length) {
+            const id = stack.pop()
+            for (const childId of (childrenOf[id] || [])) {
+                if (!excluded.has(childId)) {
+                    excluded.add(childId)
+                    stack.push(childId)
+                }
+            }
+        }
+        return excluded
+    }, [activeTaskId, schedule])
 
     // Build O(n) child map then traverse in WBS order
     const { visibleTasks, childCounts } = useMemo(() => {
@@ -200,6 +420,8 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
     const handleTaskClick = (task) => {
         const isAlreadyActive = activeTaskId === task.task_id
         setActiveTaskId(isAlreadyActive ? null : task.task_id)
+        setEditingTask(false)
+        setCriticalHighlighted(false)
         if (task.element_count > 0) {
             onFilterElements?.(isAlreadyActive ? null : (task.speckle_ids ?? []))
         }
@@ -252,6 +474,23 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                         className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 w-36"
                     />
                 )}
+                {hasTasks && (
+                    <button
+                        onClick={toggleCriticalPath}
+                        disabled={criticalElementIds.length === 0}
+                        aria-label={criticalHighlighted ? 'Stop isolating critical path elements' : 'Isolate critical path elements in the 3D viewer'}
+                        aria-pressed={criticalHighlighted}
+                        title={criticalElementIds.length === 0 ? 'No critical-path elements linked yet' : undefined}
+                        className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors disabled:opacity-40 shrink-0 ${
+                            criticalHighlighted
+                                ? 'bg-red-500/20 text-red-400 border-red-500/30'
+                                : 'bg-white/5 text-zinc-300 hover:bg-white/10 border-white/10'
+                        }`}
+                    >
+                        <Flame className="w-3 h-3" />
+                        Critical Path
+                    </button>
+                )}
                 <div className="flex-1" />
                 {error && (
                     <span className="flex items-center gap-1 text-xs text-red-400">
@@ -260,17 +499,220 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                     </span>
                 )}
                 <button
+                    onClick={() => setShowNewTask(v => {
+                        const opening = !v
+                        if (opening) {
+                            setNewTaskParent(activeTaskId || '')
+                            setNewTaskWbs(suggestWbsFor(activeTaskId || ''))
+                        }
+                        return opening
+                    })}
+                    disabled={loading}
+                    aria-label="Create a new task manually"
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-white/5 text-zinc-300 hover:bg-white/10 border border-white/10 transition-colors disabled:opacity-50 shrink-0"
+                >
+                    <Plus className="w-3 h-3" />
+                    New Task
+                </button>
+                <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading || loading}
-                    aria-label={uploading ? 'Importing IFC schedule…' : 'Import IFC file containing IfcWorkSchedule'}
+                    aria-label={uploading ? 'Importing schedule…' : 'Import an IFC file (IfcWorkSchedule) or MS Project XML (MSPDI) export'}
                     aria-busy={uploading}
                     className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 border border-amber-500/20 transition-colors disabled:opacity-50 shrink-0"
                 >
                     {uploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                    {uploading ? 'Importing…' : 'Import IFC'}
+                    {uploading ? 'Importing…' : 'Import Schedule'}
                 </button>
-                <input ref={fileInputRef} type="file" accept=".ifc" className="hidden" onChange={handleUpload} />
+                <input ref={fileInputRef} type="file" accept=".ifc,.xml" className="hidden" onChange={handleUpload} />
             </div>
+
+            {/* New task inline form */}
+            {showNewTask && (
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 shrink-0 bg-white/[0.02]">
+                    <input
+                        value={newTaskName}
+                        onChange={e => setNewTaskName(e.target.value)}
+                        placeholder="Task name"
+                        disabled={creatingTask}
+                        className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <select
+                        value={newTaskParent}
+                        onChange={e => {
+                            const pid = e.target.value
+                            setNewTaskParent(pid)
+                            setNewTaskWbs(suggestWbsFor(pid))
+                        }}
+                        disabled={creatingTask}
+                        aria-label="Parent task"
+                        title="Parent task"
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50 max-w-[160px]"
+                    >
+                        <option value="">— top level —</option>
+                        {taskOptions.map(t => (
+                            <option key={t.task_id} value={t.task_id}>
+                                {'—'.repeat(t.depth)} {t.wbs_code ? `${t.wbs_code} ` : ''}{t.name}
+                            </option>
+                        ))}
+                    </select>
+                    <input
+                        value={newTaskWbs}
+                        onChange={e => setNewTaskWbs(e.target.value)}
+                        placeholder="WBS #"
+                        disabled={creatingTask}
+                        title="WBS / sequence number (e.g. 1.2.8)"
+                        className="w-20 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <input
+                        type="date"
+                        value={newTaskStart}
+                        onChange={e => setNewTaskStart(e.target.value)}
+                        disabled={creatingTask}
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <input
+                        type="date"
+                        value={newTaskFinish}
+                        onChange={e => setNewTaskFinish(e.target.value)}
+                        disabled={creatingTask}
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <button
+                        onClick={handleCreateTask}
+                        disabled={creatingTask || !newTaskName.trim()}
+                        className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 border border-amber-500/20 transition-colors disabled:opacity-50 shrink-0"
+                    >
+                        {creatingTask ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Create'}
+                    </button>
+                    <button
+                        onClick={() => setShowNewTask(false)}
+                        disabled={creatingTask}
+                        className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
+                        aria-label="Cancel"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
+
+            {/* Active task: edit / delete */}
+            {activeTaskId && !editingTask && (
+                <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 shrink-0 bg-white/[0.02]">
+                    <span className="text-[11px] text-zinc-400 truncate flex-1">
+                        {schedule?.tasks?.find(t => t.task_id === activeTaskId)?.name}
+                    </span>
+                    <button
+                        onClick={() => {
+                            const t = schedule?.tasks?.find(t => t.task_id === activeTaskId)
+                            if (t) startEditingTask(t)
+                        }}
+                        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-white/5 text-zinc-300 hover:bg-white/10 border border-white/10 transition-colors"
+                    >
+                        <Pencil className="w-3 h-3" />
+                        Edit
+                    </button>
+                    <button
+                        onClick={handleDeleteTask}
+                        disabled={deletingTask}
+                        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
+                    >
+                        {deletingTask ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                        Delete
+                    </button>
+                </div>
+            )}
+
+            {/* Edit task inline form */}
+            {activeTaskId && editingTask && (
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 shrink-0 bg-white/[0.02]">
+                    <input
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
+                        placeholder="Task name"
+                        disabled={savingEdit}
+                        className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <select
+                        value={editParent}
+                        onChange={e => setEditParent(e.target.value)}
+                        disabled={savingEdit}
+                        aria-label="Parent task"
+                        title="Parent task"
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50 max-w-[160px]"
+                    >
+                        <option value="">— top level —</option>
+                        {taskOptions.filter(t => !editExcludedIds.has(t.task_id)).map(t => (
+                            <option key={t.task_id} value={t.task_id}>
+                                {'—'.repeat(t.depth)} {t.wbs_code ? `${t.wbs_code} ` : ''}{t.name}
+                            </option>
+                        ))}
+                    </select>
+                    <input
+                        value={editWbs}
+                        onChange={e => setEditWbs(e.target.value)}
+                        placeholder="WBS #"
+                        disabled={savingEdit}
+                        title="WBS / sequence number (e.g. 1.2.8)"
+                        className="w-20 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <input
+                        type="date"
+                        value={editStart}
+                        onChange={e => setEditStart(e.target.value)}
+                        disabled={savingEdit}
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <input
+                        type="date"
+                        value={editFinish}
+                        onChange={e => setEditFinish(e.target.value)}
+                        disabled={savingEdit}
+                        className="bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                    />
+                    <button
+                        onClick={handleSaveEdit}
+                        disabled={savingEdit || !editName.trim()}
+                        className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 border border-amber-500/20 transition-colors disabled:opacity-50 shrink-0"
+                    >
+                        {savingEdit ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save'}
+                    </button>
+                    <button
+                        onClick={() => setEditingTask(false)}
+                        disabled={savingEdit}
+                        className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
+                        aria-label="Cancel edit"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
+
+            {/* Link/unlink current 3D selection to the active task */}
+            {activeTaskId && viewerSelectedIds?.length > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 shrink-0 bg-amber-500/[0.04]">
+                    <span className="text-[11px] text-zinc-400">
+                        {viewerSelectedIds.length} element{viewerSelectedIds.length !== 1 ? 's' : ''} selected in viewer
+                    </span>
+                    <div className="flex-1" />
+                    <button
+                        onClick={() => handleLinkSelection('link')}
+                        disabled={linking}
+                        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-green-500/15 text-green-400 hover:bg-green-500/25 border border-green-500/20 transition-colors disabled:opacity-50"
+                    >
+                        {linking ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link className="w-3 h-3" />}
+                        Link selected
+                    </button>
+                    <button
+                        onClick={() => handleLinkSelection('unlink')}
+                        disabled={linking}
+                        className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors disabled:opacity-50"
+                    >
+                        {linking ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2Off className="w-3 h-3" />}
+                        Unlink selected
+                    </button>
+                </div>
+            )}
 
             {/* Body */}
             {loading ? (
@@ -282,7 +724,7 @@ export default function ScheduleWidget({ normalizerModelId, normalizerUrl, onFil
                     <Calendar className="w-12 h-12 text-zinc-700" />
                     <p className="text-sm text-zinc-500 font-medium">No schedule data found</p>
                     <p className="text-xs text-zinc-600 max-w-xs">
-                        Upload an IFC file that contains an <code className="text-zinc-400">IfcWorkSchedule</code> to enable 4D construction simulation.
+                        Upload an IFC file that contains an <code className="text-zinc-400">IfcWorkSchedule</code>, or an MS Project XML (MSPDI) export, to enable 4D construction simulation.
                     </p>
                 </div>
             ) : (

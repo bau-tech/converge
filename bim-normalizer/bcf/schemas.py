@@ -71,6 +71,12 @@ class ViewpointCreate(BaseModel):
     snapshot_base64: str | None = None
 
 
+class ExtensionValueCreate(BaseModel):
+    kind: str
+    value: str
+    sort_order: int = 0
+
+
 class UserCreate(BaseModel):
     email: str
     name: str

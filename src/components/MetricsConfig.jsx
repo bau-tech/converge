@@ -88,25 +88,25 @@ export function MetricsConfig({ metrics, onConfigChange, currentConfig = {} }) {
                             initial={{ opacity: 0, scale: 0.95, y: 20 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                            className="glass-card shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col"
+                            className="panel-thin shadow-2xl w-full max-w-md max-h-[70vh] overflow-hidden flex flex-col"
                             onClick={(e) => e.stopPropagation()}
                         >
                             {/* Header */}
-                            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--speckle-outline-3)]">
-                                <div className="flex items-center gap-2">
-                                    <Settings className="w-5 h-5 text-[var(--speckle-outline-1)]" />
-                                    <h2 className="text-sm font-semibold">Configure Metrics</h2>
+                            <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--speckle-outline-3)]">
+                                <div className="flex items-center gap-1.5">
+                                    <Settings className="w-3.5 h-3.5 text-[var(--speckle-outline-1)]" />
+                                    <h2 className="text-xs font-medium">Configure Metrics</h2>
                                 </div>
                                 <button
                                     onClick={() => setIsOpen(false)}
-                                    className="p-2 hover:bg-[var(--speckle-outline-3)] rounded-md transition-colors"
+                                    className="p-1 hover:bg-[var(--speckle-outline-3)] rounded transition-colors"
                                 >
-                                    <X className="w-5 h-5" />
+                                    <X className="w-3.5 h-3.5" />
                                 </button>
                             </div>
 
                             {/* Content */}
-                            <div className="flex-1 overflow-y-auto p-5 space-y-3 custom-scrollbar">
+                            <div className="flex-1 overflow-y-auto p-2 space-y-1.5 custom-scrollbar">
                                 {metrics.map((metric) => {
                                     const metricConfig = config[metric.key] || {}
                                     const isVisible = metricConfig.visible ?? true
@@ -116,35 +116,35 @@ export function MetricsConfig({ metrics, onConfigChange, currentConfig = {} }) {
                                     return (
                                         <div
                                             key={metric.key}
-                                            className={`glass rounded-md p-3 transition-opacity ${!isVisible ? 'opacity-50' : ''}`}
+                                            className={`glass rounded-md p-2 transition-opacity ${!isVisible ? 'opacity-50' : ''}`}
                                         >
-                                            <div className="flex items-start gap-3">
+                                            <div className="flex items-start gap-2">
                                                 {/* Visibility Toggle */}
                                                 <button
                                                     onClick={() => handleToggleVisibility(metric.key)}
-                                                    className="p-2 hover:bg-[var(--speckle-outline-3)] rounded-md transition-colors flex-shrink-0 mt-1"
+                                                    className="p-1 hover:bg-[var(--speckle-outline-3)] rounded transition-colors flex-shrink-0"
                                                     title={isVisible ? 'Hide' : 'Show'}
                                                 >
                                                     {isVisible ? (
-                                                        <Eye className="w-4 h-4 text-[var(--speckle-outline-1)]" />
+                                                        <Eye className="w-3.5 h-3.5 text-[var(--speckle-outline-1)]" />
                                                     ) : (
-                                                        <EyeOff className="w-4 h-4 text-[var(--speckle-foreground-3)]" />
+                                                        <EyeOff className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)]" />
                                                     )}
                                                 </button>
 
-                                                <div className="flex-1 min-w-0 space-y-2">
+                                                <div className="flex-1 min-w-0 space-y-1.5">
                                                     {/* Metric Name */}
                                                     <div>
-                                                        <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-1">Metric Key</p>
-                                                        <p className="text-sm font-mono text-[var(--speckle-foreground-2)] truncate">
+                                                        <p className="text-[9px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Metric Key</p>
+                                                        <p className="text-xs font-mono text-[var(--speckle-foreground-2)] truncate">
                                                             {metric.key}
                                                         </p>
                                                     </div>
 
                                                     {/* Custom Display Name */}
                                                     <div>
-                                                        <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                            <Type className="w-3 h-3" />
+                                                        <label className="text-[9px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-0.5 flex items-center gap-1">
+                                                            <Type className="w-2.5 h-2.5" />
                                                             Custom Display Name
                                                         </label>
                                                         <input
@@ -159,11 +159,11 @@ export function MetricsConfig({ metrics, onConfigChange, currentConfig = {} }) {
 
                                                     {/* Size Selector */}
                                                     <div>
-                                                        <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                            <Maximize2 className="w-3 h-3" />
+                                                        <label className="text-[9px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-0.5 flex items-center gap-1">
+                                                            <Maximize2 className="w-2.5 h-2.5" />
                                                             Size
                                                         </label>
-                                                        <div className="flex gap-1.5">
+                                                        <div className="flex gap-1">
                                                             {SIZE_OPTIONS.map(option => (
                                                                 <button
                                                                     key={option.value}
@@ -184,23 +184,23 @@ export function MetricsConfig({ metrics, onConfigChange, currentConfig = {} }) {
                             </div>
 
                             {/* Footer */}
-                            <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation)]/30">
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation)]/30">
                                 <button
                                     onClick={handleReset}
-                                    className="px-4 py-2.5 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-sm"
+                                    className="px-2.5 py-1 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-[11px]"
                                 >
                                     Reset to Default
                                 </button>
-                                <div className="flex gap-3">
+                                <div className="flex gap-2">
                                     <button
                                         onClick={() => setIsOpen(false)}
-                                        className="px-4 py-2.5 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-sm"
+                                        className="px-2.5 py-1 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-[11px]"
                                     >
                                         Cancel
                                     </button>
                                     <button
                                         onClick={handleSave}
-                                        className="px-4 py-2.5 rounded-md text-sm font-medium bg-[var(--speckle-outline-1)] text-white hover:opacity-90 transition-all"
+                                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--speckle-outline-1)] text-white hover:opacity-90 transition-all"
                                     >
                                         Save Changes
                                     </button>

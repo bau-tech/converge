@@ -1,12 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Pin, PinOff } from 'lucide-react'
+import { X, Pin, PinOff, Lock, Unlock } from 'lucide-react'
 import GridLayout from 'react-grid-layout'
 import 'react-grid-layout/css/styles.css'
 import 'react-resizable/css/styles.css'
 import { settingBtnCls, settingBtnInactive, settingBtnActive, settingInputCls, ColorRow } from './chartSettingsUI'
 
 const MOBILE_BREAKPOINT = 768
+// iPhone 7 reference viewport (375x667 CSS px) — mobile panel heights are
+// fixed px fractions of this, not vh. vh is unreliable in mobile Safari: it's
+// computed against the *largest* possible viewport (address bar collapsed),
+// so 50vh measured while the address bar is showing is taller than the
+// visible area, and the value jumps as the address bar shows/hides on
+// scroll. A fixed px height tied to a real device viewport doesn't move.
+const MOBILE_VIEWPORT_HEIGHT = 667
+const MOBILE_PANEL_HEIGHT = Math.round(MOBILE_VIEWPORT_HEIGHT / 2)  // half the screen — viewer and charts/widgets alike
 // Bumped v4 -> v5 to force everyone onto the new compact default sizing below
 // (viewer + 4 charts + a table all fit on one screen without scrolling).
 //
@@ -54,13 +62,32 @@ const MOBILE_BREAKPOINT = 768
 //
 // v11 -> v12: SLOT_H rescaled (5 -> 3) to track the viewer's new 5x5 size —
 // slots stay at half the viewer's width/height (now square, like the viewer).
-const LAYOUT_KEY = 'dashboard-panel-layout-v12'
+//
+// v12 -> v13: granularity doubling again (drag/resize snapping was too
+// coarse), but unlike v5->v6/v8->v9 this one also halves margin/
+// containerPadding (8 -> 4) in the same step. The v9 writeup above explains
+// why: react-grid-layout's pixel size is unitSize*units + (units-1)*marginPx,
+// so doubling units while halving unitSize but leaving marginPx fixed makes
+// the margin term grow relative to the unit term, inflating every panel by
+// ~25-30%. Halving marginPx alongside the unit doubling keeps that ratio
+// (and therefore physical panel sizes) effectively unchanged.
+//
+// v13 -> v14: same move again — still not granular enough. Margin/
+// containerPadding halved again (4 -> 2) alongside the unit doubling, same
+// reasoning as v12->v13.
+//
+// v14 -> v15: same move again, same reasoning as v12->v13/v13->v14 — resize
+// snapping was still too coarse. Margin/containerPadding halved again
+// (2 -> 1) alongside the unit doubling to keep the margin term from
+// dominating calcGridItemWHPx's pixel-size formula.
+const LAYOUT_KEY = 'dashboard-panel-layout-v15'
 const CHART_SETTINGS_KEY = 'dashboard-chart-settings'
 const PINNED_VIEWER_KEY = 'dashboard-viewer-pinned'
-const PIN_TOP_GAP = 8   // px gap below the header, matches the grid's own margin/containerPadding
+const PINNED_CHARTS_KEY = 'dashboard-pinned-chart-panels'
+const PIN_TOP_GAP = 1   // px gap below the header, matches the grid's own margin/containerPadding
 const PIN_Z_INDEX = 35  // below header's z-50, above ordinary scrolling panel content
-const COLS = 24
-const ROW_HEIGHT = 24
+const COLS = 192
+const ROW_HEIGHT = 3
 
 function useIsMobile() {
     const [isMobile, setIsMobile] = useState(
@@ -74,6 +101,24 @@ function useIsMobile() {
     return isMobile
 }
 
+// Measures the live <header>'s height so the mobile-pinned viewer (below) can
+// stick directly beneath it instead of overlapping it — unlike the desktop
+// pin feature, mobile's plain flex stack has no react-grid-layout fighting
+// `position: sticky`, so no portal is needed here, just the right `top` offset.
+function useHeaderHeight() {
+    const [height, setHeight] = useState(0)
+    useEffect(() => {
+        const headerEl = document.querySelector('header')
+        if (!headerEl) return
+        const update = () => setHeight(headerEl.getBoundingClientRect().height)
+        update()
+        const ro = new ResizeObserver(update)
+        ro.observe(headerEl)
+        return () => ro.disconnect()
+    }, [])
+    return height
+}
+
 function loadSavedLayout() {
     try {
         const saved = localStorage.getItem(LAYOUT_KEY)
@@ -81,43 +126,38 @@ function loadSavedLayout() {
     } catch { return [] }
 }
 
-// Viewer defaults to a quarter-width tile. Charts/widgets default to half its
-// width and half its height (a quarter its area) so the viewer reads as the
-// dashboard's primary panel — newly added widgets flow into the next free
-// slot at this smaller size, and the user grows one deliberately if needed.
-const VIEWER_W = 5
-const VIEWER_H = 5
-const SLOT_W = 3
-const SLOT_H = 3
+// Standard sizes tuned by hand in the live dashboard (viewer + one chart,
+// resized side by side until they read well at typical desktop widths) and
+// captured from the resulting saved layout — not derived from the grid math.
+const VIEWER_W = 54
+const VIEWER_H = 85
+const SLOT_W = 39
+const SLOT_H = 85
 const TABLE_W = COLS    // tables default to full width to show their columns usefully
-const TABLE_H = 8
+const TABLE_H = 64
 
-function defaultPanelLayout(panel, pos) {
+// Only ever called for viewer/table — charts and every other widget type are
+// always repacked directly in mergeLayouts (see below) instead of going
+// through a "default" position.
+function defaultPanelLayout(panel) {
     if (panel.type === 'viewer') {
         return { i: panel.id, x: 0, y: 0, w: VIEWER_W, h: VIEWER_H, minW: 1, minH: 1 }
     }
-    if (panel.type === 'table') {
-        return { i: panel.id, x: 0, y: Infinity, w: TABLE_W, h: TABLE_H, minW: 1, minH: 1 }
-    }
-    // Charts and every other widget type share one flowing grid of slots,
-    // starting right after the viewer (if present). `pos` (from findFreeSlot,
-    // below) is the actual free cell — not assumed from array order.
-    return { i: panel.id, x: pos?.x ?? 0, y: pos?.y ?? 0, w: SLOT_W, h: SLOT_H, minW: 1, minH: 1 }
+    // table
+    return { i: panel.id, x: 0, y: Infinity, w: TABLE_W, h: TABLE_H, minW: 1, minH: 1 }
 }
 
 function rectsOverlap(a, b) {
     return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-// First free SLOT_W x SLOT_H cell, row-major, that doesn't overlap anything
-// in `occupied` — used to place a brand-new panel (no saved position yet)
-// into real free space instead of a naive slot-index guess, which can land
-// on top of a panel the user has already moved or resized.
-function findFreeSlot(occupied, startX) {
-    const slotsPerRow = Math.max(1, Math.floor((COLS - startX) / SLOT_W))
+// First free w x h cell, row-major (in SLOT_W/SLOT_H steps), that doesn't
+// overlap anything in `occupied`. `w`/`h` default to one slot but can be a
+// saved custom size (e.g. a chart resized to span 2 slots).
+function findFreeSlot(occupied, startX, w = SLOT_W, h = SLOT_H) {
     for (let row = 0; ; row++) {
-        for (let col = 0; col < slotsPerRow; col++) {
-            const candidate = { x: startX + col * SLOT_W, y: row * SLOT_H, w: SLOT_W, h: SLOT_H }
+        for (let x = startX; x + w <= COLS; x += SLOT_W) {
+            const candidate = { x, y: row * SLOT_H, w, h }
             if (!occupied.some(r => rectsOverlap(candidate, r))) return candidate
         }
     }
@@ -125,36 +165,69 @@ function findFreeSlot(occupied, startX) {
 
 function mergeLayouts(panels, savedLayout) {
     const panelIds = new Set(panels.map(p => p.id))
-    const hasViewer = panels.some(p => p.type === 'viewer')
-    const startX = hasViewer ? VIEWER_W : 0
     const savedById = new Map(
         savedLayout
             .filter(item => panelIds.has(item.i))
             .map(item => [item.i, item])
     )
 
-    // Built up as we go, in panel order, so each new panel's free-slot search
-    // sees every panel placed before it — including ones placed earlier in
-    // this same pass (e.g. several charts becoming visible at once).
+    const results = new Map()
     const occupied = []
-    return panels.map(panel => {
+
+    // Viewer/table keep their saved position verbatim — only charts/widgets
+    // get auto-aligned (see below).
+    for (const panel of panels) {
+        if (panel.type !== 'viewer' && panel.type !== 'table') continue
         const saved = savedById.get(panel.id)
-        const isFlowSlot = panel.type !== 'viewer' && panel.type !== 'table'
-        const defaults = (isFlowSlot && !saved)
-            ? defaultPanelLayout(panel, findFreeSlot(occupied, startX))
-            : defaultPanelLayout(panel, null)
-        const result = {
-            ...defaults,
-            ...saved,
-            // Always use current minW/minH from defaults so old saved values
-            // with larger minimums can't prevent panels from being resized small.
-            minW: defaults.minW,
-            minH: defaults.minH,
-            i: panel.id,
-        }
+        const defaults = defaultPanelLayout(panel)
+        const result = { ...defaults, ...saved, minW: defaults.minW, minH: defaults.minH, i: panel.id }
+        results.set(panel.id, result)
         occupied.push(result)
-        return result
+    }
+
+    // Charts must start flush against the viewer's *actual* right edge, not
+    // the VIEWER_W constant — if the viewer was ever resized (its saved w
+    // differs from VIEWER_W), using the constant here either leaves a real
+    // gap (viewer shrunk) or makes findFreeSlot reject the first column as
+    // overlapping the now-wider viewer and skip straight to the second one
+    // (viewer grown) — both produce exactly the permanent horizontal gap this
+    // is fixing. Falls back to VIEWER_W only while the viewer's own layout is
+    // still being resolved for the very first time (no viewer panel present).
+    const viewerPanel = panels.find(p => p.type === 'viewer')
+    const viewerResult = viewerPanel ? results.get(viewerPanel.id) : null
+    const startX = viewerResult ? viewerResult.x + viewerResult.w : 0
+
+    // Charts and every other widget type are always densely repacked — left
+    // to right, top to bottom, starting right after the viewer — rather than
+    // trusting a saved x/y verbatim. react-grid-layout's compactType="vertical"
+    // only ever closes *vertical* gaps; if a panel that used to sit to a
+    // chart's left gets removed, nothing recomputes x, so that chart is left
+    // sitting in its old column with a permanent empty gap where the viewer
+    // should now be flush against it. Repacking on every render closes that
+    // gap automatically instead of requiring another saved-layout migration.
+    // Relative order is preserved (sorted by each panel's last saved position,
+    // new panels last) so a user's drag-to-reorder still sticks — only the
+    // literal x/y coordinate is discarded. Saved w/h (size) is kept as-is.
+    const flowPanels = panels.filter(p => p.type !== 'viewer' && p.type !== 'table')
+    const sortedFlowPanels = [...flowPanels].sort((a, b) => {
+        const sa = savedById.get(a.id)
+        const sb = savedById.get(b.id)
+        if (!sa && !sb) return 0
+        if (!sa) return 1   // brand-new panels (no saved position) sort last
+        if (!sb) return -1
+        return (sa.y - sb.y) || (sa.x - sb.x)
     })
+    for (const panel of sortedFlowPanels) {
+        const saved = savedById.get(panel.id)
+        const w = saved?.w ?? SLOT_W
+        const h = saved?.h ?? SLOT_H
+        const pos = findFreeSlot(occupied, startX, w, h)
+        const result = { i: panel.id, x: pos.x, y: pos.y, w, h, minW: 1, minH: 1 }
+        results.set(panel.id, result)
+        occupied.push(result)
+    }
+
+    return panels.map(panel => results.get(panel.id))
 }
 
 // ── Popover style helpers — shared with ChartBuilder via chartSettingsUI ──
@@ -238,6 +311,7 @@ const DEFAULT_CHART_SETTINGS = {
 
 export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true }) {
     const isMobile = useIsMobile()
+    const headerHeight = useHeaderHeight()
     const containerRef = useRef(null)
     const [containerWidth, setContainerWidth] = useState(1200)
 
@@ -315,6 +389,27 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
         return () => { ro.disconnect(); window.removeEventListener('resize', update) }
     }, [pinnedViewer])
 
+    // Chart pinning: unlike the viewer's pin (which fixes its on-screen
+    // position), pinning a chart only locks its *size* — it stays exactly
+    // where it is in the scrolling grid, but react-grid-layout won't let it
+    // be resized until unpinned. No placeholder/portal needed here since the
+    // panel never leaves its normal spot.
+    const [pinnedCharts, setPinnedCharts] = useState(() => {
+        try { return new Set(JSON.parse(localStorage.getItem(PINNED_CHARTS_KEY) || '[]')) }
+        catch { return new Set() }
+    })
+    useEffect(() => {
+        try { localStorage.setItem(PINNED_CHARTS_KEY, JSON.stringify([...pinnedCharts])) } catch { /* ignore */ }
+    }, [pinnedCharts])
+    const toggleChartPin = useCallback((id) => {
+        setPinnedCharts(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+        })
+    }, [])
+
     // liveLayoutRef: always holds the latest positions; updated on every
     // onLayoutChange tick without causing a re-render.
     const liveLayoutRef = useRef(loadSavedLayout())
@@ -324,14 +419,14 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
     const panelKey = panels.map(p => `${p.id}:${p.type}`).join(',')
 
     // Chart panel ids are deterministic (`chart-${chartKey}`), so toggling a
-    // chart off then back on reuses the same id. If a saved position from a
-    // previous session still sits in liveLayoutRef for that id, the merge
-    // below would resurrect it as-is — including stale/oversized values left
-    // over from this layout scheme's grid-granularity migrations. Detect the
-    // hidden->visible transition and drop that stale entry so the chart goes
-    // through mergeLayouts' fresh free-slot search instead, the same as any
-    // other brand-new panel. One extra render (via purgeTick) is the cost of
-    // not mutating the ref during render itself.
+    // chart off then back on reuses the same id. mergeLayouts always repacks
+    // chart/widget position fresh regardless of any saved entry, but it still
+    // uses a saved entry's y/x (and w/h) as the *sort key* / requested size for
+    // repacking — so without this purge, a re-shown chart would resume its old
+    // place in the packing order (and any stale/oversized w/h from an older
+    // grid-granularity migration) instead of being treated as brand new like
+    // any other newly-added panel. One extra render (via purgeTick) is the
+    // cost of not mutating the ref during render itself.
     const prevChartIdsRef = useRef(new Set())
     const [purgeTick, setPurgeTick] = useState(0)
     useEffect(() => {
@@ -351,21 +446,35 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
     // The layout reference is STABLE across re-renders where panelKey doesn't
     // change — same object reference → react-grid-layout's deepEqual is trivially
     // true → no mid-gesture position reset.
+    // Bumped whenever a drag/resize gesture ends (see handleLayoutEnd) so
+    // layoutForGridLayout recomputes right away — otherwise chart/widget
+    // panels only pick up the viewer's new size (mergeLayouts' startX) on
+    // the next full reload, since nothing else in the dep list below changes
+    // just from resizing the viewer.
+    const [layoutVersion, setLayoutVersion] = useState(0)
+
     const layoutForGridLayout = useMemo(() => {
         const merged = mergeLayouts(panels, liveLayoutRef.current)
-        // Dragging the viewer's placeholder while pinned would be meaningless (its
-        // real content lives in the portal below) — disable drag only, not resize,
-        // so the reserved slot (and the pinned box that tracks its rect) can still
-        // be resized. Always set explicitly (not just "add when pinned") — RGL's
-        // onLayoutChange fires on every render and echoes the layout array back,
-        // so handleLayoutChange persists whatever isDraggable value was here into
-        // liveLayoutRef.current; only setting it while pinned would let `false`
-        // leak into the saved layout and stick around after unpinning.
-        return merged.map(item => item.i === 'viewer' ? { ...item, isDraggable: !pinnedViewer } : item)
+        return merged.map(item => {
+            // Dragging the viewer's placeholder while pinned would be meaningless (its
+            // real content lives in the portal below) — disable drag only, not resize,
+            // so the reserved slot (and the pinned box that tracks its rect) can still
+            // be resized. Always set explicitly (not just "add when pinned") — RGL's
+            // onLayoutChange fires on every render and echoes the layout array back,
+            // so handleLayoutChange persists whatever isDraggable value was here into
+            // liveLayoutRef.current; only setting it while pinned would let `false`
+            // leak into the saved layout and stick around after unpinning.
+            if (item.i === 'viewer') return { ...item, isDraggable: !pinnedViewer }
+            // Pinned charts stay fully draggable — only resizing is locked — and,
+            // same reasoning as above, isResizable is always set explicitly so a
+            // stale `false` from a since-unpinned chart can't leak into liveLayoutRef.
+            if (pinnedCharts.has(item.i)) return { ...item, isResizable: false }
+            return { ...item, isResizable: true }
+        })
     },
-        // liveLayoutRef.current is intentionally read only when panelKey/purgeTick changes
+        // liveLayoutRef.current is intentionally read only when one of these changes
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [panelKey, purgeTick, pinnedViewer]
+        [panelKey, purgeTick, pinnedViewer, pinnedCharts, layoutVersion]
     )
 
     useEffect(() => {
@@ -403,6 +512,10 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
         liveLayoutRef.current = merged
         localStorage.setItem(LAYOUT_KEY, JSON.stringify(merged))
         window.dispatchEvent(new Event('resize'))
+        // Re-run mergeLayouts now, with the just-committed size/position, so a
+        // viewer resize (or any drag/resize) immediately repacks chart/widget
+        // panels against it instead of waiting for the next reload.
+        setLayoutVersion(v => v + 1)
     }, [])
 
     if (isMobile) {
@@ -412,7 +525,15 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
                     <div
                         key={panel.id}
                         className="panel-thin w-full overflow-hidden"
-                        style={{ height: panel.type === 'viewer' ? '60vh' : '300px' }}
+                        // Viewer always pins directly below the header on mobile — there's
+                        // no per-user toggle here (unlike desktop's Pin/PinOff button);
+                        // it's always on for this layout. Both viewer and charts/widgets
+                        // get the same MOBILE_PANEL_HEIGHT (half the iPhone 7's screen).
+                        style={
+                            panel.type === 'viewer'
+                                ? { height: MOBILE_PANEL_HEIGHT, position: 'sticky', top: headerHeight + PIN_TOP_GAP, zIndex: PIN_Z_INDEX }
+                                : { height: MOBILE_PANEL_HEIGHT }
+                        }
                     >
                         {renderPanel(panel)}
                         {panel.type !== 'viewer' && onClosePanel && (
@@ -440,7 +561,7 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
 
     return (
         // Cancel the parent <main>'s px-4 lg:px-6 py-2 so containerPadding below
-        // (8px) is the *only* source of edge spacing — making it match the 8px
+        // (1px) is the *only* source of edge spacing — making it match the 1px
         // gap between panels instead of stacking on top of it.
         // Width must explicitly compensate for the negative margin: combining
         // `w-full` (100%) with `-mx-*` is over-constrained, so the browser
@@ -452,8 +573,8 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
                 cols={COLS}
                 rowHeight={ROW_HEIGHT}
                 width={containerWidth}
-                margin={[8, 8]}
-                containerPadding={[8, 8]}
+                margin={[1, 1]}
+                containerPadding={[1, 1]}
                 draggableHandle=".drag-zone"
                 draggableCancel="button,input,select,textarea,a,[role='button']"
                 resizeHandles={['se', 'sw', 's', 'n', 'e', 'w']}
@@ -501,9 +622,22 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
                                 )}
                             </div>
 
+                            {/* Size-lock toggle — chart panels only (standard + custom widget
+                                charts). Unlike the viewer's pin, this only disables resizing
+                                (see layoutForGridLayout's isResizable) — the panel stays put in
+                                the scrolling grid, it's just locked at its current size. */}
+                            {panel.type === 'chart' && (
+                                <button
+                                    onMouseDown={e => e.stopPropagation()}
+                                    onClick={e => { e.stopPropagation(); toggleChartPin(panel.id) }}
+                                    style={{ position: 'absolute', top: 4, right: 28, zIndex: 9999, width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, cursor: 'pointer', background: pinnedCharts.has(panel.id) ? 'rgba(39,111,229,0.2)' : 'transparent', border: 'none', outline: 'none', padding: 0, color: pinnedCharts.has(panel.id) ? 'var(--speckle-outline-1)' : 'var(--speckle-foreground-3)' }}
+                                    title={pinnedCharts.has(panel.id) ? 'Unlock chart size' : 'Lock chart size'}
+                                >{pinnedCharts.has(panel.id) ? <Lock size={12} /> : <Unlock size={12} />}</button>
+                            )}
+
                             {/* Chart-type toggles — standard chart panels only, not custom widget charts */}
                             {panel.type === 'chart' && !panel.widget && (
-                                <div style={{ position: 'absolute', top: 4, right: 28, zIndex: 9999, display: 'flex', gap: 2 }}>
+                                <div style={{ position: 'absolute', top: 4, right: 52, zIndex: 9999, display: 'flex', gap: 2 }}>
                                     {CHART_TYPES.map(({ type, orientation, label }) => {
                                         const active = cs.type === type && (type === 'pie' || cs.orientation === orientation)
                                         return (

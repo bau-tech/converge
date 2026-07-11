@@ -42,6 +42,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import requests
 
@@ -85,6 +86,66 @@ _NORMALIZER_URL = os.getenv("NORMALIZER_URL", "http://localhost:8002").rstrip("/
 _MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
 mcp = FastMCP("speckle-ifc")
+
+# ── Short-TTL read cache ──────────────────────────────────────────────────────
+# Smooths a burst of related calls within one exchange (e.g. speckle_full_qa_report
+# and a follow-up speckle_investigate_element both hitting /qa or /summary for the
+# same model seconds apart) — NOT a long-lived cache. TTL is short enough that a
+# re-ingest mid-session shows up again well within a minute. Only ever used for
+# idempotent GETs; every POST/PUT/DELETE (ingest, overrides, clash-check trigger,
+# filter-publish, ...) always goes straight through requests, uncached.
+_cache: dict[str, tuple[float, "requests.Response"]] = {}
+_CACHE_TTL_S = 45
+
+
+def _cached_get(url: str, params: dict | None = None, timeout: int = 30) -> "requests.Response":
+    key = f"{url}|{sorted((params or {}).items())}"
+    now = time.time()
+    hit = _cache.get(key)
+    if hit and now - hit[0] < _CACHE_TTL_S:
+        return hit[1]
+    resp = requests.get(url, params=params, timeout=timeout)
+    _cache[key] = (now, resp)
+    return resp
+
+
+@mcp.tool()
+def speckle_cache_clear() -> str:
+    """
+    Clear the MCP server's short-lived (45s) read cache for summary/QA/semantic-
+    search/parameter-key lookups. Use this if you just re-ingested a model and
+    want to guarantee the very next call sees fresh data instead of waiting out
+    the cache window.
+    """
+    count = len(_cache)
+    _cache.clear()
+    return f"Cleared {count} cached response(s)."
+
+
+# ── MCP resources ─────────────────────────────────────────────────────────────
+# Unlike tools (actions/queries a client invokes deliberately), resources are
+# read-only context a client can browse/attach without an explicit call — e.g.
+# Claude Code's resource picker or an `@speckle-ifc:speckle://...` reference.
+# Both are thin JSON views over existing REST endpoints, via the same
+# short-TTL cache the tools use.
+
+@mcp.resource("speckle://models", mime_type="application/json")
+def list_ingested_models_resource() -> str:
+    """All ingested models — id, stream, source, element count, ingested_at."""
+    resp = _cached_get(f"{_NORMALIZER_URL}/models", timeout=30)
+    resp.raise_for_status()
+    return json.dumps(resp.json(), indent=2)
+
+
+@mcp.resource("speckle://models/{model_id}/summary", mime_type="application/json")
+def model_summary_resource(model_id: str) -> str:
+    """One model's category/IFC-class/storey/material distribution summary."""
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
+    if resp.status_code == 404:
+        return json.dumps({"error": f"Model {model_id} not found"})
+    resp.raise_for_status()
+    return json.dumps(resp.json(), indent=2)
+
 
 # ── In-memory IFC model state ─────────────────────────────────────────────────
 # NOTE: in streamable-http/SSE remote mode all clients share a single Python process and
@@ -502,7 +563,7 @@ def speckle_list_ingested() -> str:
 @mcp.tool()
 def speckle_get_summary(model_id: str) -> str:
     """Return category / IFC class / storey distributions for a normalized model."""
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Run speckle_list_ingested() to see available models."
     resp.raise_for_status()
@@ -950,7 +1011,7 @@ def speckle_qa_check(model_id: str) -> str:
     Each issue shows a count, percentage of total, and up to 3 sample Speckle IDs
     so you can inspect the affected objects in the Speckle viewer.
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/qa", timeout=30)
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/qa", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
@@ -1113,6 +1174,56 @@ def speckle_find_element(query: str, model_id: str = "") -> str:
         )
     if len(results) > 30:
         lines.append(f"  ... and {len(results) - 30} more (narrow the query or specify model_id)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_semantic_search(model_id: str, query: str, limit: int = 10) -> str:
+    """
+    Find elements by meaning rather than exact text match — describe what
+    you're looking for in plain language and get back the closest matches,
+    ranked by similarity, even if the words don't literally appear in the
+    element's name or parameters.
+
+    Examples:
+      speckle_semantic_search(model_id, "fire rated door")
+      speckle_semantic_search(model_id, "load bearing column on the ground floor")
+
+    Complements speckle_find_element (exact/partial name match) and
+    speckle_query_by_parameter (exact field match) — use this one when you
+    don't know the exact field names or wording used in the source model.
+
+    Requires the model to have been ingested after semantic search was added
+    (embeddings are built automatically at ingest time). If this returns
+    "no embeddings yet", re-ingest the model with speckle_ingest(..., force=true)-
+    style re-ingestion, or wait a moment if it was just ingested.
+    → feeds: speckle_element_detail(element_id)
+    """
+    resp = _cached_get(
+        f"{_NORMALIZER_URL}/models/{model_id}/elements/semantic-search",
+        params={"query": query, "limit": limit},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    data = resp.json()
+    elements = data.get("elements", [])
+    if not elements:
+        return (
+            f"No semantic matches for '{query}' in model {model_id[:8]}... — "
+            "this model may have no embeddings yet (ingested before semantic "
+            "search was added, or the embed step failed). Try speckle_find_element "
+            "for an exact/partial name match instead, or re-ingest this model."
+        )
+    lines = [f"{len(elements)} semantic match(es) for '{query}':"]
+    for e in elements:
+        lines.append(
+            f"  [{e.get('ifc_class', '?')}] {e.get('name') or '(unnamed)'}"
+            f"  storey={e.get('storey') or '?'}"
+            f"  score={e.get('score')}"
+            f"  element_id={e.get('element_id', '')}"
+        )
     return "\n".join(lines)
 
 
@@ -1473,7 +1584,7 @@ def speckle_parameter_keys(model_id: str) -> str:
     Use these key names with speckle_query_by_parameter() to filter elements.
     → feeds: speckle_query_by_parameter(model_id, key=...)
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/parameters/keys", timeout=30)
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/parameters/keys", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
@@ -1577,13 +1688,473 @@ def speckle_find_nearby(
     return "\n".join(lines)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# CLASH & SCHEDULE TOOLS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _run_clash_and_wait(model_id: str, rules: list, compare_model_id: str = ""):
+    """
+    Shared blocking core for speckle_clash_check and speckle_investigate_clashes:
+    POST /clash-check then poll /clash-check/{job_id}/status up to 5 minutes.
+    Returns (True, status_dict) on completion — status_dict["result"]["rules"]
+    is the full per-rule list including each rule's "clashes" detail array — or
+    (False, error_message) on any failure (bad request, job failure, timeout).
+    """
+    body = {"rules": rules}
+    if compare_model_id:
+        body["compare_model_id"] = compare_model_id
+
+    resp = requests.post(f"{_NORMALIZER_URL}/models/{model_id}/clash-check", json=body, timeout=30)
+    if resp.status_code == 404:
+        return False, f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    if resp.status_code == 400:
+        return False, f"Bad request: {resp.json().get('detail', resp.text)}"
+    resp.raise_for_status()
+    job_id = resp.json().get("job_id")
+    if not job_id:
+        return False, f"Unexpected response: {resp.json()}"
+
+    for _ in range(150):  # 150 * 2s = 5 minutes
+        time.sleep(2)
+        poll = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/clash-check/{job_id}/status", timeout=15)
+        poll.raise_for_status()
+        status = poll.json()
+        if status["status"] == "complete":
+            return True, status
+        if status["status"] == "failed":
+            return False, f"Clash check failed: {status.get('error')}"
+
+    return False, f"Timed out after 5 minutes waiting for clash-check job {job_id}."
+
+
+@mcp.tool()
+def speckle_clash_check(model_id: str, rules_json: str, compare_model_id: str = "") -> str:
+    """
+    Run BVH mesh-level clash detection (ifcclash) and wait for the result
+    (up to 5 minutes). Blocking equivalent of POST /clash-check + polling
+    /clash-check/{job_id}/status by hand.
+
+    rules_json: JSON array of rules, e.g.:
+      [{"name": "Struct vs Arch", "selector_a": "IfcColumn", "selector_b": "IfcWall",
+        "mode": "collision", "tolerance": 0.01}]
+      mode: "collision" | "intersection" | "clearance" (clearance also needs "clearance": <m>)
+      selector_b omitted → checks selector_a against itself (self-clash)
+
+    compare_model_id: when set, selector_a is checked against THIS model and
+    selector_b against compare_model_id instead of the model against itself
+    (cross-discipline clashes, e.g. structure vs architecture).
+
+    → feeds: speckle_investigate_clashes(model_id, rules_json, compare_model_id)
+      for a report that drills into which elements/categories are actually colliding.
+    """
+    try:
+        rules = json.loads(rules_json)
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON: {exc}"
+    if not isinstance(rules, list) or not rules:
+        return "rules_json must be a non-empty JSON array."
+
+    ok, status = _run_clash_and_wait(model_id, rules, compare_model_id)
+    if not ok:
+        return status  # status is the error message string in this branch
+
+    result = status.get("result") or {}
+    rule_results = result.get("rules", [])
+    total = result.get("total_count", 0)
+    lines = [f"Clash check complete — {total} total clash(es) across {len(rule_results)} rule(s):"]
+    for r in rule_results:
+        name = r.get("name") or f"{r.get('selector_a')} vs {r.get('selector_b') or r.get('selector_a')}"
+        count = r.get("count", 0)
+        icon = "✗" if count else "✓"
+        lines.append(f"  {icon} {name}: {count} clash(es)")
+    if status.get("compare"):
+        c = status["compare"]
+        lines.append(f"\nCross-model check against {c.get('model_b_id', '')[:8]}...")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_schedule(model_id: str) -> str:
+    """
+    Return the full 4D task schedule tree for a model — name, WBS code,
+    status, dates, critical-path flag, and how many elements each task is
+    linked to. Import a schedule first via the frontend's Schedule widget
+    (IfcWorkSchedule or Primavera P6 XML) if this comes back empty.
+    → feeds: speckle_schedule_status_report(model_id) for a health summary
+    """
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/schedule", timeout=30)
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    data = resp.json()
+    tasks = data.get("tasks", [])
+    if not tasks:
+        return f"No schedule imported for model {model_id[:8]}... — use the Schedule widget to import one."
+
+    by_parent: dict[str | None, list] = {}
+    for t in tasks:
+        by_parent.setdefault(t.get("parent_task_id"), []).append(t)
+
+    lines = [f"Schedule for model {model_id[:8]}... — {data.get('task_count', len(tasks))} task(s)"]
+    if data.get("project_start") or data.get("project_end"):
+        lines.append(f"  {data.get('project_start', '?')} → {data.get('project_end', '?')}")
+    lines.append("")
+
+    def _walk(parent_id, depth):
+        for t in by_parent.get(parent_id, []):
+            crit = " [CRITICAL]" if t.get("is_critical") else ""
+            milestone = " ◆" if t.get("is_milestone") else ""
+            lines.append(
+                "  " * depth
+                + f"- {t.get('name', 'Unnamed Task')}{milestone}{crit}"
+                + f"  ({t.get('status') or 'unknown'})"
+                + f"  {t.get('planned_start') or '?'} → {t.get('planned_finish') or '?'}"
+                + f"  elements={t.get('element_count', 0)}"
+            )
+            _walk(t.get("task_id"), depth + 1)
+
+    _walk(None, 0)
+    return "\n".join(lines)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AGENTIC WORKFLOW TOOLS — deterministic, hardcoded chains of the primitive
+# tools above, returning one consolidated report instead of requiring several
+# separate calls. No LLM reasoning happens inside these — the sequence is
+# fixed; only the *inputs* found along the way vary.
+# ═════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def speckle_investigate_element(model_id: str, query: str, radius_m: float = 5.0) -> str:
+    """
+    One-call investigation of a single element: resolves it by name or
+    natural-language description, then reports its full identity/parameters,
+    what's physically nearby, and whether it's flagged by any data-quality
+    check — replacing what would otherwise be speckle_semantic_search (or
+    speckle_find_element) + speckle_element_detail + speckle_find_nearby +
+    speckle_qa_check chained together by hand.
+
+    query: element name, partial name, or a natural-language description
+           (e.g. "the column near the main entrance").
+    radius_m: how far to look for neighbouring elements (default 5m).
+    """
+    resolved = None
+    sem_resp = _cached_get(
+        f"{_NORMALIZER_URL}/models/{model_id}/elements/semantic-search",
+        params={"query": query, "limit": 1}, timeout=30,
+    )
+    if sem_resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    if sem_resp.status_code == 200:
+        matches = sem_resp.json().get("elements", [])
+        if matches:
+            resolved = matches[0]
+
+    if resolved is None:
+        find_resp = requests.get(
+            f"{_NORMALIZER_URL}/models/{model_id}/elements",
+            params={"name": query, "limit": 1}, timeout=30,
+        )
+        if find_resp.status_code == 200:
+            matches = find_resp.json()
+            if matches:
+                resolved = matches[0]
+
+    if resolved is None:
+        return (
+            f"No element matching '{query}' found in model {model_id[:8]}... "
+            "via semantic or name search."
+        )
+
+    element_id = resolved.get("element_id")
+    if not element_id:
+        return f"Matched '{resolved.get('name', query)}' but it has no element_id."
+
+    lines = [f"Investigation: '{query}' → element_id={element_id}", ""]
+
+    detail_resp = requests.get(f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
+    speckle_id = resolved.get("speckle_id")
+    if detail_resp.status_code == 200:
+        d = detail_resp.json()
+        speckle_id = d.get("speckle_id") or speckle_id
+        lines.append("── Identity ──")
+        lines.append(f"  ifc_class:  {d.get('ifc_class', '')}")
+        lines.append(f"  category:   {d.get('category', '')}")
+        lines.append(f"  name:       {d.get('name', '')}")
+        lines.append(f"  storey:     {d.get('storey', '')}")
+        lines.append(f"  speckle_id: {speckle_id}")
+        if d.get("volume_m3") is not None:
+            lines.append(f"  volume_m3:  {d['volume_m3']}")
+        if d.get("area_m2") is not None:
+            lines.append(f"  area_m2:    {d['area_m2']}")
+        params = d.get("parameters", [])
+        if params:
+            lines.append(f"  parameters: {len(params)} total — speckle_element_detail({element_id}) for the full list")
+    else:
+        lines.append("(Could not load full detail — showing what search returned)")
+        lines.append(f"  name: {resolved.get('name', '')}   ifc_class: {resolved.get('ifc_class', '')}")
+
+    lines.append("")
+    lines.append(f"── Nearby (within {radius_m}m) ──")
+    nearby_resp = requests.get(
+        f"{_NORMALIZER_URL}/models/{model_id}/elements/nearby",
+        params={"reference": speckle_id or query, "radius_m": radius_m}, timeout=30,
+    )
+    if nearby_resp.status_code == 200:
+        nearby = nearby_resp.json().get("elements", [])
+        if nearby:
+            for n in nearby[:10]:
+                lines.append(
+                    f"  [{n.get('ifc_class', '?')}] {n.get('name') or '(unnamed)'}"
+                    f"  distance={n.get('distance_m')}m"
+                )
+            if len(nearby) > 10:
+                lines.append(f"  ... and {len(nearby) - 10} more — speckle_find_nearby(model_id, '{speckle_id or query}', {radius_m})")
+        else:
+            lines.append("  (none found — element may predate SI geometry support, or is isolated)")
+    else:
+        lines.append("  (nearby lookup unavailable)")
+
+    lines.append("")
+    lines.append("── Data quality ──")
+    qa_resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/qa", timeout=30)
+    flagged = []
+    if qa_resp.status_code == 200 and speckle_id:
+        for issue_key, issue in qa_resp.json().get("issues", {}).items():
+            if speckle_id in issue.get("samples", []):
+                flagged.append(issue_key)
+    if flagged:
+        lines.append(f"  ⚠ Flagged by: {', '.join(flagged)}")
+    else:
+        lines.append("  ✓ Not among the sampled QA offenders (qa samples only a few per issue —")
+        lines.append(f"    for a definitive check: speckle_qa_elements(model_id, '<issue>')")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_full_qa_report(model_id: str) -> str:
+    """
+    One-call, in-depth data-quality report: overall score, model context,
+    every issue category with real example elements (not just the 3 samples
+    speckle_qa_check shows), and a prioritized fix list ordered by
+    weight × affected-count — replacing speckle_qa_check + a
+    speckle_qa_elements call per failing category chained together by hand.
+    """
+    qa_resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/qa", timeout=30)
+    if qa_resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    qa_resp.raise_for_status()
+    d = qa_resp.json()
+    total = d.get("total_elements", 0)
+    score = d.get("score", 0.0)
+    issues = d.get("issues", {})
+
+    summary_resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
+    summary = summary_resp.json() if summary_resp.status_code == 200 else {}
+
+    labels = {
+        "unclassified":  ("Unclassified elements", 0.20),
+        "no_geometry":   ("No geometry (quantities unavailable)", 0.25),
+        "no_name":       ("Missing element names", 0.15),
+        "no_storey":     ("No storey assignment", 0.15),
+        "no_material":   ("No material parameter", 0.10),
+        "duplicate_ids": ("Duplicate application IDs", 0.15),
+    }
+
+    filled = int(score * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    lines = [
+        f"Full QA Report — model {model_id[:8]}...",
+        f"  Total elements: {total}",
+        f"  Quality score:  {score:.1%}  [{bar}]",
+    ]
+    if summary.get("source") or summary.get("total_volume_m3") is not None:
+        lines.append(
+            f"  Source app: {summary.get('source', '?')}"
+            f"   Total volume: {summary.get('total_volume_m3', '?')} m³"
+        )
+    lines.append("")
+
+    ranked = sorted(
+        (
+            (weight * issues.get(key, {}).get("count", 0), key, label, weight, issues.get(key, {}).get("count", 0))
+            for key, (label, weight) in labels.items()
+        ),
+        key=lambda r: -r[0],
+    )
+
+    lines.append("Issues, prioritized (weight × affected count — fix these first):")
+    for priority, key, label, weight, count in ranked:
+        if count == 0:
+            lines.append(f"  ✓ {label}: none")
+            continue
+        pct = f" ({count / total:.0%})" if total else ""
+        lines.append(f"  ✗ {label}: {count}{pct}  [weight {weight:.0%}, priority {priority:.1f}]")
+        examples_resp = _cached_get(
+            f"{_NORMALIZER_URL}/models/{model_id}/qa/elements",
+            params={"issue": key, "limit": 5}, timeout=30,
+        )
+        if examples_resp.status_code == 200:
+            for e in examples_resp.json()[:5]:
+                lines.append(
+                    f"      - [{e.get('ifc_class') or '?'}] {e.get('name') or '(unnamed)'}"
+                    f"  element_id={e.get('element_id', '')}"
+                )
+            if count > 5:
+                lines.append(f"      ... and {count - 5} more — speckle_qa_elements(model_id, '{key}', limit=N)")
+
+    if score >= 0.9:
+        lines.append("\nOverall: Excellent data quality.")
+    elif score >= 0.75:
+        lines.append("\nOverall: Good quality — minor issues.")
+    elif score >= 0.5:
+        lines.append("\nOverall: Moderate quality — review flagged issues, starting with the top-priority ones above.")
+    else:
+        lines.append("\nOverall: Poor quality — significant data gaps detected. Fix top-priority issues first.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_investigate_clashes(model_id: str, rules_json: str, compare_model_id: str = "") -> str:
+    """
+    Run clash detection and report which categories/elements are actually
+    colliding and where — not just a count. Runs the same check as
+    speckle_clash_check, then for every rule with clashes, lists real example
+    pairs (IFC class + name on each side, distance) instead of just a number.
+
+    rules_json / compare_model_id: same as speckle_clash_check.
+    """
+    try:
+        rules = json.loads(rules_json)
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON: {exc}"
+    if not isinstance(rules, list) or not rules:
+        return "rules_json must be a non-empty JSON array."
+
+    ok, status = _run_clash_and_wait(model_id, rules, compare_model_id)
+    if not ok:
+        return status
+
+    result = status.get("result") or {}
+    rule_results = result.get("rules", [])
+    total = result.get("total_count", 0)
+
+    lines = [f"Clash investigation — {total} total clash(es) across {len(rule_results)} rule(s):", ""]
+    for r in rule_results:
+        name = r.get("name") or f"{r.get('selector_a')} vs {r.get('selector_b') or r.get('selector_a')}"
+        clashes = r.get("clashes", [])
+        if not clashes:
+            lines.append(f"✓ {name}: no clashes")
+            continue
+        lines.append(f"✗ {name}: {len(clashes)} clash(es)")
+        # Group by (a_ifc_class, b_ifc_class) so repeated collisions between the
+        # same two categories read as one line instead of N near-duplicates.
+        by_pair: dict[tuple[str, str], list] = {}
+        for c in clashes:
+            key = (c.get("a_ifc_class", "?"), c.get("b_ifc_class", "?"))
+            by_pair.setdefault(key, []).append(c)
+        for (a_cls, b_cls), group in sorted(by_pair.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"    {a_cls} × {b_cls}: {len(group)} instance(s)")
+            for c in group[:3]:
+                lines.append(
+                    f"      - {c.get('a_name') or '(unnamed)'} ↔ {c.get('b_name') or '(unnamed)'}"
+                    f"  distance={round(c.get('distance', 0), 4)}m"
+                )
+            if len(group) > 3:
+                lines.append(f"      ... and {len(group) - 3} more in this pair")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+@mcp.tool()
+def speckle_schedule_status_report(model_id: str) -> str:
+    """
+    One-call schedule health report: task counts by status, critical-path
+    tasks (soonest deadline first), overdue tasks (planned finish in the past
+    and not complete), and tasks with no elements linked — replacing manually
+    re-deriving all of this from speckle_schedule's raw task tree.
+    """
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/schedule", timeout=30)
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    data = resp.json()
+    tasks = data.get("tasks", [])
+    if not tasks:
+        return f"No schedule imported for model {model_id[:8]}... — use the Schedule widget to import one."
+
+    now = datetime.now(timezone.utc)
+
+    def _parse(dt_str):
+        if not dt_str:
+            return None
+        try:
+            return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    by_status: dict[str, int] = {}
+    critical, overdue, unlinked = [], [], []
+    for t in tasks:
+        status_key = t.get("status") or "unknown"
+        by_status[status_key] = by_status.get(status_key, 0) + 1
+        if t.get("is_critical"):
+            critical.append(t)
+        finish = _parse(t.get("planned_finish"))
+        if finish and finish < now and status_key not in ("complete", "done"):
+            overdue.append(t)
+        if not t.get("element_count"):
+            unlinked.append(t)
+
+    critical.sort(key=lambda t: t.get("planned_finish") or "")
+    overdue.sort(key=lambda t: t.get("planned_finish") or "")
+
+    lines = [f"Schedule status — model {model_id[:8]}... — {len(tasks)} task(s)"]
+    lines.append("  By status: " + ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())))
+    lines.append("")
+
+    lines.append(f"Critical path ({len(critical)} task(s)), soonest deadline first:")
+    if critical:
+        for t in critical[:15]:
+            lines.append(f"  - {t.get('name', 'Unnamed Task')}  due {t.get('planned_finish') or '?'}")
+        if len(critical) > 15:
+            lines.append(f"  ... and {len(critical) - 15} more")
+    else:
+        lines.append("  (none marked critical)")
+    lines.append("")
+
+    lines.append(f"Overdue ({len(overdue)} task(s), planned finish in the past and not complete):")
+    if overdue:
+        for t in overdue[:15]:
+            lines.append(f"  ⚠ {t.get('name', 'Unnamed Task')}  was due {t.get('planned_finish')}  status={t.get('status')}")
+        if len(overdue) > 15:
+            lines.append(f"  ... and {len(overdue) - 15} more")
+    else:
+        lines.append("  ✓ none")
+    lines.append("")
+
+    lines.append(f"No elements linked ({len(unlinked)} task(s) — schedule/model gap):")
+    if unlinked:
+        for t in unlinked[:10]:
+            lines.append(f"  - {t.get('name', 'Unnamed Task')}")
+        if len(unlinked) > 10:
+            lines.append(f"  ... and {len(unlinked) - 10} more")
+    else:
+        lines.append("  ✓ every task has at least one linked element")
+
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def speckle_get_materials(model_id: str) -> str:
     """
     List all distinct material values for a model with element counts.
     → use material names with: speckle_query_by_parameter(model_id, 'material', name)
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
@@ -1605,7 +2176,7 @@ def speckle_get_profiles(model_id: str) -> str:
     List all distinct structural section/profile values for a model with element counts.
     → use profile names with: speckle_query_by_parameter(model_id, 'profile', name)
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
+    resp = _cached_get(f"{_NORMALIZER_URL}/models/{model_id}/summary", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
@@ -1822,7 +2393,7 @@ def speckle_qa_elements(model_id: str, issue: str, limit: int = 50) -> str:
     if issue not in VALID:
         return f"Unknown issue '{issue}'. Valid: {', '.join(sorted(VALID))}"
 
-    resp = requests.get(
+    resp = _cached_get(
         f"{_NORMALIZER_URL}/models/{model_id}/qa/elements",
         params={"issue": issue, "limit": min(limit, 500)},
         timeout=30,

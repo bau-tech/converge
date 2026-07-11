@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Box,
@@ -17,6 +18,8 @@ import {
     Trash2,
     Copy,
     ExternalLink,
+    ChevronDown,
+    MoreHorizontal,
 } from 'lucide-react'
 import { ClashLogoIcon } from './components/ClashLogoIcon'
 import { CompareVersionToggle } from './components/CompareVersionToggle'
@@ -207,6 +210,14 @@ function App() {
         root.classList.toggle('dark', darkMode)
     }, [darkMode])
 
+    // Mobile header: Row 1's breadcrumb + search + action icons don't fit a
+    // ~375px-wide screen, so below `sm` they're replaced with a compact model
+    // name button (opens a full-screen picker sheet) and a "more" button
+    // (opens an actions drawer) — see showMobileNav/showMobileActions below.
+    const [showMobileNav, setShowMobileNav] = useState(false)
+    const [showMobileActions, setShowMobileActions] = useState(false)
+    const [showMobileMetrics, setShowMobileMetrics] = useState(false)
+
     // Dropdown states
     const [projects, setProjects] = useState([])
     const [selectedProject, setSelectedProject] = useState(null)
@@ -285,6 +296,9 @@ function App() {
     const [viewerFilteredIds, setViewerFilteredIds] = useState(null)   // viewer-driven isolation (charts, search, schedule…)
     const [tableOwnFilterIds, setTableOwnFilterIds] = useState(null)   // table's own search/column filters → further narrows viewer
     const [chartFilters, setChartFilters] = useState({}) // Filters from chart clicks
+    // Which chart panel (fieldKey / widget id), if any, is currently driving the
+    // 3D viewer's object colours via its own "colour viewer by this chart" toggle.
+    const [colorSourceKey, setColorSourceKey] = useState(null)
     // Direct imperative ref to SpeckleViewer — used to push filter IDs without
     // going through the React prop/memo chain (which proved unreliable for search).
     const speckleViewerRef = useRef(null)
@@ -601,6 +615,14 @@ function App() {
             .catch(() => {})
     }, [])
 
+    // Trigger an on-demand auto-sync scan on app load — registers webhooks for
+    // any brand-new project immediately, instead of waiting for the backend's
+    // hourly background pass. Fire-and-forget: the backend returns right away
+    // and the scan runs in the background, so this never blocks page load.
+    useEffect(() => {
+        fetch(`${CONFIG.normalizerUrl}/auto-sync/scan`, { method: 'POST' }).catch(() => {})
+    }, [])
+
     // Reload projects whenever the active server changes
     useEffect(() => {
         loadProjects()
@@ -654,6 +676,10 @@ function App() {
         }
         setSelectedElement(null)
         setSelectedElementDetails(null)
+        // A chart's colour mapping is only valid for the data it was built
+        // from — drop it rather than risk painting the new model with a
+        // stale/mismatched value → colour map from the previous one.
+        setColorSourceKey(null)
     }, [selectedModel, selectedVersion])
 
     // Fetch full element details (parameters) when an element is selected in the viewer
@@ -1042,8 +1068,8 @@ function App() {
                 if (!modelId) throw new Error('Ingest timed out after 3 minutes')
             }
 
-            // 2. Start async IFC export
-            const startRes = await fetch(`${CONFIG.normalizerUrl}/models/${modelId}/export/ifc`, { method: 'POST' })
+            // 2. Start async IFC export (include_schedule is a no-op when the model has no 4D tasks)
+            const startRes = await fetch(`${CONFIG.normalizerUrl}/models/${modelId}/export/ifc?include_schedule=true`, { method: 'POST' })
             const { job_id } = await safeJson(startRes, 'Export start')
 
             // 3. Poll until complete
@@ -1056,21 +1082,22 @@ function App() {
                 if (i === 179) throw new Error('Export timed out after 6 minutes')
             }
 
-            // 4. Download
-            const dlRes = await fetch(`${CONFIG.normalizerUrl}/models/${modelId}/export/ifc/${job_id}/download`)
-            if (!dlRes.ok) {
-                const text = await dlRes.text().catch(() => '')
-                throw new Error(`Download failed: HTTP ${dlRes.status} — ${text.slice(0, 120)}`)
-            }
-            const blob = await dlRes.blob()
-            const url = URL.createObjectURL(blob)
+            // 4. Download — hand the URL straight to the browser's native download
+            // manager instead of fetch()+blob(). Buffering a 100MB+ response into a
+            // JS Blob is exactly the pattern that trips a Chromium bug where large
+            // fetch() downloads fail with net::ERR_FAILED even though the server
+            // completed the response with 200 OK (confirmed server-side clean via
+            // direct testing — the failure is Chrome's blob materialization, not
+            // the network transfer). The endpoint already sets Content-Disposition:
+            // attachment, so a plain anchor click downloads it correctly without
+            // any JS ever touching the response bytes.
+            const downloadUrl = `${CONFIG.normalizerUrl}/models/${modelId}/export/ifc/${job_id}/download`
             const a = document.createElement('a')
-            a.href = url
+            a.href = downloadUrl
             a.download = `${modelName}_${commitId.slice(0, 8)}.ifc`
             document.body.appendChild(a)
             a.click()
             document.body.removeChild(a)
-            URL.revokeObjectURL(url)
         } catch (e) {
             setLoadError(`IFC export failed: ${e.message}`)
         } finally {
@@ -1456,6 +1483,19 @@ function App() {
         speckleViewerRef.current?.clearHover()
     }, [])
 
+    // "Colour viewer by this chart" toggle — only one chart panel can drive the
+    // viewer's colours at a time, so selecting a new one replaces the last.
+    const handleToggleColorSource = useCallback((fieldKey, field, colorMap) => {
+        setColorSourceKey(prev => {
+            if (prev === fieldKey) {
+                speckleViewerRef.current?.clearChartColors()
+                return null
+            }
+            speckleViewerRef.current?.applyChartColors(field, colorMap)
+            return fieldKey
+        })
+    }, [])
+
     // Generic handler for adaptive charts - enhanced with bidirectional filtering
     const handleChartValueClick = useCallback((field, value) => {
         setHighlightedField(prev => {
@@ -1502,6 +1542,15 @@ function App() {
             setSearchFilteredIds(null)
         } else {
             setViewerSelectedIds(selectedIds)
+            // Multi-selection: close the single-element side panel (it would
+            // otherwise keep showing stale data for whichever element was
+            // clicked first, and ctrl/shift-clicking more elements should
+            // build up the selection, not fight the panel for focus).
+            if (selectedIds.length > 1) {
+                setViewerSelectedElement(null)
+                setSelectedElement(null)
+                setSelectedElementDetails(null)
+            }
         }
     }, [])
 
@@ -1715,6 +1764,9 @@ function App() {
                     onHoverEnd={handleChartHoverEnd}
                     fullDataReady={!!fullData}
                     darkMode={darkMode}
+                    isColorSource={colorSourceKey === chartKey}
+                    onToggleColorSource={handleToggleColorSource}
+                    hasTypeToggle
                 />
             )
         }
@@ -1740,6 +1792,8 @@ function App() {
                     onHoverEnd={handleChartHoverEnd}
                     viewerSelectedElement={viewerSelectedElement}
                     darkMode={darkMode}
+                    isColorSource={colorSourceKey === w.id}
+                    onToggleColorSource={handleToggleColorSource}
                 />
             )
         }
@@ -1750,7 +1804,7 @@ function App() {
             if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
             if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
             if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
-            if (w.type === 'schedule') return <ScheduleWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} onFilterElements={ids => setViewerFilteredIds(ids)} />
+            if (w.type === 'schedule') return <ScheduleWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} onFilterElements={ids => setViewerFilteredIds(ids)} viewerSelectedIds={effectiveFilterIds?.length > 0 ? effectiveFilterIds : viewerSelectedIds} />
             if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
             if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />
@@ -1767,7 +1821,8 @@ function App() {
         fullData, handleChartValueClick, handleChartHover, handleChartHoverEnd,
         handleElementClick, handleUpdateWidget, handleRemoveWidget,
         data, searchFilteredIds, viewerSelectedIds, chartFilters, paramKeys,
-        visibleChartPanels, handleToggleChartPanel, darkMode, bcfTopics])
+        visibleChartPanels, handleToggleChartPanel, darkMode, bcfTopics, effectiveFilterIds,
+        colorSourceKey, handleToggleColorSource])
 
     const [layoutCopied, setLayoutCopied] = useState(false)  // false | true | 'error'
 
@@ -1883,7 +1938,14 @@ function App() {
         <div className={`min-h-screen ${darkMode ? 'dark' : 'light'}`}>
             <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-zinc-950 text-zinc-50' : 'bg-gradient-to-br from-slate-100 to-slate-200 text-zinc-900'}`}>
                 {/* Header */}
-                <header className={`glass sticky top-0 z-50 transition-colors duration-300 ${
+                {/* z-[150]: must outrank any individual panel's internal z-index scheme
+                    (.panel-header is 110, react-grid-layout resize handles are 115) so the
+                    page header stays on top regardless of scroll position — those values are
+                    only meant to compete locally within one panel, but .panel-thin doesn't
+                    establish its own stacking context, so they'd otherwise leak out and beat
+                    a plain z-50 header once panels actually scroll past it (mobile's sticky
+                    header exposed this; it was likely latent on desktop too). */}
+                <header className={`glass sticky top-0 z-[150] transition-colors duration-300 ${
                     diffResult ? 'border-b border-amber-500/40 shadow-[0_1px_8px_rgba(245,158,11,0.08)]' : 'border-b border-white/5'
                 }`}>
                     {/* Row 1 — Logo + Breadcrumb + Search + Actions */}
@@ -1901,6 +1963,31 @@ function App() {
                                 </div>
                             </motion.div>
 
+                            {/* Mobile (< sm): compact model-name button (opens full-screen
+                                picker sheet) + a "more" button (opens the actions drawer) —
+                                Row 1's breadcrumb/search/action-icon group below doesn't fit
+                                a ~375px screen without overlapping. */}
+                            <div className="flex sm:hidden items-center gap-2 flex-1 min-w-0">
+                                <button
+                                    onClick={() => setShowMobileNav(true)}
+                                    className="flex-1 min-w-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg glass-card text-left"
+                                >
+                                    <span className="flex-1 min-w-0 truncate text-sm font-medium text-[var(--speckle-foreground)]">
+                                        {selectedModel?.name || selectedProject?.name || (loadingProjects ? 'Loading…' : 'Select model')}
+                                    </span>
+                                    <ChevronDown className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                                </button>
+                                <button
+                                    onClick={() => setShowMobileActions(true)}
+                                    className="glass-card icon-btn hover:bg-white/10 shrink-0"
+                                    title="More actions"
+                                >
+                                    <MoreHorizontal className="w-5 h-5" />
+                                </button>
+                            </div>
+
+                            {/* Desktop (sm+): full breadcrumb + search + action icons, unchanged */}
+                            <div className="hidden sm:flex items-center gap-3 flex-1 min-w-0">
                             <div className="w-px h-6 bg-white/10 shrink-0" />
 
                             {/* Breadcrumb navigation */}
@@ -2055,6 +2142,7 @@ function App() {
                                     {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
                                 </motion.button>
                             </div>
+                            </div>
                         </div>
                     </div>
 
@@ -2065,7 +2153,7 @@ function App() {
                         filters changes its content, not the header's height, and the
                         viewer below never shifts up/down. */}
                     {data && (
-                        <div className="border-t border-white/5 px-4 lg:px-6 py-1.5 flex items-center gap-4 flex-wrap">
+                        <div className="hidden md:flex border-t border-white/5 px-4 lg:px-6 py-1.5 items-center gap-4 flex-wrap">
                             <AdaptiveMetrics data={data} strip />
                             <AnimatePresence>
                                 {Object.keys(chartFilters).length > 0 && (
@@ -2086,7 +2174,221 @@ function App() {
                             </AnimatePresence>
                         </div>
                     )}
+
+                    {/* Mobile (< md): metrics strip collapsed behind a tap-to-expand
+                        accordion instead of the desktop row above (which is fully
+                        hidden via `hidden md:flex`) — keeps the stats reachable
+                        without permanently spending vertical space on a small screen. */}
+                    {data && (
+                        <div className="md:hidden border-t border-white/5">
+                            <button
+                                onClick={() => setShowMobileMetrics(v => !v)}
+                                className="w-full flex items-center justify-between px-4 py-2 text-xs text-[var(--speckle-foreground-3)]"
+                            >
+                                <span className="font-medium uppercase tracking-wider">Stats</span>
+                                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMobileMetrics ? 'rotate-180' : ''}`} />
+                            </button>
+                            <AnimatePresence initial={false}>
+                                {showMobileMetrics && (
+                                    <motion.div
+                                        initial={{ height: 0, opacity: 0 }}
+                                        animate={{ height: 'auto', opacity: 1 }}
+                                        exit={{ height: 0, opacity: 0 }}
+                                        transition={{ duration: 0.2 }}
+                                        className="overflow-hidden"
+                                    >
+                                        <div className="px-4 pb-3">
+                                            {/* `horizontal` (wrapping cards), not `strip` (single-line,
+                                                no-wrap labels) — strip overflows a narrow column. */}
+                                            <AdaptiveMetrics data={data} horizontal />
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
+                    )}
                 </header>
+
+                {/* Mobile model-picker sheet — opened from Row 1's compact model-name
+                    button; reuses BreadcrumbSelector in `vertical` mode so the same
+                    Server/Project/Model/Version selection logic doesn't need duplicating.
+                    Portaled to document.body: react-grid-layout's CSS-transformed grid
+                    items create their own stacking contexts, which trapped this sheet's
+                    z-index below the viewer's floating toolbar despite a higher value. */}
+                {createPortal(
+                <AnimatePresence>
+                    {showMobileNav && (
+                        <motion.div
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden"
+                            onClick={() => setShowMobileNav(false)}
+                        >
+                            <motion.div
+                                initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+                                transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                                className="absolute bottom-0 left-0 right-0 max-h-[80vh] overflow-y-auto glass-card rounded-t-2xl p-4"
+                                onClick={e => e.stopPropagation()}
+                            >
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-sm font-semibold text-[var(--speckle-foreground)]">Select model</h3>
+                                    <button onClick={() => setShowMobileNav(false)} className="text-zinc-500 hover:text-zinc-300">
+                                        <X className="w-5 h-5" />
+                                    </button>
+                                </div>
+                                <BreadcrumbSelector
+                                    vertical
+                                    allServers={allServers}
+                                    activeServer={activeServer}
+                                    onSwitchServer={switchServer}
+                                    customServers={customServers}
+                                    onAddServer={addCustomServer}
+                                    onRemoveServer={removeCustomServer}
+                                    normalizerUrl={CONFIG.normalizerUrl}
+                                    projects={projects}
+                                    selectedProject={selectedProject}
+                                    loadingProjects={loadingProjects}
+                                    onSelectProject={(p) => setSelectedProject(p)}
+                                    models={models}
+                                    selectedModel={selectedModel}
+                                    loadingModels={loadingModels}
+                                    onSelectModel={(m) => setSelectedModel(m)}
+                                    versions={versions}
+                                    selectedVersion={selectedVersion}
+                                    loadingVersions={loadingVersions}
+                                    onSelectVersion={(v) => setSelectedVersion(v)}
+                                />
+                            </motion.div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>,
+                document.body
+                )}
+
+                {/* Mobile actions drawer — the same handlers as Row 1's desktop icon
+                    row, laid out as touch-friendly labeled tiles instead of a cramped
+                    icon strip. Also portaled — see model-picker sheet's comment above. */}
+                {createPortal(
+                <AnimatePresence>
+                    {showMobileActions && (
+                        <motion.div
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden"
+                            onClick={() => setShowMobileActions(false)}
+                        >
+                            <motion.div
+                                initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+                                transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                                className="absolute bottom-0 left-0 right-0 max-h-[80vh] overflow-y-auto glass-card rounded-t-2xl p-4"
+                                onClick={e => e.stopPropagation()}
+                            >
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-sm font-semibold text-[var(--speckle-foreground)]">Actions</h3>
+                                    <button onClick={() => setShowMobileActions(false)} className="text-zinc-500 hover:text-zinc-300">
+                                        <X className="w-5 h-5" />
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {data && versions.length >= 1 && (
+                                        <div className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10">
+                                            {/* Compare needs its own dropdown to pick a target version
+                                                — reuse the real component instead of a plain button. */}
+                                            <CompareVersionToggle
+                                                versions={versions}
+                                                compareVersionId={compareVersionId}
+                                                compareLoading={compareLoading}
+                                                diffResult={diffResult}
+                                                currentVersionId={data?.version_id}
+                                                onCompare={(id) => { activateCompareV2(id); setShowMobileActions(false) }}
+                                                onExit={() => { deactivateCompare(); setShowMobileActions(false) }}
+                                                disabled={!data}
+                                            />
+                                            <span className="text-[10px] text-[var(--speckle-foreground-3)]">Compare</span>
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={() => { reIngestModel(); setShowMobileActions(false) }}
+                                        disabled={!data || reIngesting}
+                                        className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${reIngesting ? 'text-primary' : ''}`}
+                                    >
+                                        {reIngesting ? <Loader2 className="w-6 h-6 animate-spin" /> : <RotateCcw className="w-6 h-6" />}
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Re-ingest</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { exportIfc(); setShowMobileActions(false) }}
+                                        disabled={!data || exportingIfc}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        {exportingIfc ? <Loader2 className="w-6 h-6 animate-spin" /> : <IfcLogoIcon className="w-6 h-6" />}
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">IFC export</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowTimeline(v => !v); setShowMobileActions(false) }}
+                                        disabled={!data?.normalizer_model_id}
+                                        className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${showTimeline ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                    >
+                                        <Clock className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Timeline</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowBcfBoard(true); setShowMobileActions(false) }}
+                                        disabled={!data?.normalizer_model_id}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        <BcfLogoIcon className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">BCF</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowIdsCheck(true); setShowMobileActions(false) }}
+                                        disabled={!data?.normalizer_model_id}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        <IdsLogoIcon className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">IDS</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowClashCheck(true); setShowMobileActions(false) }}
+                                        disabled={!data?.normalizer_model_id}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        <ClashLogoIcon className="w-7 h-7" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Clash</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { shareLayout(); setShowMobileActions(false) }}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
+                                    >
+                                        <Share2 className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Share link</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { saveLayoutAsDefault(); setShowMobileActions(false) }}
+                                        disabled={!selectedProject}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        <Save className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Save default</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { openShareAdmin(); setShowMobileActions(false) }}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
+                                    >
+                                        <List className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Manage links</span>
+                                    </button>
+                                    <button
+                                        onClick={() => { setDarkMode(!darkMode); setShowMobileActions(false) }}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
+                                    >
+                                        {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Theme</span>
+                                    </button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>,
+                document.body
+                )}
 
                 {/* Main Content */}
                 <main className="w-full max-w-[2400px] mx-auto px-4 lg:px-6 py-2">

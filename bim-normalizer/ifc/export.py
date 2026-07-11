@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 
 import ifcopenshell
 import ifcopenshell.guid
+from ifcopenshell.api.sequence.add_work_schedule import add_work_schedule
+from ifcopenshell.api.sequence.add_task import add_task
+from ifcopenshell.api.sequence.add_task_time import add_task_time
+from ifcopenshell.api.sequence.assign_process import assign_process
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,8 @@ def export_model(
     elements: list[dict],
     params_by_element: dict[str, list],
     coord_unit: str = "mm",
+    tasks: list[dict] | None = None,
+    task_elements: dict[str, list[str]] | None = None,
 ) -> bytes:
     """
     Build an IFC4X3 file from normalised model data.
@@ -52,6 +58,13 @@ def export_model(
                           mesh, volume_m3, area_m2
     params_by_element   – {str(element_id): [{pset, key, value, datatype}]}
     coord_unit          – unit of coordinates stored in DB
+    tasks, task_elements – optional 4D schedule (from db/schedule.py's
+                          get_tasks_for_export); when given, an IfcWorkSchedule
+                          is attached referencing the product entities created
+                          below, so a valid IFC4D file. Not attempted standalone
+                          — IfcRelAssignsToProcess must reference real entities
+                          in the same file, so this only works alongside a full
+                          geometry export, not as a schedule-only file.
     """
     scale = _UNIT_TO_M.get((coord_unit or "mm").lower(), 1e-3)
     f = ifcopenshell.file(schema=_IFC_SCHEMA)
@@ -82,6 +95,7 @@ def export_model(
 
     # ── elements ──────────────────────────────────────────────────────────
     storey_contents: dict[str, list] = {s: [] for s in unique_storeys}
+    element_id_map: dict[str, object] = {}
 
     for elem in elements:
         ifc_class  = elem.get("ifc_class") or "IfcBuildingElementProxy"
@@ -119,6 +133,7 @@ def export_model(
             _attach_quantities(f, owner_history, ifc_elem, vol, area)
 
         storey_contents[storey_key].append(ifc_elem)
+        element_id_map[str(elem["element_id"])] = ifc_elem
 
     for sname, contained in storey_contents.items():
         if contained:
@@ -128,11 +143,70 @@ def export_model(
                 RelatingStructure=storey_map[sname], RelatedElements=contained,
             )
 
+    if tasks:
+        _build_schedule(f, model_row, tasks, task_elements or {}, element_id_map)
+
     logger.info(
         "IFC4X3 export: %d elements, %d storeys — model %s",
         len(elements), len(storey_map), model_row.get("model_id"),
     )
     return f.to_string().encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 4D schedule (IfcWorkSchedule / IfcTask / IfcRelAssignsToProcess)
+# ---------------------------------------------------------------------------
+
+def _build_schedule(
+    f, model_row: dict, tasks: list[dict],
+    task_elements: dict[str, list[str]], element_id_map: dict[str, object],
+) -> None:
+    """
+    Build IfcWorkSchedule/IfcTask/IfcTaskTime/IfcRelAssignsToProcess from
+    db/schedule.py's get_tasks_for_export() shape, using ifcopenshell's
+    sequence API (add_work_schedule/add_task/add_task_time/assign_process)
+    rather than this file's usual raw create_entity style — that API
+    correctly handles the several required nested relationship types
+    (IfcRelNests, IfcRelAssignsToControl) that are easy to get subtly wrong
+    by hand, and it auto-links the schedule to the sole IfcProject in the
+    file via IfcRelDeclares.
+    """
+    work_schedule = add_work_schedule(f, name=model_row.get("branch_name") or "Construction Schedule")
+
+    by_parent: dict[str | None, list[dict]] = defaultdict(list)
+    for t in tasks:
+        by_parent[t.get("parent_task_id")].append(t)
+    for children in by_parent.values():
+        children.sort(key=lambda t: t.get("sort_order") or 0)
+
+    def _create(task: dict, parent_ifc_task) -> None:
+        ifc_task = add_task(
+            f,
+            work_schedule=work_schedule if parent_ifc_task is None else None,
+            parent_task=parent_ifc_task,
+            name=task.get("name") or "Unnamed Task",
+            identification=task.get("wbs_code"),
+        )
+        ifc_task.IsMilestone = bool(task.get("is_milestone"))
+
+        date_fields = ("planned_start", "planned_finish", "actual_start", "actual_finish")
+        if any(task.get(k) for k in date_fields):
+            task_time = add_task_time(f, task=ifc_task)
+            if task.get("planned_start"):  task_time.ScheduleStart  = task["planned_start"]
+            if task.get("planned_finish"): task_time.ScheduleFinish = task["planned_finish"]
+            if task.get("actual_start"):   task_time.ActualStart    = task["actual_start"]
+            if task.get("actual_finish"):  task_time.ActualFinish   = task["actual_finish"]
+
+        for element_id in task_elements.get(task["task_id"], []):
+            product = element_id_map.get(element_id)
+            if product is not None:
+                assign_process(f, relating_process=ifc_task, related_object=product)
+
+        for child in by_parent.get(task["task_id"], []):
+            _create(child, ifc_task)
+
+    for root in by_parent.get(None, []):
+        _create(root, None)
 
 
 # ---------------------------------------------------------------------------

@@ -86,26 +86,36 @@ def _lookup_by_type(speckle_type: str) -> dict | None:
     return _MAPPING[best_key] if best_key else None
 
 
+def _word_in(token: str, text: str, prefix: bool = False) -> bool:
+    """Word-boundary-aware containment check — avoids false positives like
+    'wall' matching inside 'wallpaper' or 'duct' matching inside 'conductivity',
+    while still matching regular plurals ('walls', 'footings').
+    prefix=True only requires a left boundary (e.g. 'reinforc' is a deliberate
+    stem meant to match 'reinforcing'/'reinforcement'/'reinforced')."""
+    pattern = rf'\b{re.escape(token)}' if prefix else rf'\b{re.escape(token)}s?\b'
+    return re.search(pattern, text) is not None
+
+
 def _heuristic(speckle_type: str) -> dict:
     """Last-resort classification from type string tokens."""
     t = speckle_type.lower()
-    if "wall" in t:                          return {"ifc_class": "IfcWall",         "category": "Walls"}
-    if "slab" in t or "floor" in t:         return {"ifc_class": "IfcSlab",         "category": "Floors"}
-    if "beam" in t:                          return {"ifc_class": "IfcBeam",         "category": "Structural Framing"}
-    if "column" in t:                        return {"ifc_class": "IfcColumn",       "category": "Structural Columns"}
-    if "door" in t:                          return {"ifc_class": "IfcDoor",         "category": "Doors"}
-    if "window" in t:                        return {"ifc_class": "IfcWindow",       "category": "Windows"}
-    if "roof" in t:                          return {"ifc_class": "IfcRoof",         "category": "Roofs"}
-    if "stair" in t:                         return {"ifc_class": "IfcStair",        "category": "Stairs"}
-    if "railing" in t:                       return {"ifc_class": "IfcRailing",      "category": "Railings"}
-    if "space" in t or "room" in t:         return {"ifc_class": "IfcSpace",        "category": "Rooms"}
-    if "pipe" in t:                          return {"ifc_class": "IfcPipeSegment",  "category": "Piping"}
-    if "duct" in t:                          return {"ifc_class": "IfcDuctSegment",  "category": "Duct Systems"}
-    if "footing" in t or "foundation" in t: return {"ifc_class": "IfcFooting",      "category": "Structural Foundations"}
-    if "pile" in t:                          return {"ifc_class": "IfcPile",         "category": "Structural Foundations"}
-    if "member" in t or "brace" in t:       return {"ifc_class": "IfcMember",       "category": "Structural Framing"}
-    if "plate" in t:                         return {"ifc_class": "IfcPlate",        "category": "Structural Framing"}
-    if "rebar" in t or "reinforc" in t:     return {"ifc_class": "IfcReinforcingBar", "category": "Structural Reinforcement"}
+    if _word_in("wall", t):                                  return {"ifc_class": "IfcWall",         "category": "Walls"}
+    if _word_in("slab", t) or _word_in("floor", t):          return {"ifc_class": "IfcSlab",         "category": "Floors"}
+    if _word_in("beam", t):                                  return {"ifc_class": "IfcBeam",         "category": "Structural Framing"}
+    if _word_in("column", t):                                return {"ifc_class": "IfcColumn",       "category": "Structural Columns"}
+    if _word_in("door", t):                                  return {"ifc_class": "IfcDoor",         "category": "Doors"}
+    if _word_in("window", t):                                return {"ifc_class": "IfcWindow",       "category": "Windows"}
+    if _word_in("roof", t):                                  return {"ifc_class": "IfcRoof",         "category": "Roofs"}
+    if _word_in("stair", t):                                 return {"ifc_class": "IfcStair",        "category": "Stairs"}
+    if _word_in("railing", t):                               return {"ifc_class": "IfcRailing",      "category": "Railings"}
+    if _word_in("space", t) or _word_in("room", t):          return {"ifc_class": "IfcSpace",        "category": "Rooms"}
+    if _word_in("pipe", t):                                  return {"ifc_class": "IfcPipeSegment",  "category": "Piping"}
+    if _word_in("duct", t):                                  return {"ifc_class": "IfcDuctSegment",  "category": "Duct Systems"}
+    if _word_in("footing", t) or _word_in("foundation", t):  return {"ifc_class": "IfcFooting",      "category": "Structural Foundations"}
+    if _word_in("pile", t):                                  return {"ifc_class": "IfcPile",         "category": "Structural Foundations"}
+    if _word_in("member", t) or _word_in("brace", t):        return {"ifc_class": "IfcMember",       "category": "Structural Framing"}
+    if _word_in("plate", t):                                 return {"ifc_class": "IfcPlate",        "category": "Structural Framing"}
+    if _word_in("rebar", t) or _word_in("reinforc", t, prefix=True): return {"ifc_class": "IfcReinforcingBar", "category": "Structural Reinforcement"}
     return _FALLBACK
 
 
@@ -126,6 +136,13 @@ _TEKLA_SUFFIX_MAP: dict[str, dict] = {
     "Grid":         {"ifc_class": "IfcGrid",                    "category": "Grids"},
     "Weld":         {"ifc_class": "IfcFastener",                "category": "Structural Connections"},
     "CustomPart":   {"ifc_class": "IfcBuildingElementProxy",    "category": "Generic Models"},
+    # --- Best-effort additions below: based on IFC4X3/Tekla Open API naming
+    # conventions, NOT verified against a real Tekla connector export. Spot-check
+    # these against an actual Tekla model before relying on them in production. ---
+    "Plate":        {"ifc_class": "IfcPlate",                   "category": "Structural Framing"},
+    "BoltArray":    {"ifc_class": "IfcMechanicalFastener",      "category": "Structural Connections"},
+    "RebarGroup":   {"ifc_class": "IfcReinforcingBar",          "category": "Structural Reinforcement"},
+    "RebarMesh":    {"ifc_class": "IfcReinforcingMesh",         "category": "Structural Reinforcement"},
 }
 
 _debug_sample: set[str] = set()   # track already-logged type keys, avoid log flood
@@ -541,6 +558,7 @@ def classify_element(
             return entry
 
         # 5. heuristic on TSM class name or speckle_type
+        _log_generic_fallthrough(speckle_type, obj, category_hint, source="Tekla")
         return _heuristic(tekla_type or speckle_type)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -599,6 +617,7 @@ def classify_element(
                 cat = _IFC_CLASS_TO_CATEGORY.get(raw_type, "Generic Models")
                 return {"ifc_class": raw_type, "category": cat}
 
+        _log_generic_fallthrough(speckle_type, obj, category_hint, source="IFC")
         return entry or _heuristic(speckle_type)
 
     # ══════════════════════════════════════════════════════════════════════

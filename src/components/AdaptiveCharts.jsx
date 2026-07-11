@@ -1,7 +1,7 @@
 import EChart from './EChart'
 import { baseOption, categoryAxisStyle, valueAxisStyle, legendStyle } from '../lib/echartsTheme'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2 } from 'lucide-react'
+import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2, Palette } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { ChartBuilder } from './ChartBuilder'
 import { discoverProperties, aggregateProperty, discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
@@ -138,6 +138,21 @@ function sortEntries(entries, sortOrder) {
     }
 }
 
+// Builds the exact value → colour mapping a bar/pie chart renders, so other
+// consumers (the "colour viewer by this chart" toggle) can reuse it verbatim
+// instead of re-deriving their own palette/ordering that could drift out of
+// sync with what the chart actually shows.
+export function buildValueColorMap(data, config) {
+    const isPie = config.type === 'pie'
+    const minCount = config.minCount || 0
+    const entries = Object.entries(data || {}).filter(([key]) => !isEmptyKey(key) && (minCount === 0 || Number(data[key]) >= minCount))
+    const sorted = sortEntries(entries, config.sortOrder).slice(0, config.maxItems || (isPie ? 8 : 15))
+    const palette = resolveColors(config.colorScheme)
+    const map = {}
+    sorted.forEach(([key], idx) => { map[key] = palette[idx % palette.length] })
+    return map
+}
+
 // Build a complete ECharts option for a (horizontal or vertical) bar chart
 function prepareBarOption(data, config, highlightedValue, { darkMode = true, standalone = false, isResizing = false } = {}) {
     const minCount = config.minCount || 0
@@ -156,7 +171,7 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
             ? num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
             : num.toFixed(decimals)
     }
-    const palette = resolveColors(config.colorScheme)
+    const colorMap = buildValueColorMap(data, config)
     const showLabels = config.showLabels !== false
 
     const tickFontSize   = config.tickFontSize   || 11
@@ -167,8 +182,8 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
     const showGridLines  = config.showGridLines  !== false
     const showLegend     = config.showLegend     === true
 
-    const seriesData = sorted.map((d, idx) => {
-        const base = palette[idx % palette.length]
+    const seriesData = sorted.map((d) => {
+        const base = colorMap[d[0]]
         const isHighlighted = d[0] === highlightedValue
         const color = !highlightedValue ? base : isHighlighted ? COLOR_PALETTES.highlight : hexToRgba(base, 0.25)
         return {
@@ -235,7 +250,7 @@ function preparePieOption(data, config, highlightedValue, { darkMode = true, sta
     const minCount = config.minCount || 0
     const entries = Object.entries(data).filter(([key]) => !isEmptyKey(key) && (minCount === 0 || Number(data[key]) >= minCount))
     const sorted = sortEntries(entries, config.sortOrder).slice(0, config.maxItems || 8)
-    const palette = resolveColors(config.colorScheme)
+    const colorMap = buildValueColorMap(data, config)
     const showLabels = config.showLabels !== false
     const donut = config.donut !== false  // default true (donut style)
     const labelFontSize = config.labelFontSize || 11
@@ -265,8 +280,8 @@ function preparePieOption(data, config, highlightedValue, { darkMode = true, sta
         return tail || params.name
     }
 
-    const seriesData = sorted.map((d, idx) => {
-        const base = palette[idx % palette.length]
+    const seriesData = sorted.map((d) => {
+        const base = colorMap[d[0]]
         const isHighlighted = d[0] === highlightedValue
         const color = !highlightedValue ? base : isHighlighted ? COLOR_PALETTES.highlight : hexToRgba(base, 0.35)
         return {
@@ -520,6 +535,16 @@ export function DynamicChart({
     standalone = false,
     onHide,
     darkMode = true,
+    // "Colour viewer by this chart" toggle — isColorSource is true when this
+    // chart is the one currently driving the 3D viewer's object colours.
+    isColorSource = false,
+    onToggleColorSource,  // (fieldKey, field, valueColorMap) => void
+    // Whether DashboardGrid will overlay its H/V/P chart-type-toggle buttons on
+    // top of this panel (true for the plain summary-chart panels; custom chart
+    // widgets manage type via ChartBuilder instead, so they never get one) —
+    // widens the header's reserved space so the in-flow buttons below never
+    // sit underneath DashboardGrid's absolutely-positioned overlay buttons.
+    hasTypeToggle = false,
 }) {
     // Chart type is now controlled entirely by the config prop.
     // In standalone mode DashboardGrid passes an updated config when the user
@@ -539,6 +564,16 @@ export function DynamicChart({
 
     const layoutHeight = height || (isPieLike ? 300 : 250)
     const [isResizing, setIsResizing] = useState(false)
+
+    // Only bar/pie charts grouped on a real element field can drive viewer
+    // colouring — histograms/box plots are numeric distributions with no
+    // discrete per-object value to colour by.
+    const canColorViewer = onToggleColorSource && !!effectiveConfig.field && ['bar', 'pie'].includes(effectiveConfig.type)
+    const handleToggleColorSource = () => {
+        if (!canColorViewer) return
+        const colorMap = buildValueColorMap(data, effectiveConfig)
+        onToggleColorSource(fieldKey, effectiveConfig.field, colorMap)
+    }
 
     const optionContext = { darkMode, standalone, isResizing }
 
@@ -632,10 +667,15 @@ export function DynamicChart({
 
     // ── Standalone panel mode (individual grid panel) ──────────────────
     if (standalone) {
+        // Reserves room so this header's own in-flow buttons (colour toggle,
+        // edit) never render underneath DashboardGrid's absolutely-positioned
+        // overlay buttons (close ~24px, pin ~another 24px, and — for plain
+        // summary charts only — the H/V/P chart-type-toggle group ~68px more).
+        const headerPaddingRight = 52 + (hasTypeToggle ? 68 : 0)
         return (
             <div className="h-full flex flex-col relative">
-                {/* drag-zone title row — pr reserves space for DashboardGrid's close button */}
-                <div className="panel-header" style={{ paddingRight: 24 }}>
+                {/* drag-zone title row — pr reserves space for DashboardGrid's overlay buttons */}
+                <div className="panel-header" style={{ paddingRight: headerPaddingRight }}>
                     <div className="drag-zone flex items-center gap-1.5 min-w-0 flex-1 cursor-move overflow-hidden">
                         {effectiveConfig.type === 'pie'
                             ? <PieChart className="w-3.5 h-3.5 text-purple-400 shrink-0" />
@@ -648,6 +688,16 @@ export function DynamicChart({
                             <span className="text-[10px] text-yellow-500 shrink-0">Loading…</span>
                         )}
                     </div>
+                    {canColorViewer && (
+                        <button
+                            onMouseDown={e => e.stopPropagation()}
+                            onClick={e => { e.stopPropagation(); handleToggleColorSource() }}
+                            className={`ml-1 p-0.5 rounded shrink-0 ${isColorSource ? 'bg-cyan-500/30' : 'hover:bg-white/10'}`}
+                            title={isColorSource ? 'Stop colouring viewer by this chart' : 'Colour viewer by this chart'}
+                        >
+                            <Palette size={11} className={isColorSource ? 'text-cyan-300' : 'text-zinc-400'} />
+                        </button>
+                    )}
                     {onEdit && (
                         <button
                             onMouseDown={e => e.stopPropagation()}

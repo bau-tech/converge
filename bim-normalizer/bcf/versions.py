@@ -17,6 +17,15 @@ FOUNDATION_VERSION = "1.1"
 FOUNDATION_LEGACY_VERSION = "1.0"
 
 
+def is_bcf_v3(request: Request) -> bool:
+    # projects_router/topics_router are mounted once per version with no
+    # other signal to the handler about which mount it was reached through
+    # (see bcf_server.py's prefix loop) — a few response fields differ
+    # between BCF 2.1 and 3.0 (see bcf/projects.py, bcf/topics.py), so we
+    # detect the version from the request path instead.
+    return request.url.path.startswith(f"/bcf/{BCF_VERSION}/")
+
+
 def build_versions_payload(base: str) -> dict:
     return {
         "versions": [

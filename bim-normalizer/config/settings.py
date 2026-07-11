@@ -20,10 +20,13 @@ SPECKLE_TOKEN: str = os.getenv("SPECKLE_TOKEN", "")
 # left empty by default since it depends on the deployer's own DNS/proxy setup.
 PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
-# How often the background task re-scans watched servers for newly-created
-# streams that don't have a webhook yet (existing streams sync instantly via
-# their webhook regardless of this interval — see /webhooks/speckle/{id}).
-AUTO_SYNC_SCAN_INTERVAL_S: int = int(os.getenv("AUTO_SYNC_SCAN_INTERVAL_S", str(15 * 60)))
+# How often the background task re-scans watched servers as a dormant-project
+# safety net for missed webhook deliveries (new-stream registration, missed
+# commits, missed deletions) — see speckle/webhooks.py's scan_server(). A
+# project someone actually opens gets scanned immediately via the frontend's
+# on-load POST /auto-sync/scan instead of waiting for this interval; this
+# background pass only matters for projects nobody has open.
+AUTO_SYNC_SCAN_INTERVAL_S: int = int(os.getenv("AUTO_SYNC_SCAN_INTERVAL_S", str(60 * 60)))
 
 PG_HOST: str = _require("PG_HOST")
 PG_PORT: int = int(os.getenv("PG_PORT", "5432"))

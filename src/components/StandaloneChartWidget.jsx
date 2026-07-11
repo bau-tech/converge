@@ -19,6 +19,8 @@ export function StandaloneChartWidget({
     onHoverEnd,
     viewerSelectedElement,
     darkMode = true,
+    isColorSource = false,
+    onToggleColorSource,
 }) {
     // Auto-open builder if widget has no configuration yet
     const [showBuilder, setShowBuilder] = useState(!widget.chartConfig)
@@ -142,6 +144,8 @@ export function StandaloneChartWidget({
                     fullDataReady={fullDataReady}
                     onEdit={() => setShowBuilder(true)}
                     darkMode={darkMode}
+                    isColorSource={isColorSource}
+                    onToggleColorSource={onToggleColorSource}
                 />
             ) : (
                 <div className="h-full flex flex-col items-center justify-center gap-2 text-zinc-500">

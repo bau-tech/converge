@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
-import { X, Trash2, ImageOff, ChevronLeft, Send } from 'lucide-react'
+import { X, Trash2, ImageOff, ChevronLeft, Send, ExternalLink } from 'lucide-react'
 import {
     updateTopic, deleteTopic, listComments, createComment,
     listViewpoints, getSnapshotUrl,
@@ -13,25 +13,26 @@ import {
 import { BcfLogoIcon } from './BcfLogoIcon'
 
 const COLUMN_COLOR = {
-    Backlog: 'border-zinc-500/30 bg-zinc-500/[0.03]',
-    'To Do': 'border-amber-500/30 bg-amber-500/[0.03]',
-    'In Progress': 'border-blue-500/30 bg-blue-500/[0.03]',
-    Review: 'border-purple-500/30 bg-purple-500/[0.03]',
-    Done: 'border-emerald-500/30 bg-emerald-500/[0.03]',
+    Backlog: { border: 'border-zinc-400/50', bg: 'bg-zinc-400/10', text: 'text-zinc-300', badge: 'bg-zinc-400/20 text-zinc-200' },
+    'To Do': { border: 'border-amber-500/50', bg: 'bg-amber-500/10', text: 'text-amber-300', badge: 'bg-amber-500/25 text-amber-300' },
+    'In Progress': { border: 'border-blue-500/50', bg: 'bg-blue-500/10', text: 'text-blue-300', badge: 'bg-blue-500/25 text-blue-300' },
+    Review: { border: 'border-purple-500/50', bg: 'bg-purple-500/10', text: 'text-purple-300', badge: 'bg-purple-500/25 text-purple-300' },
+    Done: { border: 'border-emerald-500/50', bg: 'bg-emerald-500/10', text: 'text-emerald-300', badge: 'bg-emerald-500/25 text-emerald-300' },
 }
 
 function Column({ id, title, count, children }) {
     const { setNodeRef, isOver } = useDroppable({ id })
+    const colors = COLUMN_COLOR[title]
     return (
         <div
             ref={setNodeRef}
-            className={`flex flex-col gap-2 w-[300px] shrink-0 rounded-xl border p-3 transition-colors ${
-                isOver ? 'border-amber-400/60 bg-amber-400/[0.06]' : (COLUMN_COLOR[title] || 'border-[var(--speckle-outline-3)]')
+            className={`flex flex-col gap-2 flex-1 min-w-[260px] rounded-xl border-2 p-3 transition-colors ${
+                isOver ? 'border-amber-400/80 bg-amber-400/15' : (colors ? `${colors.border} ${colors.bg}` : 'border-[var(--speckle-outline-3)]')
             }`}
         >
             <div className="flex items-center justify-between px-1 shrink-0">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--speckle-foreground-2)]">{title}</h3>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]">{count}</span>
+                <h3 className={`text-xs font-bold uppercase tracking-wider ${colors?.text || 'text-[var(--speckle-foreground-2)]'}`}>{title}</h3>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${colors?.badge || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]'}`}>{count}</span>
             </div>
             <div className="flex flex-col gap-2 overflow-y-auto flex-1 min-h-[120px] pr-0.5">
                 {children}
@@ -237,9 +238,18 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                     <BcfLogoIcon className="w-6 h-6" />
                     <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">BCF Issue Board</h2>
                 </div>
-                <button onClick={handleClose} className="p-1.5 hover:bg-[var(--speckle-outline-3)] rounded-lg transition-colors">
-                    <X className="w-4 h-4 text-[var(--speckle-foreground-3)]" />
-                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => window.open('/admin', '_blank', 'noopener,noreferrer')}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)] transition-colors"
+                        title="Open the bcf-server admin panel in a new window"
+                    >
+                        <ExternalLink className="w-3.5 h-3.5" /> Admin
+                    </button>
+                    <button onClick={handleClose} className="p-1.5 hover:bg-[var(--speckle-outline-3)] rounded-lg transition-colors">
+                        <X className="w-4 h-4 text-[var(--speckle-foreground-3)]" />
+                    </button>
+                </div>
             </div>
 
             <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveTopic(null)}>
