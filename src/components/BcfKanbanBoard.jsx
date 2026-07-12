@@ -1,16 +1,17 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
-import { X, Trash2, ImageOff, ChevronLeft, Send, ExternalLink } from 'lucide-react'
+import { X, Trash2, ImageOff, ChevronLeft, Send, ExternalLink, Camera, Pencil } from 'lucide-react'
 import {
     updateTopic, deleteTopic, listComments, createComment,
-    listViewpoints, getSnapshotUrl,
+    listViewpoints, createViewpoint, getSnapshotUrl, blobUrlToBase64,
 } from '../utils/bcfClient'
 import {
     COLUMNS, topicToColumn, columnToUpdates,
     PRIORITIES, PRIORITY_COLOR, PRIORITY_BORDER, priorityRank, isOverdue,
 } from '../utils/bcfWorkflow'
 import { BcfLogoIcon } from './BcfLogoIcon'
+import { ViewpointMarkupEditor } from './ViewpointMarkupEditor'
 
 const COLUMN_COLOR = {
     Backlog: { border: 'border-zinc-400/50', bg: 'bg-zinc-400/10', text: 'text-zinc-300', badge: 'bg-zinc-400/20 text-zinc-200' },
@@ -107,6 +108,8 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
     const [topicComments, setTopicComments] = useState([])
     const [newComment, setNewComment] = useState('')
     const [activeTopic, setActiveTopic] = useState(null)
+    const [addingViewpoint, setAddingViewpoint] = useState(false) // markup editor open for selectedTopic
+    const [addViewpointDraft, setAddViewpointDraft] = useState(null) // freshly captured viewpoint pending annotation
 
     // Lazy-load each topic's first viewpoint (snapshot + the raw viewpoint,
     // the latter so opening a card can fly the viewer there), once per topic
@@ -121,9 +124,10 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
             const entries = await Promise.all(missing.map(async (t) => {
                 try {
                     const vps = await listViewpoints(projectId, t.guid)
-                    if (!vps?.[0]) return [t.guid, null, null]
-                    const url = await getSnapshotUrl(projectId, t.guid, vps[0].guid)
-                    return [t.guid, url, vps[0]]
+                    const vp = vps?.[vps.length - 1] // most recently added viewpoint, not the first
+                    if (!vp) return [t.guid, null, null]
+                    const url = await getSnapshotUrl(projectId, t.guid, vp.guid)
+                    return [t.guid, url, vp]
                 } catch {
                     return [t.guid, null, null]
                 }
@@ -203,6 +207,71 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
     const handleClose = () => {
         try { viewerRef?.current?.resetFilter() } catch {}
         onClose?.()
+    }
+
+    // Captures a fresh viewpoint from the current 3D view and opens the
+    // markup editor on it, for adding a (possibly annotated) second
+    // viewpoint to an already-existing topic.
+    const openAddViewpoint = async () => {
+        if (!selectedTopic || !projectId) return
+        try {
+            const vp = await viewerRef?.current?.captureViewpoint()
+            if (!vp?.snapshot_base64) return
+            setAddViewpointDraft(vp)
+            setAddingViewpoint(true)
+        } catch (e) {
+            console.warn('Could not capture viewpoint:', e)
+        }
+    }
+
+    // Loads the topic's *existing* saved viewpoint image (annotations and
+    // all) back into the markup editor for further annotation — distinct
+    // from openAddViewpoint(), which always starts from a brand-new capture
+    // of whatever the 3D view currently shows. Saving still creates a new
+    // viewpoint (camera/selection unchanged, only the image differs),
+    // preserving BCF viewpoint history rather than mutating this one in place.
+    const openEditViewpoint = async () => {
+        const existing = viewpoints[selectedTopic?.guid]
+        const currentSnapshotUrl = snapshots[selectedTopic?.guid]
+        if (!existing || !currentSnapshotUrl) return
+        try {
+            const base64 = await blobUrlToBase64(currentSnapshotUrl)
+            const {
+                camera_view_point, camera_direction, camera_up_vector,
+                field_of_view, view_to_world_scale, is_orthogonal, clipping_planes, selection,
+            } = existing
+            setAddViewpointDraft({
+                camera_view_point, camera_direction, camera_up_vector,
+                field_of_view, view_to_world_scale, is_orthogonal, clipping_planes, selection,
+                snapshot_base64: base64,
+            })
+            setAddingViewpoint(true)
+        } catch (e) {
+            console.warn('Could not load existing viewpoint for editing:', e)
+        }
+    }
+
+    const handleMarkupSave = async (newBase64) => {
+        if (addViewpointDraft && selectedTopic) {
+            try {
+                const viewpoint = await createViewpoint(projectId, selectedTopic.guid, { ...addViewpointDraft, snapshot_base64: newBase64 })
+                setViewpoints(prev => ({ ...prev, [selectedTopic.guid]: viewpoint }))
+                setSnapshots(prev => {
+                    const old = prev[selectedTopic.guid]
+                    if (old) URL.revokeObjectURL(old)
+                    return { ...prev, [selectedTopic.guid]: `data:image/png;base64,${newBase64}` }
+                })
+            } catch (e) {
+                console.warn('Could not add viewpoint:', e)
+            }
+        }
+        setAddViewpointDraft(null)
+        setAddingViewpoint(false)
+    }
+
+    const handleMarkupCancel = () => {
+        setAddViewpointDraft(null)
+        setAddingViewpoint(false)
     }
 
     const removeTopic = async (topic) => {
@@ -287,8 +356,33 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                         </button>
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                        {snapshots[selectedTopic.guid] && (
-                            <img src={snapshots[selectedTopic.guid]} className="w-full rounded-lg border border-[var(--speckle-outline-3)]" alt="" />
+                        {snapshots[selectedTopic.guid] ? (
+                            <div className="relative">
+                                <img src={snapshots[selectedTopic.guid]} className="w-full rounded-lg border border-[var(--speckle-outline-3)]" alt="" />
+                                <div className="absolute top-1.5 right-1.5 flex gap-1">
+                                    <button
+                                        onClick={openEditViewpoint}
+                                        className="p-1.5 rounded-md bg-black/60 text-white hover:bg-amber-500 hover:text-black transition-colors"
+                                        title="Continue annotating this saved viewpoint"
+                                    >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                        onClick={openAddViewpoint}
+                                        className="p-1.5 rounded-md bg-black/60 text-white hover:bg-amber-500 hover:text-black transition-colors"
+                                        title="Capture and annotate a new viewpoint from the current view"
+                                    >
+                                        <Camera className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={openAddViewpoint}
+                                className="w-full flex items-center justify-center gap-1.5 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors border border-dashed border-[var(--speckle-outline-3)]"
+                            >
+                                <Camera className="w-3.5 h-3.5" /> Add viewpoint
+                            </button>
                         )}
                         <h4 className="text-sm font-semibold text-[var(--speckle-foreground)]">{selectedTopic.title}</h4>
                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -343,6 +437,16 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                     </div>
                 </motion.div>
             )}
+
+            <AnimatePresence>
+                {addingViewpoint && addViewpointDraft?.snapshot_base64 && (
+                    <ViewpointMarkupEditor
+                        imageBase64={addViewpointDraft.snapshot_base64}
+                        onSave={handleMarkupSave}
+                        onCancel={handleMarkupCancel}
+                    />
+                )}
+            </AnimatePresence>
         </motion.div>
     )
 }

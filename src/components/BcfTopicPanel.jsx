@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Flag, X, Plus, Camera, Send, Trash2, Download, Upload, ChevronLeft } from 'lucide-react'
+import { Flag, X, Plus, Camera, Send, Trash2, Download, Upload, ChevronLeft, Pencil } from 'lucide-react'
 import { BcfLogoIcon } from './BcfLogoIcon'
+import { ViewpointMarkupEditor } from './ViewpointMarkupEditor'
 import {
     createTopic, updateTopic, deleteTopic,
     listComments, createComment,
-    listTopics, listViewpoints, createViewpoint, getSnapshotUrl,
+    listTopics, listViewpoints, createViewpoint, getSnapshotUrl, blobUrlToBase64,
     exportBcfzip, importBcfzip,
 } from '../utils/bcfClient'
 import { archiveLinkedSpeckleComment } from '../utils/bcfSync'
@@ -50,6 +51,13 @@ export function BcfTopicPanel({
 
     const [author, setAuthor] = useState(getAuthorName)
     const importInputRef = useRef(null)
+
+    // Markup editor state — `markupMode` is null | 'create' | 'add-viewpoint'.
+    // 'create' annotates pendingViewpoint's own snapshot in place; 'add-viewpoint'
+    // captures a fresh one for an already-existing topic (addViewpointDraft)
+    // and posts it as a new viewpoint on save.
+    const [markupMode, setMarkupMode] = useState(null)
+    const [addViewpointDraft, setAddViewpointDraft] = useState(null)
 
     // Reset any open detail/create view when switching models — a stale
     // selectedTopic/topic guid from the previous model must not leak through.
@@ -148,6 +156,76 @@ export function BcfTopicPanel({
         }
     }
 
+    // Captures a fresh viewpoint from the current 3D view and opens the
+    // markup editor on it — the "add a second (annotated) viewpoint to an
+    // already-existing topic" flow, which didn't exist before this.
+    const openAddViewpoint = async () => {
+        if (!selectedTopic || !projectId) return
+        try {
+            const vp = await viewerRef.current?.captureViewpoint()
+            if (!vp?.snapshot_base64) { setError('Could not capture a screenshot of the current view'); return }
+            setAddViewpointDraft(vp)
+            setMarkupMode('add-viewpoint')
+        } catch (e) {
+            console.warn('Could not capture viewpoint:', e)
+            setError('Could not capture viewpoint')
+        }
+    }
+
+    // Loads the topic's *existing* saved viewpoint image (annotations and
+    // all, if it already has any) back into the markup editor for further
+    // annotation — distinct from openAddViewpoint(), which always starts
+    // from a brand-new capture of whatever the 3D view currently shows.
+    // Reuses the same `addViewpointDraft`/'add-viewpoint' save path: saving
+    // still creates a new viewpoint (camera/selection unchanged, only the
+    // image differs), preserving BCF viewpoint history rather than mutating
+    // the existing one in place.
+    const openEditViewpoint = async () => {
+        if (!selectedTopic?.viewpoint || !snapshotUrl) return
+        try {
+            const base64 = await blobUrlToBase64(snapshotUrl)
+            const {
+                camera_view_point, camera_direction, camera_up_vector,
+                field_of_view, view_to_world_scale, is_orthogonal, clipping_planes, selection,
+            } = selectedTopic.viewpoint
+            setAddViewpointDraft({
+                camera_view_point, camera_direction, camera_up_vector,
+                field_of_view, view_to_world_scale, is_orthogonal, clipping_planes, selection,
+                snapshot_base64: base64,
+            })
+            setMarkupMode('add-viewpoint')
+        } catch (e) {
+            console.warn('Could not load existing viewpoint for editing:', e)
+            setError('Could not load existing viewpoint for editing')
+        }
+    }
+
+    const handleMarkupSave = async (newBase64) => {
+        if (markupMode === 'create') {
+            setPendingViewpoint((prev) => (prev ? { ...prev, snapshot_base64: newBase64 } : prev))
+            setMarkupMode(null)
+            return
+        }
+        if (markupMode === 'add-viewpoint' && addViewpointDraft && selectedTopic) {
+            try {
+                const viewpoint = await createViewpoint(projectId, selectedTopic.guid, { ...addViewpointDraft, snapshot_base64: newBase64 })
+                const enriched = { ...selectedTopic, viewpoint }
+                setSelectedTopic(enriched)
+                onTopicsChange?.(topics.map((t) => (t.guid === selectedTopic.guid ? enriched : t)))
+            } catch (e) {
+                console.warn('Could not add viewpoint:', e)
+                setError('Could not add viewpoint')
+            }
+        }
+        setAddViewpointDraft(null)
+        setMarkupMode(null)
+    }
+
+    const handleMarkupCancel = () => {
+        setMarkupMode(null)
+        setAddViewpointDraft(null)
+    }
+
     const submitComment = async () => {
         if (!newComment.trim() || !selectedTopic) return
         const authorName = author.trim() || 'Dashboard User'
@@ -211,7 +289,7 @@ export function BcfTopicPanel({
                 list.map(async (t) => {
                     try {
                         const vps = await listViewpoints(projectId, t.guid)
-                        return { ...t, viewpoint: vps[0] || null }
+                        return { ...t, viewpoint: vps[vps.length - 1] || null } // most recently added viewpoint, not the first
                     } catch {
                         return { ...t, viewpoint: null }
                     }
@@ -278,10 +356,27 @@ export function BcfTopicPanel({
                                     <button onClick={() => setCreating(false)} className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200">
                                         <ChevronLeft className="w-3.5 h-3.5" /> Back
                                     </button>
-                                    <div className={`flex items-center gap-2 text-xs px-2 py-1 rounded ${pendingViewpoint ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 bg-white/5'}`}>
-                                        <Camera className="w-3.5 h-3.5" />
-                                        {pendingViewpoint ? 'Current view captured' : 'Capturing view…'}
-                                    </div>
+                                    {pendingViewpoint?.snapshot_base64 ? (
+                                        <div className="relative">
+                                            <img
+                                                src={`data:image/png;base64,${pendingViewpoint.snapshot_base64}`}
+                                                alt="Captured viewpoint"
+                                                className="w-full rounded-lg border border-white/10"
+                                            />
+                                            <button
+                                                onClick={() => setMarkupMode('create')}
+                                                className="absolute top-1.5 right-1.5 p-1.5 rounded-md bg-black/60 text-white hover:bg-amber-500 hover:text-black transition-colors"
+                                                title="Annotate this screenshot"
+                                            >
+                                                <Pencil className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2 text-xs px-2 py-1 rounded text-zinc-500 bg-white/5">
+                                            <Camera className="w-3.5 h-3.5" />
+                                            Capturing view…
+                                        </div>
+                                    )}
                                     <input
                                         value={newTitle}
                                         onChange={(e) => setNewTitle(e.target.value)}
@@ -361,8 +456,33 @@ export function BcfTopicPanel({
                                     </div>
                                     {selectedTopic.description && <p className="text-xs text-zinc-400 whitespace-pre-wrap">{selectedTopic.description}</p>}
                                     <p className="text-[10px] text-zinc-500">{selectedTopic.creation_author} · {new Date(selectedTopic.creation_date).toLocaleString()}</p>
-                                    {snapshotUrl && (
-                                        <img src={snapshotUrl} className="w-full rounded-lg border border-white/10" alt="Viewpoint snapshot" />
+                                    {snapshotUrl ? (
+                                        <div className="relative">
+                                            <img src={snapshotUrl} className="w-full rounded-lg border border-white/10" alt="Viewpoint snapshot" />
+                                            <div className="absolute top-1.5 right-1.5 flex gap-1">
+                                                <button
+                                                    onClick={openEditViewpoint}
+                                                    className="p-1.5 rounded-md bg-black/60 text-white hover:bg-amber-500 hover:text-black transition-colors"
+                                                    title="Continue annotating this saved viewpoint"
+                                                >
+                                                    <Pencil className="w-3.5 h-3.5" />
+                                                </button>
+                                                <button
+                                                    onClick={openAddViewpoint}
+                                                    className="p-1.5 rounded-md bg-black/60 text-white hover:bg-amber-500 hover:text-black transition-colors"
+                                                    title="Capture and annotate a new viewpoint from the current view"
+                                                >
+                                                    <Camera className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <button
+                                            onClick={openAddViewpoint}
+                                            className="w-full flex items-center justify-center gap-1.5 text-xs px-2 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-zinc-200 transition-colors border border-dashed border-white/10"
+                                        >
+                                            <Camera className="w-3.5 h-3.5" /> Add viewpoint
+                                        </button>
                                     )}
 
                                     <div className="border-t border-white/10 pt-2 space-y-1.5">
@@ -428,6 +548,23 @@ export function BcfTopicPanel({
                             </div>
                         )}
                     </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {markupMode === 'create' && pendingViewpoint?.snapshot_base64 && (
+                    <ViewpointMarkupEditor
+                        imageBase64={pendingViewpoint.snapshot_base64}
+                        onSave={handleMarkupSave}
+                        onCancel={handleMarkupCancel}
+                    />
+                )}
+                {markupMode === 'add-viewpoint' && addViewpointDraft?.snapshot_base64 && (
+                    <ViewpointMarkupEditor
+                        imageBase64={addViewpointDraft.snapshot_base64}
+                        onSave={handleMarkupSave}
+                        onCancel={handleMarkupCancel}
+                    />
                 )}
             </AnimatePresence>
 

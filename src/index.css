@@ -274,29 +274,61 @@ html {
   width: 24px !important; height: 24px !important;
   cursor: se-resize !important; transform: none !important;
 }
+/* react-resizable/css/styles.css (imported in DashboardGrid.jsx) ships its
+   own rule for this EXACT compound selector — `.react-grid-item >
+   .react-resizable-handle.react-resizable-handle-sw { transform:
+   rotate(90deg) }` — to rotate one shared corner-grip glyph into all four
+   corners. Our own `.react-resizable-handle-sw` rule above already carries
+   `!important` and should win regardless of the library's higher selector
+   specificity, but restating it against the library's own selector removes
+   any doubt: this was the actual source of the sw handle still reading as a
+   rotated/bracket-looking-like-"U" shape after the border-only fix above. */
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw {
+  transform: none !important;
+}
 
 /* L-bracket indicators — explicit per-side borders prevent hairline bleed.
-   Border-width (3px) deliberately matches the edge pills' thickness below —
-   corner and edge handles should read as one consistent affordance weight. */
+   No border-radius: at this size (10-12px) a rounded joint blurs the two
+   strokes together into something that reads as a curve/"U" rather than a
+   crisp right angle — a sharp corner is what actually makes it read as "L". */
 .react-resizable-handle-sw::after,
 .react-resizable-handle-se::after {
   content: ''; position: absolute;
   width: 10px; height: 10px;
   border-top: none;
-  border-bottom: 3px solid rgba(255, 255, 255, 0.55);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.55);
   transition: border-color 0.15s ease, width 0.15s ease, height 0.15s ease;
 }
 .react-resizable-handle-sw::after {
   bottom: 4px; left: 4px;
-  border-left: 3px solid rgba(255, 255, 255, 0.55);
+  border-left: 2px solid rgba(255, 255, 255, 0.55);
   border-right: none;
-  border-radius: 0 0 0 2px;
 }
 .react-resizable-handle-se::after {
   bottom: 4px; right: 4px;
-  border-right: 3px solid rgba(255, 255, 255, 0.55);
+  border-right: 2px solid rgba(255, 255, 255, 0.55);
   border-left: none;
-  border-radius: 0 0 2px 0;
+}
+
+/* react-resizable's bundled stylesheet ships a SECOND default — a plain
+   corner-triangle via :after (separate from the SVG-glyph default already
+   suppressed above): `.react-grid-item>.react-resizable-handle:after` with
+   NO corner suffix, so it matches every corner's ::after indiscriminately.
+   Its 2-class selector out-specifies our simple 1-class
+   `.react-resizable-handle-sw::after` rule above, and since neither side
+   carries !important, its `border-right:2px` leaks through even on the sw
+   corner (which wants none) — this, not the transform or background-image,
+   was the actual remaining source of the "U" shape. Fixed by matching (and
+   out-specifying, via the extra corner class) its own selector directly. */
+.react-grid-item > .react-resizable-handle.react-resizable-handle-sw::after {
+  border-right: none !important;
+  width: 10px !important; height: 10px !important;
+  bottom: 4px !important; left: 4px !important; right: auto !important;
+}
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se::after {
+  border-left: none !important;
+  width: 10px !important; height: 10px !important;
+  bottom: 4px !important; right: 4px !important; left: auto !important;
 }
 
 .react-grid-item:hover .react-resizable-handle-sw::after,
@@ -304,7 +336,11 @@ html {
 .react-grid-item.resizing .react-resizable-handle-sw::after,
 .react-grid-item.resizing .react-resizable-handle-se::after {
   border-bottom-color: rgba(19, 108, 255, 1);
-  width: 12px; height: 12px;
+  /* !important + specificity now needed to beat the static 10px !important
+     override above (added to out-specify react-resizable's stray corner-
+     triangle default) — without it this hover grow-to-12px effect would be
+     silently blocked by that same override. */
+  width: 12px !important; height: 12px !important;
 }
 .react-grid-item:hover .react-resizable-handle-sw::after,
 .react-grid-item.resizing .react-resizable-handle-sw::after {
@@ -703,15 +739,6 @@ select option {
 
 .light .react-resizable-handle-sw::after,
 .light .react-resizable-handle-se::after { border-color: rgba(0, 0, 0, 0.55); }
-
-/* Light mode only: bottom-left handle gets a third (right) edge, turning its
-   bracket into a U-shape instead of the L-shape every other corner uses —
-   the hover rule below sets border-color on all sides via the shorthand,
-   so it colors this new edge too without a separate override. */
-.light .react-resizable-handle-sw::after {
-  border-right: 3px solid rgba(0, 0, 0, 0.55);
-  border-radius: 0 0 2px 2px;
-}
 
 .light .react-grid-item:hover .react-resizable-handle-sw::after,
 .light .react-grid-item:hover .react-resizable-handle-se::after { border-color: rgba(19, 108, 255, 0.85); }

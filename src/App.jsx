@@ -1220,7 +1220,7 @@ function App() {
                 list.map(async (t) => {
                     try {
                         const vps = await listViewpoints(bcfProjectId, t.guid)
-                        return { ...t, viewpoint: vps[0] || null }
+                        return { ...t, viewpoint: vps[vps.length - 1] || null } // most recently added viewpoint, not the first
                     } catch {
                         return { ...t, viewpoint: null }
                     }

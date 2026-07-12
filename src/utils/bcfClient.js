@@ -98,6 +98,20 @@ export async function getSnapshotUrl(projectId, topicGuid, viewpointGuid) {
     return URL.createObjectURL(blob)
 }
 
+// Converts an already-fetched snapshot (a blob: URL from getSnapshotUrl) back
+// into a bare base64 string — needed to feed an *existing* saved viewpoint's
+// image into ViewpointMarkupEditor for further annotation, since it works in
+// the same base64 shape as a fresh viewer.screenshot() capture.
+export async function blobUrlToBase64(blobUrl) {
+    const blob = await fetch(blobUrl).then((r) => r.blob())
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '')
+        reader.onerror = reject
+        reader.readAsDataURL(blob)
+    })
+}
+
 export async function exportBcfzip(projectId) {
     const blob = await bridge(`/projects/${projectId}/export`)
     const url = URL.createObjectURL(blob)
