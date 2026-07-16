@@ -1,4 +1,4 @@
-# Speckle Dashboard
+# Converge
 
 A React dashboard for BIM analysis, coordination, and validation connected to a self-hosted [Speckle](https://speckle.systems/) server. It ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper, normalises them to an IFC-aligned PostgreSQL schema, and exposes analytics, 3D visualisation, model comparison, BCF issue collaboration, clash detection, IDS (Information Delivery Specification) checking, and an MCP server that lets Claude query and reason over your BIM data.
 
@@ -601,7 +601,7 @@ docker compose up -d --build
 ## Project structure
 
 ```
-speckle-dashboard/
+converge/
 ├── src/
 │   ├── App.jsx                        Main application, data loading, routing
 │   ├── main.jsx                       React entry point

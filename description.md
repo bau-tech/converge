@@ -1,7 +1,5 @@
 # Converge
 
-*(working name — not finalized)*
-
 ## English
 
 Converge — BIM coordination and analytics dashboard that ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper via Speckle, normalizing them into a unified schema for 3D visualization, clash detection, IDS compliance checking, and BCF issue tracking. It closes the loop between design and coordination with 4D schedule playback, 5D quantity/cost takeoff, cross-version model diffing, and an AI copilot (via MCP) that lets you query and reason over your BIM data in natural language.

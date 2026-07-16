@@ -135,7 +135,7 @@ services:
       - speckle-net
 
   # ── Frontend Dashboard (Nginx + built Vite SPA) ──────────────────────────────
-  speckle-dashboard:
+  converge:
     build:
       context: .
       args:
@@ -151,7 +151,7 @@ services:
         VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
         VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
         VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
-    container_name: speckle-dashboard
+    container_name: converge
     ports:
       - "8080:80"
     environment:
