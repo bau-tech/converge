@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/converge-logo-transparent.png" alt="Converge logo" width="160">
+  <img src="public/converge-logo2-transparent.png" alt="Converge logo" width="160">
 </p>
 
 # Converge
