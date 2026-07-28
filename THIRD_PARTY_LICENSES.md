@@ -1,6 +1,6 @@
 # Third-party licenses
 
-This project's own license is still TBD (no root `LICENSE` file yet). This
+This project's own code is MIT-licensed (see the root `LICENSE` file). This
 document is independent of that choice — it records what license each
 dependency ships under today, based on an audit of `bim-normalizer/requirements.txt`
 and `package.json`.
