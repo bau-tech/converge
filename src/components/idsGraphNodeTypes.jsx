@@ -1,6 +1,8 @@
-import { Handle, Position, useReactFlow } from '@xyflow/react'
-import { useState } from 'react'
+import { Handle, Position, useReactFlow, useNodes, useEdges } from '@xyflow/react'
+import { useEffect, useState } from 'react'
 import { Trash2 } from 'lucide-react'
+import { SearchableCombobox } from './SearchableCombobox'
+import { getBsddEntityProperties, searchBsddDictionaries, searchBsddClasses } from '../utils/bsddClient'
 
 // Standalone editable card per node type for the IDS visual graph editor.
 // Each node writes its own `data` via setNodes (the standard React Flow v12
@@ -43,6 +45,50 @@ function useRemoveNode(id) {
         setNodes(nodes => nodes.filter(n => n.id !== id))
         setEdges(edges => edges.filter(e => e.source !== id && e.target !== id))
     }
+}
+
+// Finds the IFC class of an Entity node wired into the same spec
+// applicability/requirements port as this node, so Property/Classification
+// nodes can narrow their bSDD suggestions to the entity actually being
+// checked instead of the whole IFC schema. Entity/property/etc. nodes don't
+// connect to each other directly — they're siblings converging on the same
+// spec handle — so this walks source->spec->sibling-sources rather than a
+// direct edge.
+function useConnectedEntityClass(id) {
+    const nodes = useNodes()
+    const edges = useEdges()
+    for (const edge of edges) {
+        if (edge.source !== id) continue
+        const siblings = edges.filter(e => e.target === edge.target && e.targetHandle === edge.targetHandle)
+        for (const sibling of siblings) {
+            const node = nodes.find(n => n.id === sibling.source)
+            if (node?.type === 'entity' && node.data?.name) return node.data.name
+        }
+    }
+    return null
+}
+
+// bSDD's IFC 4.3 property-set data per entity class, cached module-wide
+// (keyed by class name) since it's shared across every Property node in the
+// canvas and never changes within a session.
+const bsddEntityPropsCache = new Map()
+
+function useBsddEntityProperties(entityClass) {
+    const [result, setResult] = useState(null)
+    useEffect(() => {
+        if (!entityClass) { setResult(null); return }
+        const cached = bsddEntityPropsCache.get(entityClass)
+        if (cached) { setResult(cached); return }
+        let cancelled = false
+        getBsddEntityProperties(entityClass)
+            .then(res => {
+                bsddEntityPropsCache.set(entityClass, res)
+                if (!cancelled) setResult(res)
+            })
+            .catch(() => { if (!cancelled) setResult({ resolved: false, propertySets: [] }) })
+        return () => { cancelled = true }
+    }, [entityClass])
+    return result
 }
 
 function NodeShell({ id, type, children, minWidth = 220, selected }) {
@@ -228,16 +274,75 @@ export function EntityNode({ id, data }) {
 
 export function PropertyNode({ id, data }) {
     const set = useNodeField(id)
+    const entityClass = useConnectedEntityClass(id)
+    const bsdd = useBsddEntityProperties(entityClass)
+
+    const propertySetOptions = (bsdd?.propertySets || []).map(ps => ({
+        value: ps.name, label: ps.name, meta: `${ps.properties.length} props`,
+    }))
+    const selectedSet = bsdd?.propertySets?.find(ps => ps.name === data.propertySet)
+    const baseNameOptions = (selectedSet?.properties || []).map(p => ({
+        value: p.baseName, label: p.baseName, meta: p.suggestedIfcType,
+    }))
+    const selectedProperty = selectedSet?.properties?.find(p => p.baseName === data.baseName)
+
+    const dataTypeOptions = [
+        ...(selectedProperty?.suggestedIfcType
+            ? [{ value: selectedProperty.suggestedIfcType, label: selectedProperty.suggestedIfcType, meta: 'Recommended', recommended: true }]
+            : []),
+        ...COMMON_DATA_TYPES.filter(t => t !== selectedProperty?.suggestedIfcType).map(t => ({ value: t, label: t })),
+    ]
+
     return (
-        <NodeShell id={id} type="property">
+        <NodeShell id={id} type="property" minWidth={240}>
             <SourceHandle />
-            <Field label="Property Set" value={data.propertySet} onChange={v => set('propertySet', v)} placeholder="Pset_WallCommon" mono />
-            <Field label="Base Name" value={data.baseName} onChange={v => set('baseName', v)} placeholder="IsExternal" mono />
-            <Field label="Data Type (optional)" value={data.dataType} onChange={v => set('dataType', v)} placeholder="IFCBOOLEAN" mono suggestions={COMMON_DATA_TYPES} />
+            <SearchableCombobox
+                label="Property Set"
+                hint={entityClass ? `Filtered for ${entityClass}` : undefined}
+                value={data.propertySet}
+                onChange={v => set('propertySet', v)}
+                placeholder="Pset_WallCommon"
+                mono
+                options={propertySetOptions}
+                emptyHint={entityClass ? 'No bSDD match for this entity — type freely' : 'Connect an Entity node to filter suggestions'}
+            />
+            <SearchableCombobox
+                label="Base Name"
+                hint={selectedSet ? `${selectedSet.properties.length} properties available` : undefined}
+                value={data.baseName}
+                onChange={v => set('baseName', v)}
+                onSelect={opt => {
+                    if (!data.dataType) {
+                        const prop = selectedSet?.properties?.find(p => p.baseName === opt.value)
+                        if (prop?.suggestedIfcType) set('dataType', prop.suggestedIfcType)
+                    }
+                }}
+                placeholder="IsExternal"
+                mono
+                options={baseNameOptions}
+                emptyHint="Type freely"
+            />
+            <SearchableCombobox
+                label="Data Type (optional)"
+                hint={selectedProperty?.suggestedIfcType ? `Recommended: ${selectedProperty.suggestedIfcType}` : undefined}
+                value={data.dataType}
+                onChange={v => set('dataType', v)}
+                placeholder="IFCBOOLEAN"
+                mono
+                options={dataTypeOptions}
+            />
+            {selectedProperty?.description && (
+                <p className="text-[9px] text-[var(--speckle-foreground-3)] italic leading-tight">{selectedProperty.description}</p>
+            )}
             <Field label="Value (optional, ignored if Restriction attached)" value={data.value} onChange={v => set('value', v)} />
-            <Field label="URI (optional)" value={data.uri} onChange={v => set('uri', v)} placeholder="https://..." mono />
-            <CardinalityField value={data.cardinality} onChange={v => set('cardinality', v)} />
-            <InstructionsField value={data.instructions} onChange={v => set('instructions', v)} />
+            <details className="nodrag">
+                <summary className="cursor-pointer text-[9px] uppercase tracking-wide text-[var(--speckle-foreground-3)] select-none">Advanced options</summary>
+                <div className="pt-1.5 space-y-1.5">
+                    <Field label="URI (optional)" value={data.uri} onChange={v => set('uri', v)} placeholder="https://..." mono />
+                    <CardinalityField value={data.cardinality} onChange={v => set('cardinality', v)} />
+                    <InstructionsField value={data.instructions} onChange={v => set('instructions', v)} />
+                </div>
+            </details>
         </NodeShell>
     )
 }
@@ -257,9 +362,63 @@ export function AttributeNode({ id, data }) {
 
 export function ClassificationNode({ id, data }) {
     const set = useNodeField(id)
+    const [browsing, setBrowsing] = useState(false)
+    const [dictionary, setDictionary] = useState(null) // { uri, name } — picked from the bSDD dictionary search below
+    const [dictionaryQuery, setDictionaryQuery] = useState('')
+    const [classQuery, setClassQuery] = useState('')
+
     return (
-        <NodeShell id={id} type="classification">
+        <NodeShell id={id} type="classification" minWidth={240}>
             <SourceHandle />
+            <button
+                type="button"
+                onClick={() => setBrowsing(b => !b)}
+                className="nodrag w-full text-left px-1.5 py-1 rounded text-[10px] border border-dashed border-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] hover:border-[var(--speckle-outline-2)] transition-colors"
+            >
+                {browsing ? '▾' : '▸'} Browse bSDD classification…
+            </button>
+            {browsing && (
+                <div className="space-y-1.5 rounded border border-[var(--speckle-outline-3)] p-1.5">
+                    <SearchableCombobox
+                        label="Dictionary"
+                        value={dictionaryQuery}
+                        onChange={setDictionaryQuery}
+                        onSelect={opt => { setDictionary({ uri: opt.value, name: opt.label }); setDictionaryQuery(opt.label); setClassQuery('') }}
+                        placeholder="Search e.g. Uniclass, Omniclass…"
+                        loadOptions={async (q) => {
+                            const { dictionaries } = await searchBsddDictionaries(q)
+                            return dictionaries.map(d => ({
+                                value: d.uri,
+                                label: `${d.name}${d.version ? ` ${d.version}` : ''}`,
+                                meta: d.organizationNameOwner,
+                            }))
+                        }}
+                        emptyHint="Type to search bSDD dictionaries"
+                    />
+                    <SearchableCombobox
+                        label="Class"
+                        value={classQuery}
+                        onChange={setClassQuery}
+                        onSelect={opt => {
+                            set('system', dictionary.name)
+                            // IDS classification value conventionally holds the
+                            // dictionary's reference code (e.g. Uniclass "Ss_25_45_72_02"),
+                            // not the free-text display name — that's just shown in the picker.
+                            set('value', opt.meta || opt.label)
+                            set('uri', opt.value)
+                            setBrowsing(false)
+                        }}
+                        placeholder={dictionary ? `Search within ${dictionary.name}…` : 'Pick a dictionary first'}
+                        disabled={!dictionary}
+                        loadOptions={dictionary ? async (q) => {
+                            if (!q.trim()) return []
+                            const { classes } = await searchBsddClasses(dictionary.uri, q, 20)
+                            return classes.map(c => ({ value: c.uri, label: c.name, meta: c.referenceCode }))
+                        } : undefined}
+                        emptyHint={dictionary ? 'Type to search classes in this dictionary' : undefined}
+                    />
+                </div>
+            )}
             <Field label="System (optional)" value={data.system} onChange={v => set('system', v)} placeholder="Uniclass 2015" />
             <Field label="Value (optional, ignored if Restriction attached)" value={data.value} onChange={v => set('value', v)} />
             <Field label="URI (optional)" value={data.uri} onChange={v => set('uri', v)} placeholder="https://..." mono />

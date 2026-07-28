@@ -2,16 +2,17 @@
   "_comment": "Maps canonical IFC-standard parameter names to source-specific key aliases. Edit to add new sources without code changes.",
 
   "material": {
+    "_comment_builtin_params": "Revit BuiltInParameter enum names — locale-independent (unlike 'keys' below, which are display-name strings and only match whatever language the Revit installation that authored the model uses). Verified against two real ingested Revit models (a German-locale install: 'Material'/'Tragendes Material') via the Speckle Revit connector's internalDefinitionName field — see ParameterDefinitionHandler.cs. Checked before 'keys' in db/insert.py's _resolve_canonical().",
+    "builtin_params": ["MATERIAL_ID_PARAM", "STRUCTURAL_MATERIAL_PARAM"],
     "keys": [
       "Structural Material", "Material", "Type Material", "Material Name",
       "material", "BuildingMaterial", "Material 1",
-      "MATERIAL", "MAIN_PART.MATERIAL", "TOP_FLANGE_MATERIAL", "BOT_FLANGE_MATERIAL"
+      "MATERIAL", "MAIN_PART.MATERIAL", "TOP_FLANGE_MATERIAL", "BOT_FLANGE_MATERIAL",
+      "structuralAsset"
     ],
+    "_comment_psets": "Material NAME is IfcMaterial.Name (an entity attribute, not a Pset property — already handled directly in ifc/export.py's material-grouping code, not via a Pset). StrengthClass verified against Pset_ConcreteElementGeneral's real property list (buildingSMART IFC4.3.2 docs) — the previous 'ConcreteStrengthClass' name doesn't exist.",
     "psets": [
-      {"pset": "Pset_MaterialCommon",              "key": "Category"},
-      {"pset": "Pset_MaterialCommon",              "key": "Name"},
-      {"pset": "Pset_ConcreteElementGeneral",      "key": "ConcreteStrengthClass"},
-      {"pset": "Pset_ReinforcementBarPitchOfBeam", "key": "MaterialGrade"}
+      {"pset": "Pset_ConcreteElementGeneral", "key": "StrengthClass"}
     ]
   },
 
@@ -21,9 +22,9 @@
       "Material Grade", "Reinforcement Grade",
       "GRADE", "MAIN_PART.GRADE", "grade_short"
     ],
+    "_comment_psets": "Pset_SteelStructuralElementCommon and Pset_ReinforcingElementCommon are not real IFC psets (verified against buildingSMART's IFC4.3.2 alphabetical Pset index — neither exists). StructuralGrade on Pset_MaterialSteel is the real property, and attaches to IfcMaterial, not the element directly.",
     "psets": [
-      {"pset": "Pset_SteelStructuralElementCommon", "key": "Grade"},
-      {"pset": "Pset_ReinforcingElementCommon",     "key": "SteelGrade"}
+      {"pset": "Pset_MaterialSteel", "key": "StructuralGrade"}
     ]
   },
 
@@ -31,15 +32,19 @@
     "keys": [
       "Type Name", "Family", "Structural Framing Type", "Profile Name",
       "profile", "profileName", "Section",
-      "PROFILE", "NAME", "MAIN_PART.NAME", "PROFILE_TYPE"
+      "PROFILE", "NAME", "MAIN_PART.NAME"
     ],
+    "_comment_psets": "Pset_ProfileDef and Pset_SteelStructuralElementCommon.Section are not real IFC constructs (ProfileName is an IfcProfileDef entity attribute, not a Pset property; the pset itself doesn't exist). The Reference property below is real but buildingSMART documents it as deprecated in favor of the .Name attribute on the element's Type object — which ifc/export.py's IfcRelDefinesByType/IfcXxxType.Name mechanism already covers, so this is read-side recognition only (e.g. re-ingesting a real IFC file), not the primary export path for profile designation.",
     "psets": [
-      {"pset": "Pset_ProfileDef",                   "key": "ProfileName"},
-      {"pset": "Pset_SteelStructuralElementCommon", "key": "Section"}
+      {"pset": "Pset_BeamCommon",   "key": "Reference"},
+      {"pset": "Pset_ColumnCommon", "key": "Reference"},
+      {"pset": "Pset_MemberCommon", "key": "Reference"}
     ]
   },
 
   "fire_rating": {
+    "_comment_builtin_params": "DOOR_FIRE_RATING verified against a real ingested Revit model (German-locale: 'Feuerwiderstandsklasse' = 'F 120') via internalDefinitionName. Notably NOT the generic 'FIRE_RATING' name that might be assumed from general Revit API knowledge — Revit's actual enum for this is class-specific, which conveniently matches _resolve_typed_property's own per-ifc_class Pset lookup (this only fires for elements resolving to IfcDoor anyway). No wall/beam/column/slab equivalent confirmed yet — add one here only once seen via a real model with fire-rated walls, the same way this one was found, not assumed from documentation.",
+    "builtin_params": ["DOOR_FIRE_RATING"],
     "keys": [
       "Fire Rating", "FireRating", "FIRE_RATING",
       "Fire resistance rating", "fire_rating"
@@ -57,6 +62,8 @@
   },
 
   "load_bearing": {
+    "_comment_builtin_params": "Verified against two real ingested Revit models (German-locale: 'Tragwerk') via internalDefinitionName — WALL_STRUCTURAL_SIGNIFICANT is the wall 'Structural' checkbox, FLOOR_PARAM_IS_STRUCTURAL its floor/slab equivalent. No column/beam equivalent found — Revit framing elements have no per-instance load-bearing boolean (they're structural by definition), so Pset_ColumnCommon/Pset_BeamCommon.LoadBearing below still relies on the 'keys' fallback only.",
+    "builtin_params": ["WALL_STRUCTURAL_SIGNIFICANT", "FLOOR_PARAM_IS_STRUCTURAL"],
     "keys": [
       "Structural", "LoadBearing", "Load Bearing",
       "LOAD_BEARING", "Is Structural", "IsStructural", "load_bearing"
@@ -71,6 +78,8 @@
 
   "phase": {
     "_comment": "Project/schedule phase name (when an element was modeled, demolished, etc.) — distinct from 'lifecycle_status' (IFC construction status: NEW/EXISTING/DEMOLISH/...).",
+    "_comment_builtin_params": "Verified against real ingested Revit models (values seen: 'New Construction', 'Phase 1') via internalDefinitionName. PHASE_DEMOLISHED has no non-empty values in either model checked (nothing demolished in either), but is a real confirmed field name, not a guess.",
+    "builtin_params": ["PHASE_CREATED", "PHASE_DEMOLISHED"],
     "keys": [
       "Phase Created", "Phase", "PHASE",
       "phase", "Construction Phase", "Phase Demolished",
@@ -89,21 +98,27 @@
   },
 
   "assembly_mark": {
+    "_comment_builtin_params": "ALL_MODEL_MARK ('Kennzeichen' in German) verified against a real ingested Revit model with real values (e.g. '603', '607' — door/window mark numbers).",
+    "builtin_params": ["ALL_MODEL_MARK"],
     "keys": [
       "Mark", "Type Mark", "ASSEMBLY_POS", "Assembly Position",
       "AssemblyMark", "assembly_mark", "PRELIM_MARK", "PART_POS"
     ],
+    "_comment_psets": "AssemblyPlace is a real property, but it lives on Pset_ConcreteElementGeneral and means where assembly physically happens (factory vs. site) — not a mark/tag number, and not a property of Pset_ElementAssemblyCommon at all. Reference (IfcIdentifier, 'Reference ID for this specified type... e.g. type A-1') on Pset_ElementAssemblyCommon is the actually-correct target for a mark/tag identifier.",
     "psets": [
-      {"pset": "Pset_ElementAssemblyCommon", "key": "AssemblyPlace"}
+      {"pset": "Pset_ElementAssemblyCommon", "key": "Reference"}
     ]
   },
 
   "workset": {
-    "keys": ["Workset", "WORKSET", "workset", "WorkSet", "Workset Name"],
+    "_comment": "worksetId/worksetName are a different shape entirely — top-level properties.worksetId/worksetName fields on the Revit connector's object (see db/insert.py's _flatten_params plain-value branch), not name/value/internalDefinitionName-wrapped parameters, so there's no builtin_params entry to add here (the field name itself is already the Speckle connector's own stable identifier, not a localized display string). 'worksetName' added below since the existing 'Workset Name' (with a space) doesn't match it — a casing/spacing bug, not a language one.",
+    "keys": ["Workset", "WORKSET", "workset", "WorkSet", "Workset Name", "worksetName", "worksetId"],
     "psets": []
   },
 
   "family_type": {
+    "_comment_builtin_params": "Verified against real ingested Revit models with real values (e.g. 'HEB 450', 'IPE 200', 'Basiswand'/'Geschossdecke'). 'profile' above shares some of the same 'keys' aliases (Type Name/Family) but intentionally has no builtin_params entries of its own to avoid two canonicals claiming the same BuiltInParameter name — family_type is the more direct semantic match for these.",
+    "builtin_params": ["ELEM_TYPE_PARAM", "ELEM_FAMILY_PARAM", "ELEM_FAMILY_AND_TYPE_PARAM", "ALL_MODEL_TYPE_NAME", "SYMBOL_FAMILY_NAME_PARAM"],
     "keys": [
       "Family and Type", "Type", "Family", "Element Type",
       "FAMILY_TYPE", "TYPE_NAME", "Family Name", "Type Name"
@@ -112,6 +127,8 @@
   },
 
   "reference_level": {
+    "_comment_builtin_params": "Verified against real ingested Revit models with real values (e.g. 'L5 TOS', 'B_Dü_E00_OKRD').",
+    "builtin_params": ["LEVEL_PARAM", "INSTANCE_REFERENCE_LEVEL_PARAM"],
     "keys": [
       "Level", "Base Level", "Reference Level",
       "Floor", "Building story", "reference_level"
@@ -120,6 +137,8 @@
   },
 
   "area": {
+    "_comment_builtin_params": "HOST_AREA_COMPUTED verified against a real ingested Revit model with real non-zero values.",
+    "builtin_params": ["HOST_AREA_COMPUTED"],
     "keys": ["Area", "AREA", "area", "Net Area", "Gross Area", "NetArea", "GrossArea", "NetSideArea"],
     "psets": [
       {"pset": "Qto_WallBaseQuantities",   "key": "NetSideArea"},
@@ -134,6 +153,8 @@
   },
 
   "volume": {
+    "_comment_builtin_params": "HOST_VOLUME_COMPUTED verified against a real ingested Revit model with real non-zero values.",
+    "builtin_params": ["HOST_VOLUME_COMPUTED"],
     "keys": ["Volume", "VOLUME", "volume", "Net Volume", "Gross Volume", "NetVolume", "GrossVolume"],
     "psets": [
       {"pset": "Qto_WallBaseQuantities",   "key": "NetVolume"},
@@ -150,6 +171,8 @@
   },
 
   "length": {
+    "_comment_builtin_params": "CURVE_ELEM_LENGTH verified against a real ingested Revit model with real non-zero values.",
+    "builtin_params": ["CURVE_ELEM_LENGTH"],
     "keys": ["Length", "MAIN_PART.LENGTH", "LENGTH", "length"],
     "psets": [
       {"pset": "Qto_BeamBaseQuantities",   "key": "Length"},
@@ -159,20 +182,24 @@
   },
 
   "weight": {
+    "_comment_builtin_params": "STEEL_ELEM_WEIGHT verified against a real ingested Revit model with real non-zero values (e.g. 746.6, 1013.47).",
+    "builtin_params": ["STEEL_ELEM_WEIGHT"],
     "keys": ["Weight", "WEIGHT", "weight", "Mass", "NET_WEIGHT"],
     "psets": []
   },
 
   "unit_mass": {
-    "_comment": "Mass per unit length (kg/m) — distinct from total element weight ('weight'). IFC's Pset_SteelStructuralElementCommon.UnitMass is per-length, not total mass.",
+    "_comment": "Mass per unit length (kg/m) — distinct from total element weight ('weight'). Pset_SteelStructuralElementCommon is not a real IFC pset (verified against buildingSMART's IFC4.3.2 alphabetical Pset index). The real property is MassPerLength on Pset_ProfileMechanical — but that pset attaches to IfcProfileDef, which bim-normalizer doesn't model (export.py only builds Tessellation/BoundingBox representations, no swept-profile geometry), so this entry is read-side recognition only (e.g. re-ingesting a real IFC file); writing it on export would need real profile geometry first.",
     "keys": ["Unit Mass", "UNIT_WEIGHT", "unit_mass"],
     "psets": [
-      {"pset": "Pset_SteelStructuralElementCommon", "key": "UnitMass"}
+      {"pset": "Pset_ProfileMechanical", "key": "MassPerLength"}
     ]
   },
 
   "ifc_guid": {
     "_comment": "IFC GlobalId (22-char IFC GUID) — captured from psets/properties when present, or from the Speckle object's top-level globalId/applicationId attributes (set by db/insert.py's _flatten_top_level_attrs).",
+    "_comment_builtin_params": "IFC_GUID/IFC_TYPE_GUID happened to already match via the 'IfcGUID' literal key alias below (this particular display string isn't translated even in German Revit), but added here too for robustness against locales where it might be.",
+    "builtin_params": ["IFC_GUID", "IFC_TYPE_GUID"],
     "keys": [
       "IfcGUID", "IFC Guid", "GlobalId", "Global Id", "IFCGUID", "IFC_GUID", "globalId"
     ],
@@ -186,11 +213,15 @@
   },
 
   "omniclass": {
+    "_comment_builtin_params": "OMNICLASS_CODE/OMNICLASS_DESCRIPTION verified against real ingested Revit models with real values (e.g. '23.25.30.21.14.11' / 'Metal Joists'). Notably these were ALSO failing via the 'keys' list even before considering language: the real German display names are 'OmniClass-Nummer'/'OmniClass-Titel' (hyphenated) which don't match the existing 'OmniClass Number'/'OmniClass Title' (spaced) aliases even case-insensitively — a punctuation mismatch layered on top of the language one.",
+    "builtin_params": ["OMNICLASS_CODE", "OMNICLASS_DESCRIPTION"],
     "keys": ["OmniClass Number", "OmniClass Title", "Assembly Code", "Assembly Description"],
     "psets": []
   },
 
   "thermal_transmittance": {
+    "_comment_builtin_params": "Verified against a real ingested Revit model (German-locale: 'Wärmedurchgangskoeffizient (U)') via internalDefinitionName. Notably NOT 'HEAT_TRANSFER_COEFFICIENT_PARAM' as the plain BuiltInParameter name might suggest — the real enum is the ANALYTICAL_ prefixed one below.",
+    "builtin_params": ["ANALYTICAL_HEAT_TRANSFER_COEFFICIENT"],
     "keys": ["Heat Transfer Coefficient (U)", "U-Value", "Thermal mass", "thermal_transmittance"],
     "psets": [
       {"pset": "Pset_WallCommon",   "key": "ThermalTransmittance"},
@@ -198,5 +229,23 @@
       {"pset": "Pset_WindowCommon", "key": "ThermalTransmittance"},
       {"pset": "Pset_DoorCommon",   "key": "ThermalTransmittance"}
     ]
+  },
+
+  "parent_ref": {
+    "_comment": "Reference-type canonical (value is another element's application_id, not a scalar) — resolved into a real bim_relationships row by db/insert.py's build_relationships(), run as an ingest post-pass once every element in the model has an element_id. Revit exposes a hosted element's host via this field (e.g. a door's host wall).",
+    "keys": ["parentApplicationId", "hostApplicationId", "Host Id"],
+    "psets": []
+  },
+
+  "room_ref": {
+    "_comment": "Same reference-type handling as parent_ref — Revit's containing-room reference.",
+    "keys": ["roomApplicationId"],
+    "psets": []
+  },
+
+  "space_ref": {
+    "_comment": "Same reference-type handling as parent_ref — Revit's containing-space reference (MEP elements).",
+    "keys": ["spaceApplicationId"],
+    "psets": []
   }
 }

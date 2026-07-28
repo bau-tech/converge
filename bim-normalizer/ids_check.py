@@ -40,7 +40,17 @@ def validate_ids_xml(content: str) -> None:
     try:
         ids_module.from_string(content)
     except Exception as exc:
-        raise InvalidIdsError(str(exc)) from exc
+        # ifctester's IdsXmlValidationError.__str__ is just the generic
+        # "...appears to be invalid. See details above." stub — the actual
+        # reason (e.g. "Tag 'ids:baseName' expected") only lives on its
+        # .xml_error (an xmlschema XMLSchemaValidationError), which is
+        # otherwise silently discarded, leaving callers with no way to tell
+        # what's actually wrong with the document.
+        xml_error = getattr(exc, "xml_error", None)
+        reason = getattr(xml_error, "reason", None) if xml_error is not None else None
+        path = getattr(xml_error, "path", None) if xml_error is not None else None
+        detail = f"{reason} (at {path})" if reason and path else (reason or str(exc))
+        raise InvalidIdsError(detail) from exc
 
 
 def run_ids_check(ifc_bytes: bytes, ids_content: str, resolve_application_ids: bool = False) -> dict:

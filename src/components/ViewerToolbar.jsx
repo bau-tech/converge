@@ -280,7 +280,7 @@ export default function ViewerToolbar({
             <div className="glass rounded-full overflow-hidden shadow-lg p-1.5 flex flex-col gap-1 items-center">
                 {/* View Mode */}
                 <button
-                    className={`p-2 rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all ${showModes ? 'bg-blue-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={() => { closeAll(); setShowModes(v => !v) }}
                     disabled={!isViewerReady}
                     title={`View mode: ${currentMode.label}`}
@@ -290,7 +290,7 @@ export default function ViewerToolbar({
 
                 {/* Edges */}
                 <button
-                    className={`p-2 rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all ${edgesEnabled ? 'bg-blue-500/60 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onToggleEdges}
                     disabled={!isViewerReady}
                     title={edgesEnabled ? 'Hide edges' : 'Show edges'}
@@ -306,7 +306,7 @@ export default function ViewerToolbar({
 
                 {/* Lighting */}
                 <button
-                    className={`p-2 rounded-full transition-all ${
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all ${
                         showLighting
                             ? 'bg-amber-500/80 text-white'
                             : lc.enabled
@@ -696,7 +696,7 @@ export default function ViewerToolbar({
 
                 {/* Section Box */}
                 <button
-                    className={`p-2 rounded-full transition-colors ${isSectionBoxEnabled ? 'bg-blue-500 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-colors ${isSectionBoxEnabled ? 'bg-blue-500 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onSectionBoxClick}
                     title="Section Box"
                 >
@@ -705,7 +705,7 @@ export default function ViewerToolbar({
 
                 {/* Zoom Extents */}
                 <button
-                    className="p-2 rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
+                    className="w-[30px] h-[30px] flex items-center justify-center rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
                     onClick={onZoomExtents}
                     title="Zoom Extents"
                 >
@@ -714,7 +714,7 @@ export default function ViewerToolbar({
 
                 {/* Perspective / Ortho toggle */}
                 <button
-                    className={`p-2 rounded-full transition-all text-xs font-bold ${isOrtho ? 'bg-sky-500/70 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all text-xs font-bold ${isOrtho ? 'bg-sky-500/70 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'}`}
                     onClick={onToggleProjection}
                     disabled={!isViewerReady}
                     title={isOrtho ? 'Switch to Perspective' : 'Switch to Orthographic'}
@@ -724,7 +724,7 @@ export default function ViewerToolbar({
 
                 {/* Camera Views */}
                 <button
-                    className={`p-2 rounded-full transition-all ${showCamViews ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all ${showCamViews ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
                     onClick={() => { closeAll(); setShowCamViews(v => !v) }}
                     disabled={!isViewerReady}
                     title="Camera Views"
@@ -740,7 +740,7 @@ export default function ViewerToolbar({
 
                 {/* Screenshot */}
                 <button
-                    className="p-2 rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
+                    className="w-[30px] h-[30px] flex items-center justify-center rounded-full transition-colors text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]"
                     onClick={onScreenshot}
                     disabled={!isViewerReady}
                     title="Save Screenshot"
@@ -752,7 +752,7 @@ export default function ViewerToolbar({
 
                 {/* Fly-through mode */}
                 <button
-                    className={`p-2 rounded-full transition-all ${isFlyMode ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all ${isFlyMode ? 'bg-sky-500/80 text-white' : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-sky-300'}`}
                     onClick={onToggleFlyMode}
                     disabled={!isViewerReady}
                     title={isFlyMode ? 'Exit fly-through (back to orbit)' : 'Fly-through mode (WASD to move)'}
@@ -765,7 +765,7 @@ export default function ViewerToolbar({
                 {/* Hide selected */}
                 {selectionCount > 0 && (
                     <button
-                        className="p-2 rounded-full transition-all text-amber-300 hover:bg-amber-500/20"
+                        className="w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all text-amber-300 hover:bg-amber-500/20"
                         onClick={onHideSelected}
                         disabled={!isViewerReady}
                         title={`Hide selected (${selectionCount})`}
@@ -780,7 +780,7 @@ export default function ViewerToolbar({
                 {/* Show all hidden */}
                 {hiddenCount > 0 && (
                     <button
-                        className="p-2 rounded-full transition-all text-green-300 hover:bg-green-500/20 relative"
+                        className="w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all text-green-300 hover:bg-green-500/20 relative"
                         onClick={onShowAllHidden}
                         disabled={!isViewerReady}
                         title={`Show ${hiddenCount} hidden objects`}
@@ -795,7 +795,7 @@ export default function ViewerToolbar({
 
                 {/* Measurements */}
                 <button
-                    className={`p-2 rounded-full transition-all relative ${
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all relative ${
                         measurementsActive
                             ? 'bg-emerald-500/80 text-white shadow-[0_0_10px_rgba(52,211,153,0.4)]'
                             : showMeasurements
@@ -816,7 +816,7 @@ export default function ViewerToolbar({
 
                 {/* Explode */}
                 <button
-                    className={`p-2 rounded-full transition-all relative ${
+                    className={`w-[30px] h-[30px] flex items-center justify-center rounded-full transition-all relative ${
                         showExplode || (explodeValue || 0) > 0
                             ? 'bg-amber-500/80 text-white'
                             : 'text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)]'

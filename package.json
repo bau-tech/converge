@@ -15,6 +15,8 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@speckle/viewer": "^2.28.0",
     "@xyflow/react": "^12.11.0",
+    "docx-preview": "^0.4.0",
+    "dxf-viewer": "^1.0.48",
     "echarts": "^6.1.0",
     "esbuild": "^0.27.2",
     "framer-motion": "^11.0.0",
@@ -25,7 +27,10 @@
     "react-grid-layout": "^1.5.3",
     "react-konva": "18.2.16",
     "react-markdown": "^10.1.0",
-    "react-resizable-panels": "^4.0.1"
+    "react-resizable-panels": "^4.0.1",
+    "three": "0.140.2",
+    "web-ifc": "^0.0.77",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",

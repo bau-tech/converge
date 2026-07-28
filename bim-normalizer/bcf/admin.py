@@ -25,7 +25,7 @@ from bcf.oauth import list_active_sessions, revoke_session
 from bcf.password import hash_password, verify_password
 from bcf.projects import EXTENSION_KINDS, default_extension_values, extension_value_lists
 from bcf.request_log import recent as recent_requests
-from bcf.schemas import ExtensionValueCreate, UserCreate
+from bcf.schemas import DocumentRoleCreate, ExtensionValueCreate, UserCreate
 from db.purge import purge_speckle_models
 
 router = APIRouter(tags=["bcf-admin"])
@@ -149,7 +149,7 @@ def _admin_page_html(email: str) -> str:
   button.danger {{ background: #7f1d1d; }}
   button:hover {{ opacity: 0.85; }}
   form.inline {{ display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }}
-  input {{ padding: 0.4rem; border-radius: 4px; border: 1px solid #444; background: #0d0d0d; color: #eee; }}
+  input, select {{ padding: 0.4rem; border-radius: 4px; border: 1px solid #444; background: #0d0d0d; color: #eee; }}
   .topbar {{ display: flex; justify-content: space-between; align-items: baseline; }}
   .muted {{ color: #888; font-size: 0.8rem; }}
   a {{ color: #d97706; text-decoration: none; }}
@@ -171,6 +171,11 @@ def _admin_page_html(email: str) -> str:
   .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
   .toolbar {{ display: flex; align-items: baseline; gap: 0.6rem; }}
   .toolbar label {{ font-size: 0.8rem; color: #aaa; }}
+  .grant-form {{ display: flex; align-items: flex-end; gap: 1.2rem; margin-top: 0.75rem; flex-wrap: wrap; }}
+  .grant-col {{ display: flex; flex-direction: column; gap: 0.25rem; }}
+  .grant-label {{ font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.03em; }}
+  .checkbox-row {{ font-size: 0.82rem; display: flex; align-items: center; gap: 0.4rem; font-weight: 400; }}
+  .checkbox-row input {{ width: auto; }}
 </style></head><body>
   <div class="topbar">
     <h1>bcf-server admin</h1>
@@ -186,6 +191,38 @@ def _admin_page_html(email: str) -> str:
   </form>
   <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
+
+  <h2>Document roles (ISO 19650)</h2>
+  <p class="muted">Per-project author/reviewer/approver grants — gate the main dashboard's
+    WIP&rarr;Shared&rarr;Published&rarr;Archived document workflow. A user needs no role by default;
+    nothing can be reviewed/approved/verified/moved on a project until granted here. One grant can
+    cover several roles and several projects at once — or "All projects", including ones ingested later.</p>
+
+  <div class="toolbar">
+    <label>Viewing <select id="doc-roles-stream"><option value="">Loading projects…</option></select></label>
+    <button id="doc-roles-load">Load</button>
+  </div>
+  <table id="doc-roles-table"><thead><tr><th>User</th><th>Role</th><th>Scope</th><th>Granted</th><th></th></tr></thead>
+    <tbody></tbody></table>
+
+  <form id="grant-role-form" class="grant-form">
+    <div class="grant-col">
+      <label class="grant-label">User</label>
+      <select name="user_guid" id="grant-role-user" required></select>
+    </div>
+    <div class="grant-col">
+      <label class="grant-label">Roles</label>
+      <label class="checkbox-row"><input type="checkbox" name="role" value="author"> author</label>
+      <label class="checkbox-row"><input type="checkbox" name="role" value="reviewer"> reviewer</label>
+      <label class="checkbox-row"><input type="checkbox" name="role" value="approver"> approver</label>
+    </div>
+    <div class="grant-col">
+      <label class="grant-label">Projects</label>
+      <label class="checkbox-row"><input type="checkbox" id="grant-all-projects"> All projects (incl. future ones)</label>
+      <select name="stream_ids" id="grant-role-projects" multiple size="5"></select>
+    </div>
+    <button type="submit">Grant</button>
+  </form>
 
   <h2>Active sessions</h2>
   <p class="muted">Tokens issued by the OAuth2 shim (bcf/oauth.py). These live in memory only and are lost on every
@@ -228,7 +265,71 @@ async function loadUsers() {{
         <td>${{esc(new Date(u.created_at).toLocaleString())}}</td>
         <td><button class="danger" data-guid="${{u.guid}}" onclick="deleteUser(this)">Delete</button></td>
     </tr>`).join('') || '<tr><td colspan="4" class="muted">No users yet.</td></tr>';
+    document.getElementById('grant-role-user').innerHTML = users.map(u =>
+        `<option value="${{u.guid}}">${{esc(u.name)}} &lt;${{esc(u.email)}}&gt;</option>`).join('');
 }}
+
+async function loadDocumentRoles() {{
+    const streamId = document.getElementById('doc-roles-stream').value.trim();
+    if (!streamId) return;
+    const roles = await api(`/admin/api/document-roles?stream_id=${{encodeURIComponent(streamId)}}`);
+    const tbody = document.querySelector('#doc-roles-table tbody');
+    tbody.innerHTML = roles.map(r => `<tr>
+        <td>${{esc(r.name)}} &lt;${{esc(r.email)}}&gt;</td><td>${{esc(r.role)}}</td>
+        <td>${{r.stream_id === '*' ? '<em>All projects</em>' : 'this project'}}</td>
+        <td>${{esc(new Date(r.granted_at).toLocaleString())}}</td>
+        <td><button class="danger" data-guid="${{r.user_guid}}" data-role="${{r.role}}" data-stream="${{r.stream_id}}" onclick="revokeDocumentRole(this)">Revoke</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">No roles granted for this project yet.</td></tr>';
+}}
+
+async function revokeDocumentRole(btn) {{
+    if (!confirm('Revoke this role?')) return;
+    await api(`/admin/api/document-roles/${{btn.dataset.guid}}/${{encodeURIComponent(btn.dataset.stream)}}/${{btn.dataset.role}}`, {{ method: 'DELETE' }});
+    loadDocumentRoles();
+}}
+
+async function loadProjectOptions() {{
+    const projects = await api('/admin/api/projects');
+    const projectOpts = projects.map(p => `<option value="${{p.stream_id}}">${{esc(p.name || p.stream_id)}}</option>`).join('');
+
+    const sel = document.getElementById('doc-roles-stream');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="*">— All projects —</option>' + projectOpts;
+    sel.value = (prev && (prev === '*' || projects.some(p => p.stream_id === prev))) ? prev : '*';
+    loadDocumentRoles();
+
+    document.getElementById('grant-role-projects').innerHTML =
+        projectOpts || '<option value="" disabled>No ingested projects yet</option>';
+}}
+
+document.getElementById('doc-roles-stream').addEventListener('change', loadDocumentRoles);
+document.getElementById('doc-roles-load').addEventListener('click', loadDocumentRoles);
+
+document.getElementById('grant-all-projects').addEventListener('change', (e) => {{
+    document.getElementById('grant-role-projects').disabled = e.target.checked;
+}});
+
+document.getElementById('grant-role-form').addEventListener('submit', async (e) => {{
+    e.preventDefault();
+    const f = e.target;
+    const roles = Array.from(f.querySelectorAll('input[name="role"]:checked')).map(cb => cb.value);
+    if (!roles.length) {{ alert('Select at least one role'); return; }}
+    const allProjects = document.getElementById('grant-all-projects').checked;
+    const streamIds = allProjects
+        ? ['*']
+        : Array.from(document.getElementById('grant-role-projects').selectedOptions).map(o => o.value);
+    if (!streamIds.length) {{ alert('Select at least one project, or check "All projects"'); return; }}
+    await api('/admin/api/document-roles', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ user_guid: f.user_guid.value, stream_ids: streamIds, roles }}),
+    }});
+    f.querySelectorAll('input[name="role"]:checked').forEach(cb => cb.checked = false);
+    document.getElementById('grant-role-projects').selectedIndex = -1;
+    document.getElementById('grant-all-projects').checked = false;
+    document.getElementById('grant-role-projects').disabled = false;
+    loadDocumentRoles();
+}});
 
 async function deleteUser(btn) {{
     if (!confirm('Delete this user?')) return;
@@ -428,6 +529,7 @@ document.getElementById('requests-auto').addEventListener('change', scheduleRequ
 document.getElementById('requests-refresh').addEventListener('click', loadRequests);
 
 loadUsers();
+loadProjectOptions();
 loadSessions();
 loadOverview();
 loadRequests();
@@ -486,6 +588,114 @@ def admin_delete_user(user_guid: str, _email: str = Depends(require_admin_sessio
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
     execute("DELETE FROM bcf_users WHERE guid = %s", (user_guid,))
+
+
+_DOCUMENT_ROLES = ("author", "reviewer", "approver")
+
+
+@router.get("/admin/api/projects")
+def admin_list_projects(_email: str = Depends(require_admin_session)):
+    """Distinct stream_ids known to this app (from bim_models), with a
+    best-effort Speckle project name looked up live via GraphQL — feeds the
+    Document Roles project picker so admins pick a project by name instead
+    of pasting a raw stream_id. Speckle personal access tokens are
+    server-specific (confirmed: the default SPECKLE_TOKEN gets a clean 403
+    "Your token is not valid" from any server it wasn't issued on), so this
+    picks the right token per project via settings.SPECKLE_SERVER_TOKENS
+    (default server + VITE_EXTRA_SPECKLE_SERVERS) instead of always using
+    the single default — falling back to the bare stream_id only if a
+    project's server genuinely has no known token or the lookup fails."""
+    import requests
+    from config import settings
+
+    rows = fetch_all(
+        """
+        SELECT DISTINCT ON (stream_id) stream_id, server_url
+        FROM bim_models
+        ORDER BY stream_id, ingested_at DESC
+        """
+    )
+    results = []
+    for r in rows:
+        stream_id = r["stream_id"]
+        server_url = (r["server_url"] or settings.SPECKLE_SERVER_URL or "").rstrip("/")
+        name = None
+        token = settings.SPECKLE_SERVER_TOKENS.get(server_url)
+        if server_url and token:
+            try:
+                resp = requests.post(
+                    f"{server_url}/graphql",
+                    json={"query": "query($id:String!){stream(id:$id){name}}", "variables": {"id": stream_id}},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    name = ((resp.json().get("data") or {}).get("stream") or {}).get("name")
+            except Exception:
+                pass
+        results.append({"stream_id": stream_id, "name": name, "server_url": server_url})
+    results.sort(key=lambda p: (p["name"] or p["stream_id"]).lower())
+    return results
+
+
+@router.get("/admin/api/document-roles")
+def admin_list_document_roles(stream_id: str, _email: str = Depends(require_admin_session)):
+    """Also surfaces stream_id='*' ("all projects") grants alongside
+    project-specific ones — viewing project X should show anyone who can
+    act on X whether that's a grant scoped to X specifically or a blanket
+    grant, same as the actual permission check (db/roles.py) does. Viewing
+    '*' itself (the admin's own "All projects" filter option) just returns
+    those blanket grants, since '*' OR '*' is the same set."""
+    rows = fetch_all(
+        """
+        SELECT r.user_guid, r.stream_id, r.role, r.granted_at, u.email, u.name
+        FROM bim_document_roles r
+        JOIN bcf_users u ON u.guid = r.user_guid
+        WHERE r.stream_id = %s OR r.stream_id = '*'
+        ORDER BY (r.stream_id = '*') DESC, u.name, r.role
+        """,
+        (stream_id,),
+    )
+    return [
+        {
+            "user_guid": str(r["user_guid"]), "stream_id": r["stream_id"], "role": r["role"],
+            "granted_at": r["granted_at"].isoformat(), "email": r["email"], "name": r["name"],
+        }
+        for r in rows
+    ]
+
+
+@router.post("/admin/api/document-roles", status_code=201)
+def admin_grant_document_role(body: DocumentRoleCreate, _email: str = Depends(require_admin_session)):
+    """Batch grant — cross-product of every (stream_id, role) pair in one
+    call, so "give this user reviewer+approver on 5 projects" is a single
+    admin action instead of 10 separate ones."""
+    bad_roles = [r for r in body.roles if r not in _DOCUMENT_ROLES]
+    if bad_roles:
+        raise HTTPException(status_code=422, detail=f"Invalid role(s) {', '.join(bad_roles)} — must be one of: {', '.join(_DOCUMENT_ROLES)}")
+    if not body.roles or not body.stream_ids:
+        raise HTTPException(status_code=422, detail="At least one role and one project (or 'All projects') is required")
+    granter = fetch_one("SELECT guid FROM bcf_users WHERE email = %s", (_email,))
+    granter_guid = granter["guid"] if granter else None
+    for stream_id in body.stream_ids:
+        for role in body.roles:
+            execute(
+                """
+                INSERT INTO bim_document_roles (user_guid, stream_id, role, granted_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_guid, stream_id, role) DO NOTHING
+                """,
+                (body.user_guid, stream_id, role, granter_guid),
+            )
+    return {"user_guid": body.user_guid, "granted": len(body.stream_ids) * len(body.roles)}
+
+
+@router.delete("/admin/api/document-roles/{user_guid}/{stream_id}/{role}", status_code=204)
+def admin_revoke_document_role(user_guid: str, stream_id: str, role: str, _email: str = Depends(require_admin_session)):
+    execute(
+        "DELETE FROM bim_document_roles WHERE user_guid = %s AND stream_id = %s AND role = %s",
+        (user_guid, stream_id, role),
+    )
 
 
 @router.get("/admin/api/overview")

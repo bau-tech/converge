@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from specklepy.objects import Base
-from ifc.schema import length_to_m, MM2_TO_M2, sanitize_float, sanitize_floats
+from ifc.schema import LENGTH_TO_M, length_to_m, sanitize_float, sanitize_floats
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +408,264 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
         return None
 
 
+# ---------------------------------------------------------------------------
+# Axis / footprint extraction — structural centerline + plan contour, for the
+# IFC exporter's Axis/FootPrint IfcShapeRepresentations (ifc/export.py). Kept
+# independent of extract_geometry() above (own function, called separately by
+# pipeline/normalize.py) so a failure here never affects mesh/bbox extraction.
+#
+# Two sources, preferred in this order:
+#   1. Bespoke structural metadata this connector fork writes on send — richer
+#      and more current than the generic attribute below. Revit nests it under
+#      obj.properties["Structural"] (startPointMm/endPointMm, or
+#      insertionPointMm for point-placed columns, or contours for floor/slab
+#      sketches — see StructuralPropertiesExtractor.cs). Tekla writes flat
+#      obj.properties["startPoint"]/["endPoint"]/["contourPoints"] instead
+#      (ClassPropertyExtractor.cs).
+#   2. The generic Speckle `location` attribute every BIM object carries:
+#      Point (+rotation) for columns, Line for beams/walls, closed Polycurve
+#      for slabs.
+# Revit's *Mm fields are unconditionally in millimetres regardless of the
+# object's own units (unlike everything else this file stores, which is kept
+# in the object's own raw units) — _mm_to_units() converts them to match.
+# ---------------------------------------------------------------------------
+
+def _mm_to_units(value_mm: float, units: str) -> float:
+    """Convert a value that's unconditionally in millimetres (Revit's
+    Structural.*Mm fields) into the object's own native units."""
+    u = (units or "mm").strip().lower()
+    factor = LENGTH_TO_M.get(u, LENGTH_TO_M["mm"])
+    return value_mm * (LENGTH_TO_M["mm"] / factor)
+
+
+def _read_point_like(pt) -> list[float] | None:
+    """Read [x,y,z] from either a plain {"x","y","z"} dict (Revit's *Mm
+    fields, built as raw C# Dictionary<string,object> and so deserialized as
+    plain dicts) or a real specklepy Point-like object (obj.location, Tekla's
+    startPoint/endPoint, Arc segment endpoints)."""
+    if pt is None:
+        return None
+    if isinstance(pt, dict):
+        x, y, z = pt.get("x"), pt.get("y"), pt.get("z")
+    else:
+        x, y, z = getattr(pt, "x", None), getattr(pt, "y", None), getattr(pt, "z", None)
+    if x is None or y is None or z is None:
+        return None
+    try:
+        return [float(x), float(y), float(z)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _polycurve_to_points(polycurve) -> list[list[float]]:
+    """
+    Flatten a Speckle Polycurve's segments into an ordered list of loop
+    points, in the polycurve's own (already-typed-object) units:
+      - Line segments contribute their start point (segment joins share a
+        point, so only one copy is kept per join).
+      - Arc segments are sampled at start/mid/end (3 points) rather than
+        flattened to a chord.
+      - A generic NURBS Curve segment prefers its tessellated `displayValue`
+        polyline when present; otherwise falls back to its first/last
+        control point as a documented approximation (not a precise curve
+        endpoint in the periodic/non-clamped case, but the closest cheap
+        estimate without a real NURBS evaluator).
+    Unrecognized segment types are skipped (graceful degrade, matches this
+    file's existing style elsewhere).
+    """
+    points: list[list[float]] = []
+
+    def _append(pt):
+        if isinstance(pt, (list, tuple)) and len(pt) >= 3:
+            try:
+                p = [float(pt[0]), float(pt[1]), float(pt[2])]
+            except (TypeError, ValueError):
+                return
+        else:
+            p = _read_point_like(pt)
+        if p and (not points or p != points[-1]):
+            points.append(p)
+
+    for seg in (getattr(polycurve, "segments", None) or []):
+        st = getattr(seg, "speckle_type", "") or ""
+        if "Arc" in st:
+            _append(getattr(seg, "startPoint", None))
+            _append(getattr(seg, "midPoint", None))
+            _append(getattr(seg, "endPoint", None))
+        elif "Line" in st:
+            _append(getattr(seg, "start", None))
+        elif "Curve" in st:
+            display = getattr(seg, "displayValue", None)
+            sampled = False
+            verts = getattr(display, "value", None) or getattr(display, "points", None) if display is not None else None
+            if verts:
+                triples = verts if (verts and isinstance(verts[0], (list, tuple))) else _vertices_to_triples(list(verts))
+                for t in triples:
+                    _append(t)
+                sampled = True
+            if not sampled:
+                ctrl = getattr(seg, "points", None) or []
+                if len(ctrl) >= 6 and not isinstance(ctrl[0], (list, tuple)):
+                    _append(list(ctrl[0:3]))
+                    _append(list(ctrl[-3:]))
+        else:
+            logger.debug("_polycurve_to_points: unrecognized segment type %r skipped", st)
+
+    return points
+
+
+def _axis_from_structural(structural: dict, units: str, bbox_min, bbox_max) -> list[list[float]] | None:
+    start_mm = structural.get("startPointMm")
+    end_mm = structural.get("endPointMm")
+    if start_mm and end_mm:
+        p0, p1 = _read_point_like(start_mm), _read_point_like(end_mm)
+        if p0 and p1:
+            return [[_mm_to_units(c, units) for c in p0], [_mm_to_units(c, units) for c in p1]]
+
+    ins_mm = structural.get("insertionPointMm")
+    if ins_mm and bbox_min and bbox_max and len(bbox_min) > 2 and len(bbox_max) > 2:
+        p = _read_point_like(ins_mm)
+        if p:
+            x, y = _mm_to_units(p[0], units), _mm_to_units(p[1], units)
+            return [[x, y, float(bbox_min[2])], [x, y, float(bbox_max[2])]]
+
+    return None
+
+
+def _footprint_from_structural(structural: dict) -> list[list[list[float]]] | None:
+    """Structural.contours is a list of Polycurve loops (outer boundary +
+    inner holes, from Revit's floor.SketchId -> Sketch.Profile) — already in
+    the object's own units (typed Speckle geometry, not a raw *Mm field)."""
+    contours = structural.get("contours")
+    if not contours:
+        return None
+    loops = []
+    for pc in contours:
+        pts = _polycurve_to_points(pc)
+        if len(pts) >= 3:
+            loops.append(pts)
+    return loops or None
+
+
+def _axis_from_tekla_properties(properties: dict) -> list[list[float]] | None:
+    p0 = _read_point_like(properties.get("startPoint"))
+    p1 = _read_point_like(properties.get("endPoint"))
+    return [p0, p1] if p0 and p1 else None
+
+
+def _footprint_from_tekla_properties(properties: dict) -> list[list[list[float]]] | None:
+    raw_pts = properties.get("contourPoints")
+    if not raw_pts:
+        return None
+    pts = [p for p in (_read_point_like(item) for item in raw_pts) if p]
+    return [pts] if len(pts) >= 3 else None
+
+
+def _axis_from_location(location, units: str, bbox_min, bbox_max) -> list[list[float]] | None:
+    st = getattr(location, "speckle_type", "") or ""
+    if "Line" in st:
+        p0 = _read_point_like(getattr(location, "start", None))
+        p1 = _read_point_like(getattr(location, "end", None))
+        if p0 and p1:
+            return [p0, p1]
+    elif "Point" in st:
+        p = _read_point_like(location)
+        if p and bbox_min and bbox_max and len(bbox_min) > 2 and len(bbox_max) > 2:
+            return [[p[0], p[1], float(bbox_min[2])], [p[0], p[1], float(bbox_max[2])]]
+    return None
+
+
+def _footprint_from_location(location) -> list[list[list[float]]] | None:
+    st = getattr(location, "speckle_type", "") or ""
+    if "Polycurve" not in st or not getattr(location, "closed", False):
+        return None
+    pts = _polycurve_to_points(location)
+    return [pts] if len(pts) >= 3 else None
+
+
+def _sanitize_point_list(points: list[list[float]] | None) -> list[list[float]] | None:
+    """Drop a whole point (not just the bad coordinate) if any of its
+    coordinates is non-finite — stricter than sanitize_floats' per-element
+    None-in-place behavior, since a partially-None point would otherwise
+    corrupt an IfcCartesianPoint downstream."""
+    if not points:
+        return None
+    clean = []
+    for p in points:
+        sp = sanitize_floats(p)
+        if sp is not None and all(v is not None for v in sp):
+            clean.append(sp)
+    return clean or None
+
+
+def extract_axis_footprint(obj: Base, bbox_min: list | None, bbox_max: list | None) -> dict | None:
+    """
+    Structural centerline (axis) and plan contour (footprint) for the IFC
+    exporter's Axis/FootPrint representations — enrichment on top of
+    extract_geometry(), not required. Returns None, or
+    {"axis": {"points": [[x,y,z],[x,y,z]]} | None,
+     "footprint": {"loops": [[[x,y,z],...], ...]} | None}
+    in the object's own raw units (same convention as bbox_min/mesh — NOT SI).
+    This dict-wrapped shape (rather than bare lists) is what gets stored
+    verbatim in bim_geometry.axis/.footprint and is what ifc/export.py's
+    _axis_shape()/_footprint_shape() read back.
+
+    bbox_min/bbox_max should be this same object's own already-computed bbox
+    (from extract_geometry(), same call) — used only for the column
+    Point-insertion axis fallback (extrudes the insertion point through the
+    object's own bbox Z-range, since bim-normalizer has no storey-elevation
+    table to derive a true base/top-level axis from). Pass None to skip that
+    fallback (column axis simply won't be extracted).
+    """
+    units = getattr(obj, "units", None) or "mm"
+    properties = getattr(obj, "properties", None)
+    if not isinstance(properties, dict):
+        properties = None
+    structural = properties.get("Structural") if properties else None
+    if not isinstance(structural, dict):
+        structural = None
+
+    axis = None
+    footprint = None
+
+    if structural:
+        axis = _axis_from_structural(structural, units, bbox_min, bbox_max)
+        footprint = _footprint_from_structural(structural)
+    if axis is None and properties:
+        axis = _axis_from_tekla_properties(properties)
+    if footprint is None and properties:
+        footprint = _footprint_from_tekla_properties(properties)
+
+    location = getattr(obj, "location", None)
+    if location is not None:
+        if axis is None:
+            try:
+                axis = _axis_from_location(location, units, bbox_min, bbox_max)
+            except Exception as exc:
+                logger.debug("extract_axis_footprint: axis-from-location failed for %s: %s",
+                             getattr(obj, "id", "?"), exc)
+        if footprint is None:
+            try:
+                footprint = _footprint_from_location(location)
+            except Exception as exc:
+                logger.debug("extract_axis_footprint: footprint-from-location failed for %s: %s",
+                             getattr(obj, "id", "?"), exc)
+
+    axis = _sanitize_point_list(axis)
+    if axis is not None and len(axis) < 2:
+        axis = None
+    if footprint is not None:
+        footprint = [loop for loop in (_sanitize_point_list(l) for l in footprint) if loop and len(loop) >= 3]
+        footprint = footprint or None
+
+    if axis is None and footprint is None:
+        return None
+    return {
+        "axis": {"points": axis} if axis else None,
+        "footprint": {"loops": footprint} if footprint else None,
+    }
+
+
 def _compute_volume_from_mesh(pts: list, faces: list, units: str) -> float | None:
     """
     Signed-volume sum (divergence theorem) over triangulated faces.
@@ -494,8 +752,6 @@ def _compute_area_from_faces(pts: list, faces: list, units: str) -> float | None
             i = end
 
         # Convert from source units² to m²
-        u = (units or "mm").lower()
-        factors = {"mm": MM2_TO_M2, "cm": 1e-4, "m": 1.0, "in": 6.4516e-4, "ft": 0.092903}
-        return total * factors.get(u, MM2_TO_M2)
+        return total * length_to_m(1.0, units) ** 2
     except Exception:
         return None

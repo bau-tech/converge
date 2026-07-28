@@ -97,8 +97,15 @@ def _gql(srv: str, tok: str, query: str, variables: dict | None = None) -> dict:
     return body["data"]
 
 
-def _ensure_branch(srv: str, tok: str, stream_id: str, branch_name: str) -> None:
-    """Create branch if it doesn't already exist."""
+def _ensure_branch(
+    srv: str, tok: str, stream_id: str, branch_name: str,
+    description: str = "Created by bim-normalizer filter-publish",
+) -> None:
+    """Create branch if it doesn't already exist. Also used by
+    routers/models.py's IFC upload endpoint — Speckle's own file-import REST
+    endpoint (/api/file/autodetect/{streamId}/{branchName}) 404s with
+    BRANCH_NOT_FOUND if the target branch doesn't already exist, unlike
+    commitCreate which is fine with an existing branch name only."""
     data = _gql(srv, tok, """
         query($streamId: String!, $branchName: String!) {
             stream(id: $streamId) {
@@ -117,7 +124,7 @@ def _ensure_branch(srv: str, tok: str, stream_id: str, branch_name: str) -> None
     """, {"branch": {
         "streamId": stream_id,
         "name": branch_name,
-        "description": "Created by bim-normalizer filter-publish",
+        "description": description,
     }})
     logger.info("Created branch %r on stream %s", branch_name, stream_id)
 

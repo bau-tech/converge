@@ -7,97 +7,23 @@ router = APIRouter(tags=["analytics"])
 @router.get("/diff/{model_a}/{model_b}")
 def diff_models(model_a: str, model_b: str):
     from db.connection import get_conn, release_conn
+    from db.query import get_model_diff
     conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            # Added in B (exist in B, not in A)
-            cur.execute("""
-                SELECT b.speckle_id, b.ifc_class, b.category, b.name
-                FROM bim_elements b
-                WHERE b.model_id = %s
-                  AND b.application_id IS NOT NULL
-                  AND b.application_id <> ''
-                  AND NOT EXISTS (
-                      SELECT 1 FROM bim_elements a
-                      WHERE a.model_id = %s AND a.application_id = b.application_id
-                  )
-            """, (model_b, model_a))
-            added = cur.fetchall()
-            added_cols = [d[0] for d in cur.description]
-
-            # Removed from A (exist in A, not in B)
-            cur.execute("""
-                SELECT a.speckle_id, a.ifc_class, a.category, a.name
-                FROM bim_elements a
-                WHERE a.model_id = %s
-                  AND a.application_id IS NOT NULL
-                  AND a.application_id <> ''
-                  AND NOT EXISTS (
-                      SELECT 1 FROM bim_elements b
-                      WHERE b.model_id = %s AND b.application_id = a.application_id
-                  )
-            """, (model_a, model_b))
-            removed = cur.fetchall()
-
-            # Changed (same application_id, different hash)
-            cur.execute("""
-                SELECT a.speckle_id AS speckle_id_a, b.speckle_id AS speckle_id_b,
-                       a.category, a.name
-                FROM bim_elements a
-                JOIN bim_elements b ON a.application_id = b.application_id
-                WHERE a.model_id = %s AND b.model_id = %s
-                  AND a.hash != b.hash
-                  AND a.application_id IS NOT NULL
-                  AND a.application_id <> ''
-            """, (model_a, model_b))
-            changed = cur.fetchall()
-            changed_cols = [d[0] for d in cur.description]
-
-            # Category delta (B = current/newer, A = older/base)
-            cur.execute("""
-                SELECT COALESCE(a.category, b.category) AS category,
-                       COALESCE(a.cnt, 0) AS current_count,
-                       COALESCE(b.cnt, 0) AS other_count,
-                       COALESCE(a.cnt, 0) - COALESCE(b.cnt, 0) AS delta
-                FROM
-                    (SELECT category, COUNT(*) cnt FROM bim_elements WHERE model_id = %s GROUP BY category) a
-                FULL OUTER JOIN
-                    (SELECT category, COUNT(*) cnt FROM bim_elements WHERE model_id = %s GROUP BY category) b
-                ON a.category = b.category
-                ORDER BY ABS(COALESCE(a.cnt,0) - COALESCE(b.cnt,0)) DESC
-            """, (model_b, model_a))
-            cat_rows = cur.fetchall()
-
-            # Total element counts so the frontend can show "Unchanged" correctly
-            cur.execute("""
-                SELECT
-                    SUM(CASE WHEN model_id = %s THEN 1 ELSE 0 END) AS current_total,
-                    SUM(CASE WHEN model_id = %s THEN 1 ELSE 0 END) AS other_total
-                FROM bim_elements
-                WHERE model_id IN (%s, %s)
-            """, (model_b, model_a, model_a, model_b))
-            totals_row = cur.fetchone()
-            current_total = int(totals_row[0] or 0)
-            other_total   = int(totals_row[1] or 0)
-
-        category_changes = [
-            {"category": r[0] or "Unknown", "current_count": r[1], "other_count": r[2], "delta": r[3]}
-            for r in cat_rows if r[3] != 0
-        ]
-
+        d = get_model_diff(conn, model_a, model_b)
         return {
             "model_a":       model_a,
             "model_b":       model_b,
-            "added_count":   len(added),
-            "removed_count": len(removed),
-            "changed_count": len(changed),
-            "current_total": current_total,
-            "other_total":   other_total,
-            "total_delta":   current_total - other_total,
-            "element_ids":   [r[0] for r in added],    # speckle_ids of added elements
-            "removed_ids":   [r[0] for r in removed],
-            "changed_elements": [dict(zip(changed_cols, r)) for r in changed],
-            "category_changes": category_changes,
+            "added_count":   len(d["added"]),
+            "removed_count": len(d["removed"]),
+            "changed_count": len(d["changed"]),
+            "current_total": d["current_total"],
+            "other_total":   d["other_total"],
+            "total_delta":   d["current_total"] - d["other_total"],
+            "element_ids":   [r["speckle_id"] for r in d["added"]],    # speckle_ids of added elements
+            "removed_ids":   [r["speckle_id"] for r in d["removed"]],
+            "changed_elements": d["changed"],
+            "category_changes": d["category_changes"],
         }
     finally:
         release_conn(conn)

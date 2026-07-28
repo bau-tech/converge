@@ -1,6 +1,9 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, ChevronDown, ChevronRight, Copy, Check, Filter, Eye, MoreHorizontal, Loader2 } from 'lucide-react'
-import { useState } from 'react'
+import {
+    X, ChevronDown, ChevronRight, Copy, Check, Filter, Eye, MoreHorizontal, Loader2,
+    Paperclip, Link2, Unlink2, Plus, Search, FileText,
+} from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
 
 // Recursive Key-Value Tree Component
 const ObjectTreeItem = ({ data, label, depth = 0, path = '', onFilter, onCopy, isAutoWidth = false, activeFilter = null }) => {
@@ -129,7 +132,190 @@ const ObjectTreeItem = ({ data, label, depth = 0, path = '', onFilter, onCopy, i
     )
 }
 
-export default function ElementPanel({ element, onClose, onFilter, darkMode = true }) {
+// Documents linked to the currently-selected element (bim_documents.linked_element,
+// see db/documents.py) — list + attach/unlink. Keyed by speckleId from the caller so
+// switching elements remounts this (clears any open picker/search) instead of racing
+// a stale fetch against the new element's id.
+function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksChanged, darkMode, documentLinksVersion }) {
+    const [docs, setDocs] = useState([])
+    const [loading, setLoading] = useState(true)
+    const [showPicker, setShowPicker] = useState(false)
+    const [available, setAvailable] = useState([])
+    const [loadingAvailable, setLoadingAvailable] = useState(false)
+    const [search, setSearch] = useState('')
+    const [busyId, setBusyId] = useState(null)
+
+    const base = (normalizerUrl || '').replace(/\/$/, '')
+
+    const loadLinked = useCallback(async () => {
+        if (!base || !streamId || !speckleId) { setDocs([]); setLoading(false); return }
+        setLoading(true)
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents?linked_element=${encodeURIComponent(speckleId)}`)
+            setDocs(res.ok ? await res.json() : [])
+        } catch {
+            setDocs([])
+        } finally {
+            setLoading(false)
+        }
+    }, [
+        base, streamId, speckleId,
+        // Not read in the body — a pure "something changed elsewhere"
+        // signal (App.jsx's refreshDocumentPins, e.g. a document deleted
+        // from DocumentsPanel while this section is mounted but hidden
+        // behind it) telling this to refetch even though speckleId itself
+        // didn't change.
+        documentLinksVersion,
+    ])
+
+    useEffect(() => { loadLinked() }, [loadLinked])
+
+    const openPicker = async () => {
+        setShowPicker(true)
+        if (!base || !streamId) return
+        setLoadingAvailable(true)
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents`)
+            const rows = res.ok ? await res.json() : []
+            setAvailable(rows.filter((d) => !d.linked_element))
+        } catch {
+            setAvailable([])
+        } finally {
+            setLoadingAvailable(false)
+        }
+    }
+
+    const linkDoc = async (docId) => {
+        setBusyId(docId)
+        try {
+            await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ speckle_id: speckleId }),
+            })
+            setShowPicker(false)
+            setSearch('')
+            await loadLinked()
+            onLinksChanged?.()
+        } finally {
+            setBusyId(null)
+        }
+    }
+
+    const unlinkDoc = async (docId) => {
+        setBusyId(docId)
+        try {
+            await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, { method: 'DELETE' })
+            await loadLinked()
+            onLinksChanged?.()
+        } finally {
+            setBusyId(null)
+        }
+    }
+
+    if (!streamId) return null
+
+    const filteredAvailable = available.filter((d) => d.filename.toLowerCase().includes(search.toLowerCase()))
+
+    return (
+        <div className={`px-4 py-3 border-b ${darkMode ? 'border-[#333]' : 'border-gray-200'}`}>
+            <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400">
+                    <Paperclip className="w-3.5 h-3.5" />
+                    Documents {docs.length > 0 && `(${docs.length})`}
+                </div>
+                <button
+                    onClick={openPicker}
+                    className="flex items-center gap-1 text-[11px] text-cyan-400 hover:text-cyan-300"
+                    title="Attach a document to this element"
+                >
+                    <Plus className="w-3 h-3" /> Attach
+                </button>
+            </div>
+
+            {loading && (
+                <div className="flex items-center gap-2 text-xs text-zinc-500 py-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                </div>
+            )}
+
+            {!loading && docs.length === 0 && (
+                <div className="text-[11px] text-zinc-600 italic py-1">No documents attached</div>
+            )}
+
+            <div className="space-y-1">
+                {docs.map((d) => (
+                    <div key={d.doc_id} className="flex items-center justify-between gap-2 text-xs bg-white/5 rounded px-2 py-1.5 group">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                            <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                            <span className="truncate text-zinc-300" title={d.filename}>{d.filename}</span>
+                        </div>
+                        <button
+                            onClick={() => unlinkDoc(d.doc_id)}
+                            disabled={busyId === d.doc_id}
+                            className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 shrink-0 disabled:opacity-50"
+                            title="Unlink document"
+                        >
+                            {busyId === d.doc_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Unlink2 className="w-3 h-3" />}
+                        </button>
+                    </div>
+                ))}
+            </div>
+
+            <AnimatePresence>
+                {showPicker && (
+                    <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="mt-2 border border-white/10 rounded p-2">
+                            <div className="flex items-center gap-1.5 bg-white/5 rounded px-2 py-1 mb-1.5">
+                                <Search className="w-3 h-3 text-zinc-500 shrink-0" />
+                                <input
+                                    autoFocus
+                                    value={search}
+                                    onChange={(e) => setSearch(e.target.value)}
+                                    placeholder="Search documents…"
+                                    className="bg-transparent text-[11px] text-zinc-300 outline-none flex-1 min-w-0"
+                                />
+                                <button onClick={() => setShowPicker(false)} className="text-zinc-500 hover:text-white shrink-0">
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </div>
+                            <div className="max-h-40 overflow-y-auto custom-scrollbar space-y-0.5">
+                                {loadingAvailable && (
+                                    <div className="flex items-center gap-2 text-[11px] text-zinc-500 py-1">
+                                        <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                                    </div>
+                                )}
+                                {!loadingAvailable && filteredAvailable.length === 0 && (
+                                    <div className="text-[11px] text-zinc-600 italic py-1">
+                                        {available.length === 0 ? 'No unlinked documents in this project' : 'No matches'}
+                                    </div>
+                                )}
+                                {filteredAvailable.map((d) => (
+                                    <button
+                                        key={d.doc_id}
+                                        onClick={() => linkDoc(d.doc_id)}
+                                        disabled={busyId === d.doc_id}
+                                        className="w-full flex items-center gap-1.5 text-[11px] text-left px-2 py-1 rounded hover:bg-cyan-500/10 text-zinc-300 disabled:opacity-50"
+                                    >
+                                        {busyId === d.doc_id ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <Link2 className="w-3 h-3 text-zinc-500 shrink-0" />}
+                                        <span className="truncate">{d.filename}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    )
+}
+
+export default function ElementPanel({ element, onClose, onFilter, darkMode = true, normalizerUrl, streamId, onDocumentLinksChanged, documentLinksVersion, hideDocuments = false }) {
     const [width, setWidth] = useState(400)
     const [isAutoWidth, setIsAutoWidth] = useState(false)
     const [isResizing, setIsResizing] = useState(false)
@@ -212,8 +398,23 @@ export default function ElementPanel({ element, onClose, onFilter, darkMode = tr
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 400, opacity: 0 }}
             transition={{ duration: isResizing ? 0 : 0.3 }} // Disable transition during drag
-            style={{ width: isAutoWidth ? 'fit-content' : width, minWidth: 300, maxWidth: isAutoWidth ? '60vw' : '90vw' }}
-            className={`fixed right-0 top-0 bottom-0 shadow-2xl z-[160] flex flex-col border-l
+            // minWidth as a plain 300px conflicts with maxWidth: 90vw on any
+            // screen narrower than ~333px (min-width wins over a smaller
+            // max-width per the CSS spec), forcing a small overflow on
+            // phones — min(300px, calc(100vw - 2rem)) lets the floor itself
+            // shrink instead of fighting the cap.
+            style={{
+                width: isAutoWidth ? 'fit-content' : width,
+                minWidth: 'min(300px, calc(100vw - 2rem))',
+                maxWidth: isAutoWidth ? '60vw' : '90vw',
+            }}
+            // z-[245]: above the viewer toolbar, which despite declaring z-[200] in
+            // ViewerToolbar.jsx actually renders at z-[240] globally — SpeckleViewer.jsx
+            // portals the whole toolbar to document.body inside its own fixed-position
+            // wrapper set to z-[240], and ViewerToolbar's own z-[200] only orders things
+            // *within* that portal's stacking context, not against page content like
+            // this panel. Must stay above that real 240, not the nominal 200.
+            className={`fixed right-0 top-0 bottom-0 shadow-2xl z-[245] flex flex-col border-l
                 ${darkMode ? 'bg-[#1e1e1e] border-[#333]' : 'bg-white border-gray-200'}
             `}
         >
@@ -276,6 +477,21 @@ export default function ElementPanel({ element, onClose, onFilter, darkMode = tr
                     })}
                 </div>
             </div>
+
+            {/* Every route in routers/documents.py requires a login server-side —
+                skip rendering (and thus fetching) for anonymous share visitors
+                rather than show a section that can only ever 401. */}
+            {!hideDocuments && (
+            <ElementDocumentsSection
+                key={element.id}
+                normalizerUrl={normalizerUrl}
+                streamId={streamId}
+                speckleId={element.id}
+                onLinksChanged={onDocumentLinksChanged}
+                darkMode={darkMode}
+                documentLinksVersion={documentLinksVersion}
+            />
+            )}
 
             {/* Active filter indicator */}
             {activeFilter && (

@@ -59,12 +59,27 @@ def upsert_overrides(model_id: str, items: list[OverrideItem]):
                         status_code=422,
                         detail="Each override must have application_id or speckle_id"
                     )
-                cur.execute("""
+                # The table has two separate partial unique indexes —
+                # idx_overrides_appid (model_id, application_id) WHERE
+                # application_id IS NOT NULL, and idx_overrides_speckleid
+                # (model_id, speckle_id) WHERE speckle_id IS NOT NULL (see
+                # db/models.py). ON CONFLICT can only name one arbiter, so an
+                # item matched by speckle_id alone (application_id NULL) must
+                # use the speckle_id index — naming the application_id index
+                # unconditionally meant a second upsert of the same
+                # speckle_id-only item never matched that arbiter and instead
+                # raised an unhandled UniqueViolation against
+                # idx_overrides_speckleid.
+                conflict_target = (
+                    "(model_id, application_id) WHERE application_id IS NOT NULL"
+                    if item.application_id
+                    else "(model_id, speckle_id) WHERE speckle_id IS NOT NULL"
+                )
+                cur.execute(f"""
                     INSERT INTO bim_classification_overrides
                         (model_id, application_id, speckle_id, ifc_class, category, note)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (model_id, application_id)
-                        WHERE application_id IS NOT NULL
+                    ON CONFLICT {conflict_target}
                     DO UPDATE SET
                         ifc_class  = EXCLUDED.ifc_class,
                         category   = EXCLUDED.category,

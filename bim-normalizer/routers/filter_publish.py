@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from db.jobs import create_job, update_job, get_job, prune_jobs
+from job_registry import fire_and_forget
 
 router = APIRouter(tags=["filter-publish"])
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ async def filter_publish(model_id: str, request: FilterPublishRequest):
             finally:
                 _release_conn(conn4)
 
-    asyncio.create_task(_run())
+    fire_and_forget(_run())
     logger.info("filter-publish job %s started for model %s", job_id, model_id)
     return {"job_id": job_id, "status": "pending"}
 

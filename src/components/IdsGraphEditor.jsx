@@ -108,6 +108,15 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
     }
 
     const saveAsSpec = async () => {
+        // Belt-and-suspenders: the button is disabled while invalid, but
+        // guard the action itself too rather than let a stale render slip
+        // an unfixable "needs applicability" (or similar) doc past the
+        // XSD-required elements and into the opaque backend 400.
+        const { valid: canSave, issues: blockingIssues } = validateGraph(nodes, edges)
+        if (!canSave) {
+            setSaveError(`Fix these issues first: ${blockingIssues.filter(i => i.severity === 'error').map(i => i.message).join('; ')}`)
+            return
+        }
         setSaving(true)
         setSaveError(null)
         setSaveMsg(null)
@@ -177,7 +186,8 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
                     </button>
                     <button
                         onClick={saveAsSpec}
-                        disabled={saving || nodes.length === 0}
+                        disabled={saving || nodes.length === 0 || !valid}
+                        title={!valid ? `Resolve validation errors first:\n${issues.filter(i => i.severity === 'error').map(i => i.message).join('\n')}` : undefined}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-amber-500 text-black font-medium disabled:opacity-40 transition-opacity"
                     >
                         {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}

@@ -249,6 +249,18 @@ async def _token_impl(
     if pending is None:
         return _error("unknown or already-used code")
 
+    # RFC 6749 §4.1.3: the token endpoint MUST verify redirect_uri matches
+    # the value from the /authorize request that produced this code — this
+    # is what stops a code obtained via one redirect target (e.g. a
+    # legitimate client) from being redeemed by a different party who
+    # intercepted it via a different redirect_uri. Also confirm client_id
+    # matches, when the caller supplied one, rather than silently trusting
+    # whatever value shows up here.
+    if redirect_uri != pending["redirect_uri"]:
+        return _error("redirect_uri mismatch")
+    if client_id and client_id != pending["client_id"]:
+        return _error("client_id mismatch")
+
     if pending["code_challenge"]:
         method = pending["code_challenge_method"]
         verifier = code_verifier or ""

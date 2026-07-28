@@ -78,6 +78,27 @@ def get_element(element_id: str):
         release_conn(conn)
 
 
+@router.get("/elements/{element_id}/relationships")
+def get_element_relationships_route(element_id: str):
+    """
+    Elements directly related to element_id (parent/room/space references
+    resolved at ingest time — see db/insert.py's build_relationships()).
+    Returns [] for models ingested before this existed, or where the
+    referenced elements (e.g. Rooms/Spaces) weren't captured during ingest.
+    """
+    from db.connection import get_conn, release_conn
+    from db.query import get_element_relationships
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM bim_elements WHERE element_id = %s", (element_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Element not found")
+        return get_element_relationships(conn, element_id)
+    finally:
+        release_conn(conn)
+
+
 @router.get("/models/{model_id}/elements/flat")
 def get_elements_flat(
     model_id: str,
@@ -202,6 +223,47 @@ def get_elements_semantic_search(model_id: str, query: str, limit: int = 10):
                 raise HTTPException(status_code=404, detail="Model not found")
         matches = semantic_search_elements(conn, model_id, query, limit=limit)
         return {"model_id": model_id, "query": query, "count": len(matches), "elements": matches}
+    except HTTPException:
+        raise
+    finally:
+        release_conn(conn)
+
+
+@router.get("/models/{model_id}/embeddings/status")
+def get_embeddings_status(model_id: str):
+    """
+    How much of this model's semantic-search indexing (search/embeddings.py)
+    has completed — embeddings now generate as a background step *after* the
+    ingest job itself already reports complete (see
+    pipeline.normalize.generate_embeddings_for_model), so this is the only
+    way to know whether semantic search is actually going to return results
+    yet for a freshly-ingested model.
+    """
+    from db.connection import get_conn, release_conn
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Model not found")
+            cur.execute("SELECT COUNT(*) FROM bim_elements WHERE model_id = %s", (model_id,))
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM bim_element_embeddings emb
+                JOIN bim_elements e ON e.element_id = emb.element_id
+                WHERE e.model_id = %s
+                """,
+                (model_id,),
+            )
+            embedded = cur.fetchone()[0]
+        return {
+            "model_id": model_id,
+            "total_elements": total,
+            "embedded_count": embedded,
+            "ready": total > 0 and embedded >= total,
+        }
     except HTTPException:
         raise
     finally:

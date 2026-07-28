@@ -21,6 +21,9 @@ export function StandaloneChartWidget({
     darkMode = true,
     isColorSource = false,
     onToggleColorSource,
+    federatedModels = [],
+    modelFilterKey,
+    onChangeModelFilter,
 }) {
     // Auto-open builder if widget has no configuration yet
     const [showBuilder, setShowBuilder] = useState(!widget.chartConfig)
@@ -146,6 +149,9 @@ export function StandaloneChartWidget({
                     darkMode={darkMode}
                     isColorSource={isColorSource}
                     onToggleColorSource={onToggleColorSource}
+                    federatedModels={federatedModels}
+                    modelFilterKey={modelFilterKey}
+                    onChangeModelFilter={onChangeModelFilter}
                 />
             ) : (
                 <div className="h-full flex flex-col items-center justify-center gap-2 text-zinc-500">

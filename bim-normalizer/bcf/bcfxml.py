@@ -28,6 +28,39 @@ router = APIRouter(tags=["bcf-xml"], prefix="/bcf-bridge")
 
 BCF_FILE_VERSION = "2.1"
 
+# .bcfzip uploads are small issue-tracking metadata (XML + a PNG snapshot per
+# topic) — generous caps that would never legitimately be hit, but bound the
+# worst case for a malicious upload. MAX_UPLOAD_BYTES guards the whole
+# request body; MAX_ZIP_MEMBER_BYTES guards each individual zip entry's
+# *decompressed* size (checked via ZipInfo.file_size, so it doesn't require
+# decompressing an oversized member first) against a zip-bomb-style archive
+# that's tiny on disk but expands to gigabytes in memory.
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_ZIP_MEMBER_BYTES = 25 * 1024 * 1024
+
+
+def _safe_zip_read(zf: zipfile.ZipFile, name: str) -> bytes:
+    info = zf.getinfo(name)
+    if info.file_size > MAX_ZIP_MEMBER_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} is too large ({info.file_size} bytes, max {MAX_ZIP_MEMBER_BYTES})",
+        )
+    return zf.read(name)
+
+
+def _reject_doctype(xml_bytes: bytes) -> None:
+    # xml.etree.ElementTree (via expat) doesn't resolve *external* entities
+    # by default, but it does expand *internal* general entities declared in
+    # a DTD — the "billion laughs" vector, where a tiny document expands to
+    # gigabytes in memory. Legitimate BCF markup.bcf/*.bcfv files never
+    # contain a DOCTYPE, so rejecting one outright (a cheap check, no XML
+    # parsing needed) closes this off without adding a new dependency
+    # (defusedxml) for what both files this guards are meant to be: small,
+    # DTD-free interop documents.
+    if b"<!DOCTYPE" in xml_bytes[:2048].upper():
+        raise HTTPException(status_code=400, detail="XML with a DOCTYPE declaration is not allowed")
+
 
 def _el(parent, tag, text=None, **attrib):
     e = ET.SubElement(parent, tag, **{k: str(v) for k, v in attrib.items() if v is not None})
@@ -234,6 +267,7 @@ def _components_for_export(viewpoint_guid: str) -> dict:
 # --------------------------------------------------------------------------
 
 def _parse_markup(xml_bytes: bytes) -> dict:
+    _reject_doctype(xml_bytes)
     root = ET.fromstring(xml_bytes)
     topic_el = root.find("Topic")
     if topic_el is None:
@@ -278,6 +312,7 @@ def _parse_markup(xml_bytes: bytes) -> dict:
 
 
 def _parse_viewpoint(xml_bytes: bytes) -> dict:
+    _reject_doctype(xml_bytes)
     root = ET.fromstring(xml_bytes)
 
     selection, visibility_exceptions, coloring = [], [], []
@@ -342,17 +377,28 @@ def import_bcfzip(project_id: str, file_bytes: bytes) -> list[dict]:
             markup_path = f"{folder}/markup.bcf"
             if markup_path not in zf.namelist():
                 continue
-            parsed = _parse_markup(zf.read(markup_path))
+            parsed = _parse_markup(_safe_zip_read(zf, markup_path))
 
             topic_row = execute_returning(
                 """
+                -- Same pg_advisory_xact_lock + COALESCE(MAX("index"),0)+1 pattern as
+                -- bcf/topics.py's create_topic — assigning "index" here (instead of
+                -- leaving it NULL for BACKFILL_INDEX_SQL to fill in at next startup)
+                -- avoids both the transient "server_assigned_id": "None" window before
+                -- that backfill runs, and the backfill colliding with indices already
+                -- assigned to this project's non-imported topics.
+                SELECT pg_advisory_xact_lock(hashtext(%s));
                 INSERT INTO bcf_topics (
                     model_id, stream_id, title, description, topic_type, topic_status,
-                    priority, stage, labels, creation_author, due_date, assigned_to
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    priority, stage, labels, creation_author, due_date, assigned_to, "index"
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    COALESCE((SELECT MAX("index") FROM bcf_topics WHERE model_id = %s), 0) + 1
+                )
                 RETURNING *
                 """,
                 (
+                    project_id,
                     project_id,
                     project["stream_id"],
                     parsed["topic"]["title"],
@@ -365,6 +411,7 @@ def import_bcfzip(project_id: str, file_bytes: bytes) -> list[dict]:
                     parsed["topic"]["creation_author"],
                     parsed["topic"]["due_date"],
                     parsed["topic"]["assigned_to"],
+                    project_id,
                 ),
             )
             topic_guid = str(topic_row["guid"])
@@ -378,10 +425,10 @@ def import_bcfzip(project_id: str, file_bytes: bytes) -> list[dict]:
             vp_filename = parsed.get("viewpoint_file") or "viewpoint.bcfv"
             vp_path = f"{folder}/{vp_filename}"
             if vp_path in zf.namelist():
-                vp = _parse_viewpoint(zf.read(vp_path))
+                vp = _parse_viewpoint(_safe_zip_read(zf, vp_path))
                 snapshot_filename = parsed.get("snapshot_file") or "snapshot.png"
                 snapshot_path = f"{folder}/{snapshot_filename}"
-                snapshot_data = zf.read(snapshot_path) if snapshot_path in zf.namelist() else None
+                snapshot_data = _safe_zip_read(zf, snapshot_path) if snapshot_path in zf.namelist() else None
 
                 vp_row = execute_returning(
                     """
@@ -452,7 +499,9 @@ def export_project(project_id: str):
 
 @router.post("/projects/{project_id}/import")
 async def import_project(project_id: str, file: UploadFile):
-    file_bytes = await file.read()
+    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max {MAX_UPLOAD_BYTES} bytes)")
     try:
         created = import_bcfzip(project_id, file_bytes)
     except zipfile.BadZipFile:

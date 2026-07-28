@@ -15,7 +15,7 @@ On any machine:
 openssl rand -hex 32
 ```
 
-Set the result as `MCP_API_KEY` in the **root** `.env` (`z:\AppData\speckle-dashboard\.env` —
+Set the result as `MCP_API_KEY` in the **root** `.env` (`z:\AppData\converge\.env` —
 this is the compose file that actually defines the `speckle-mcp` service), then rebuild:
 ```bash
 docker compose up -d --build speckle-mcp
@@ -76,7 +76,7 @@ Replace the stdio entry with:
 
 ## Local machine (this server) — keep stdio
 
-The local `.mcp.json` at `z:\AppData\speckle-dashboard\.mcp.json` stays as `stdio`.
+The local `.mcp.json` at `z:\AppData\converge\.mcp.json` stays as `stdio`.
 It talks to `speckle_mcp.py` directly without going through NPM.
 
 ## Verify

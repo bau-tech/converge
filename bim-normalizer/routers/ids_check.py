@@ -5,7 +5,8 @@ import uuid
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from job_registry import _is_uuid
+from job_registry import _is_uuid, fire_and_forget
+from process_pool import run_cpu_bound
 from db.jobs import create_job, update_job, get_job, prune_jobs
 from routers.ifc_export import resolve_model_ifc_bytes
 
@@ -173,7 +174,7 @@ async def start_ids_check(model_id: str, body: IdsCheckRequest):
             )
 
             logger.info("IDS check job %s: validating against %s (%d bytes)", job_id, ifc_source, len(ifc_bytes))
-            result = await asyncio.to_thread(
+            result = await run_cpu_bound(
                 run_ids_check, ifc_bytes, ids_content, ifc_source == "synthetic_export",
             )
             update_job(conn2, job_id, status="complete", result={"report": result, "ifc_source": ifc_source})
@@ -187,7 +188,7 @@ async def start_ids_check(model_id: str, body: IdsCheckRequest):
             finally:
                 _release_conn(conn2)
 
-    asyncio.create_task(_run())
+    fire_and_forget(_run())
     return {"job_id": job_id, "status": "pending"}
 
 

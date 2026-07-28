@@ -8,16 +8,65 @@ services:
       POSTGRES_USER: ${PG_USER:-speckle}
       POSTGRES_PASSWORD: ${PG_PASS:-speckle}
       POSTGRES_DB: ${PG_NAME:-speckle}
+      # Consumed only by postgres-init/01-nextcloud-db.sh on a fresh volume.
+      NEXTCLOUD_DB_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      NEXTCLOUD_DB_PASS: ${NEXTCLOUD_DB_PASS:-}
     ports:
       - "${PG_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-speckle}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    networks:
+      - speckle-net
+
+  # ── Nextcloud (document storage, versioning, per-user permissions) ──────────
+  # Fully headless: auto-installs on first boot from the env vars below, no
+  # web setup wizard. Nothing here is end-user-facing — every action goes
+  # through the dashboard's own DocumentsPanel via bim-normalizer, which is
+  # the only thing that ever talks to this container (plus the exposed port,
+  # for admin/debug convenience only — never proxied by converge's nginx).
+  nextcloud:
+    image: nextcloud:apache
+    container_name: nextcloud
+    ports:
+      - "${NEXTCLOUD_PORT:-8005}:80"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASS:?NEXTCLOUD_DB_PASS is required}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}
+      NEXTCLOUD_TRUSTED_DOMAINS: nextcloud
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - nextcloud_config:/var/www/html/config
+      - nextcloud_custom_apps:/var/www/html/custom_apps
+      # Installs groupfolders automatically right after Nextcloud's own
+      # auto-install completes — no manual `occ app:install` step needed.
+      - ./nextcloud-hooks/post-installation:/docker-entrypoint-hooks.d/post-installation:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # status.php returns 200 with "installed":false throughout Nextcloud's
+      # first-boot auto-install (which can take well over start_period) — a
+      # bare `curl -f` treats that as healthy, letting bim-normalizer start
+      # making OCS calls against a Nextcloud that isn't actually ready yet
+      # (symptom: OCS calls return the setup-wizard's HTML instead of JSON).
+      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
     networks:
       - speckle-net
 
@@ -53,8 +102,26 @@ services:
       PG_NAME: ${PG_NAME:-speckle}
       PORT: 8002
       LOG_LEVEL: ${LOG_LEVEL:-debug}
+      NEXTCLOUD_URL: ${NEXTCLOUD_URL:-http://nextcloud}
+      NEXTCLOUD_USER: ${NEXTCLOUD_USER:-admin}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
+      DOCUMENT_SYNC_SCAN_INTERVAL_S: ${DOCUMENT_SYNC_SCAN_INTERVAL_S:-3600}
+      # BCF_API_KEY/BCF_OIDC_SECRET were previously only passed to bcf-server
+      # below — bim-normalizer needs them too now, since dashboard_auth's
+      # session signing (DASHBOARD_SESSION_SECRET) falls back through
+      # BCF_OIDC_SECRET -> BCF_API_KEY the same way bcf-server's own admin
+      # session/OAuth id_token signing already does (see config/settings.py).
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
+      # DEV/TESTING ONLY — see the warning next to this var in .env.example.
+      DASHBOARD_AUTH_BYPASS: ${DASHBOARD_AUTH_BYPASS:-}
     depends_on:
       postgres:
+        condition: service_healthy
+      nextcloud:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -82,6 +149,18 @@ services:
       NORMALIZER_URL: http://bim-normalizer:8002
       MCP_API_KEY: ${MCP_API_KEY:-}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      # BCF tools (topics/comments/viewpoints) — same shared credential
+      # bcf-server itself and the dashboard's own BCF panel already use.
+      BCF_SERVER_URL: http://bcf-server:8004
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      # Documents/CDE tools need a real dashboard login, not just this key.
+      # speckle_mcp.py falls back to BCF_ADMIN_EMAIL/PASSWORD (bcf-server's
+      # own optional bootstrap admin account) when the dedicated pair below
+      # isn't set — passing both through here, Python picks the right one.
+      BCF_ADMIN_EMAIL: ${BCF_ADMIN_EMAIL:-}
+      BCF_ADMIN_PASSWORD: ${BCF_ADMIN_PASSWORD:-}
+      MCP_DASHBOARD_EMAIL: ${MCP_DASHBOARD_EMAIL:-}
+      MCP_DASHBOARD_PASSWORD: ${MCP_DASHBOARD_PASSWORD:-}
     depends_on:
       bim-normalizer:
         condition: service_healthy
@@ -111,6 +190,25 @@ services:
       PG_NAME: ${PG_NAME:-speckle}
       PORT: 8004
       BCF_API_KEY: ${BCF_API_KEY:-}
+      BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      # Optional idempotent startup seed for one bcf_users account —
+      # convenience only, the /admin panel is always reachable via
+      # BCF_API_KEY regardless (see config/settings.py).
+      BCF_ADMIN_EMAIL: ${BCF_ADMIN_EMAIL:-}
+      BCF_ADMIN_PASSWORD: ${BCF_ADMIN_PASSWORD:-}
+      # Only needed for the admin panel's "Document roles" project picker
+      # (bcf/admin.py's /admin/api/projects — best-effort GraphQL name
+      # lookup per stream); bcf-server has no Speckle-sync logic of its own
+      # otherwise. Same vars bim-normalizer already gets above.
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      # Speckle personal access tokens are server-specific — confirmed on
+      # this deployment, the default SPECKLE_TOKEN gets a clean 403 "Your
+      # token is not valid" from any other server. Same "name|url|token,..."
+      # value already used to build VITE_EXTRA_SPECKLE_SERVERS below, reused
+      # here so the admin panel's project-name lookup can pick the right
+      # token per project instead of only ever trying the default server's.
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
     depends_on:
       postgres:
@@ -151,6 +249,7 @@ services:
         VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
         VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
         VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
+        VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
     container_name: converge
     ports:
       - "8080:80"
@@ -168,6 +267,10 @@ services:
 
 volumes:
   pgdata:
+  nextcloud_html:
+  nextcloud_data:
+  nextcloud_config:
+  nextcloud_custom_apps:
 
 networks:
   speckle-net:

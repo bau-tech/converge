@@ -126,8 +126,14 @@ function scanNumericProperties(element, prefix = '', depth = 0, foundPaths = new
     return foundPaths
 }
 
-// Scan all elements and return discovered properties with sample values
-export function discoverProperties(fullData) {
+// Scan all elements and return discovered properties with sample values.
+// minUniqueValues excludes properties with too little variation to be a
+// useful chart grouping (default 2) — callers like ValidationWidget, where
+// checking whether a rare-but-uniform property (e.g. every fire-rated wall
+// sharing the same "F 120" fire rating class) is even *defined* is the whole
+// point, should pass 1 so a single-valued real property isn't treated the
+// same as "not discovered at all".
+export function discoverProperties(fullData, { minUniqueValues = 2 } = {}) {
     if (!fullData?.elements || !Array.isArray(fullData.elements)) {
         return []
     }
@@ -170,7 +176,7 @@ export function discoverProperties(fullData) {
         if (coverage < 0.01) continue
 
         const uniqueValues = pathValues.get(path)
-        if (!uniqueValues || uniqueValues.size < 2) continue // Need at least 2 values
+        if (!uniqueValues || uniqueValues.size < minUniqueValues) continue
         if (uniqueValues.size > 500) continue // Too many values = not good for charts
 
         properties.push({
@@ -240,8 +246,9 @@ export function aggregateProperty(fullData, propertyPath) {
     return counts
 }
 
-// Discover numeric properties from fullData (width, height, length, etc.)
-export function discoverNumericProperties(fullData) {
+// Discover numeric properties from fullData (width, height, length, etc.).
+// minCount parallels discoverProperties' minUniqueValues — see its comment.
+export function discoverNumericProperties(fullData, { minCount = 2 } = {}) {
     if (!fullData?.elements || !Array.isArray(fullData.elements)) {
         return []
     }
@@ -287,7 +294,7 @@ export function discoverNumericProperties(fullData) {
         if (coverage < 0.01) continue
 
         const stats = pathStats.get(path)
-        if (!stats || stats.count < 2) continue
+        if (!stats || stats.count < minCount) continue
 
         const avg = stats.sum / stats.count
         const name = formatPropertyName(path)

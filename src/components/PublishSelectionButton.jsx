@@ -78,7 +78,7 @@ export default function PublishSelectionButton({ normalizerUrl, modelId, speckle
                         {...popoverAnim}
                         onClick={openDialog}
                         title={`Publish ${count} selected element(s) as a new Speckle version`}
-                        className="fixed bottom-20 left-6 z-50 flex items-center gap-2 px-3 py-2 rounded-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow-lg transition-colors"
+                        className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] left-6 z-50 flex items-center gap-2 px-3 py-2 rounded-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-semibold shadow-lg transition-colors"
                     >
                         <Upload className="w-3.5 h-3.5" />
                         Publish {count} element{count !== 1 ? 's' : ''}
@@ -91,7 +91,7 @@ export default function PublishSelectionButton({ normalizerUrl, modelId, speckle
                 {open && (
                     <motion.div
                         {...popoverAnim}
-                        className="fixed bottom-20 left-6 z-50 w-72 rounded-xl border border-white/15 bg-zinc-900 shadow-2xl overflow-hidden"
+                        className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] left-6 z-50 w-72 max-w-[calc(100vw-3rem)] max-h-[calc(100vh-8rem)] overflow-y-auto rounded-xl border border-white/15 bg-zinc-900 shadow-2xl"
                     >
                         {/* Header */}
                         <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b border-white/8">

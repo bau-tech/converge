@@ -1,7 +1,7 @@
 import EChart from './EChart'
 import { baseOption, categoryAxisStyle, valueAxisStyle, legendStyle } from '../lib/echartsTheme'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2, Palette } from 'lucide-react'
+import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2, Palette, Layers } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { ChartBuilder } from './ChartBuilder'
 import { discoverProperties, aggregateProperty, discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
@@ -9,29 +9,97 @@ import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, us
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-// Color palettes for different chart types (Vibrant/Neon for Dark Mode)
+// Named categorical color schemes, chosen for by the user per chart (see
+// DashboardGrid.jsx's "Color" swatch picker, which imports COLOR_SCHEMES from
+// here so the picker preview can never drift from what the chart actually
+// renders). Each is a rotation of the same 7-hue wheel (Rose/Amber/Lime/
+// Emerald/Blue/Violet/Fuchsia, ~154° apart — a step-3 walk around 7 evenly
+// spaced hues, which maximizes the hue gap between *consecutive* palette
+// entries, i.e. between neighboring categories in a sorted bar/pie chart).
+// Previously most schemes (and the old COLOR_PALETTES.bar fallback) were
+// single-hue shade ramps or clustered in one quadrant of the wheel (all
+// purple/pink/blue), which is why charts with several categories looked like
+// nuances of the same color — rotating preserves each scheme's "flavor" as
+// its lead color while keeping every entry after it maximally distinct.
+export const COLOR_SCHEMES = [
+    { id: 'default', label: 'Purple',  colors: ['#A855F7','#F59E0B','#3B82F6','#F43F5E','#10B981','#D946EF','#84CC16'] },
+    { id: 'speckle', label: 'Speckle', colors: ['#136CFF','#F43F5E','#10B981','#D946EF','#84CC16','#A855F7','#F59E0B'] },
+    { id: 'emerald', label: 'Green',   colors: ['#10B981','#D946EF','#84CC16','#A855F7','#F59E0B','#3B82F6','#F43F5E'] },
+    { id: 'blue',    label: 'Blue',    colors: ['#3B82F6','#F43F5E','#10B981','#D946EF','#84CC16','#A855F7','#F59E0B'] },
+    { id: 'amber',   label: 'Amber',   colors: ['#F59E0B','#3B82F6','#F43F5E','#10B981','#D946EF','#84CC16','#A855F7'] },
+    { id: 'rose',    label: 'Rose',    colors: ['#F43F5E','#10B981','#D946EF','#84CC16','#A855F7','#F59E0B','#3B82F6'] },
+]
+
 const COLOR_PALETTES = {
-    // Speckle Intelligence style: Vibrant Purples, Pinks, Blues
-    bar: [
-        '#A855F7', // Purple
-        '#D946EF', // Pink
-        '#EC4899', // Pink-Rose
-        '#8B5CF6', // Violet
-        '#6366F1', // Indigo
-        '#3B82F6', // Blue
-        '#0EA5E9', // Sky
-    ],
-    pie: [
-        '#3B82F6', // Blue (Primary)
-        '#EC4899', // Pink
-        '#F59E0B', // Amber
-        '#10B981', // Emerald
-        '#8B5CF6', // Violet
-        '#0EA5E9', // Sky
-        '#F43F5E', // Rose
-        '#6366F1'  // Indigo
-    ],
+    bar: COLOR_SCHEMES[0].colors,
+    pie: COLOR_SCHEMES[0].colors,
     highlight: '#Facc15' // Yellow for selection
+}
+
+// Sentinel for DynamicChart's per-chart model-filter dropdown (federated/
+// combined-view mode only), meaning "merged set" as opposed to one specific
+// combined branch's elements. Shared with App.jsx, which owns the actual
+// filtering of chart data by model — this file only renders the picker.
+export const COMBINED_MODEL_KEY = '__combined__'
+
+// Small popover — shown in a standalone chart's header only while federated
+// ("combine models") mode is active — letting that one chart show a single
+// combined branch's data instead of the merged default. Mirrors
+// CombineModelsPicker's own open/outside-click popover pattern for
+// consistency with the rest of the federation UI.
+function ChartModelFilterDropdown({ models, selected, onSelect }) {
+    const [open, setOpen] = useState(false)
+    const containerRef = useRef(null)
+
+    useEffect(() => {
+        if (!open) return
+        const handler = (e) => { if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false) }
+        document.addEventListener('mousedown', handler)
+        return () => document.removeEventListener('mousedown', handler)
+    }, [open])
+
+    const selectedModel = models.find(m => m.branchName === selected)
+    const isFiltered = selected !== COMBINED_MODEL_KEY && !!selectedModel
+
+    return (
+        <div ref={containerRef} className="relative" onMouseDown={e => e.stopPropagation()}>
+            <button
+                onClick={e => { e.stopPropagation(); setOpen(v => !v) }}
+                className={`ml-1 p-0.5 rounded shrink-0 flex items-center ${isFiltered ? 'bg-amber-400/20' : 'hover:bg-white/10'}`}
+                title={isFiltered ? `Showing: ${selectedModel.branchName}` : 'Showing: Combined'}
+            >
+                {isFiltered
+                    ? <span className="w-2 h-2 rounded-full" style={{ backgroundColor: selectedModel.color }} />
+                    : <Layers size={11} className="text-zinc-400" />
+                }
+            </button>
+            {open && (
+                <div
+                    className="absolute top-full right-0 mt-1 z-[100] glass-card shadow-2xl p-1 cursor-default"
+                    style={{ width: '160px' }}
+                    onMouseDown={e => e.stopPropagation()}
+                >
+                    <button
+                        onClick={() => { onSelect(COMBINED_MODEL_KEY); setOpen(false) }}
+                        className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-left hover:bg-white/5 ${selected === COMBINED_MODEL_KEY ? 'text-amber-400' : 'text-[var(--speckle-foreground-2)]'}`}
+                    >
+                        <Layers size={11} className="shrink-0" />
+                        Combined
+                    </button>
+                    {models.map(m => (
+                        <button
+                            key={m.branchName}
+                            onClick={() => { onSelect(m.branchName); setOpen(false) }}
+                            className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-left hover:bg-white/5 truncate ${selected === m.branchName ? 'text-amber-400' : 'text-[var(--speckle-foreground-2)]'}`}
+                        >
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: m.color }} />
+                            <span className="truncate">{m.branchName}</span>
+                        </button>
+                    ))}
+                </div>
+            )}
+        </div>
+    )
 }
 
 // ... (CHART_CONFIG remains distinct)
@@ -118,15 +186,7 @@ const isEmptyKey = (k) => EMPTY_KEYS.has(k) || (typeof k === 'string' && k.trim(
 
 // Resolve color palette from scheme name or fall back to default
 function resolveColors(scheme) {
-    const palettes = {
-        default: COLOR_PALETTES.bar,
-        speckle: ['#136CFF','#276FE5','#4B40C9','#34D399','#FBBF24','#F87171','#B8C0CC'],
-        emerald: ['#10B981','#34D399','#6EE7B7','#059669','#047857','#065F46','#064E3B'],
-        blue:    ['#3B82F6','#60A5FA','#93C5FD','#2563EB','#1D4ED8','#1E40AF','#1E3A8A'],
-        amber:   ['#F59E0B','#FBBF24','#FCD34D','#D97706','#B45309','#92400E','#78350F'],
-        rose:    ['#F43F5E','#FB7185','#FDA4AF','#E11D48','#BE123C','#9F1239','#881337'],
-    }
-    return palettes[scheme] || COLOR_PALETTES.bar
+    return COLOR_SCHEMES.find(s => s.id === scheme)?.colors || COLOR_SCHEMES[0].colors
 }
 
 function sortEntries(entries, sortOrder) {
@@ -545,6 +605,13 @@ export function DynamicChart({
     // widens the header's reserved space so the in-flow buttons below never
     // sit underneath DashboardGrid's absolutely-positioned overlay buttons.
     hasTypeToggle = false,
+    // Federated ("combine models") per-chart data source switch — federatedModels
+    // is the combined branch list (empty outside combine mode, hiding the
+    // control entirely), modelFilterKey is this chart's current selection
+    // (COMBINED_MODEL_KEY or one branchName), onChangeModelFilter(key) persists it.
+    federatedModels = [],
+    modelFilterKey = COMBINED_MODEL_KEY,
+    onChangeModelFilter,
 }) {
     // Chart type is now controlled entirely by the config prop.
     // In standalone mode DashboardGrid passes an updated config when the user
@@ -667,11 +734,12 @@ export function DynamicChart({
 
     // ── Standalone panel mode (individual grid panel) ──────────────────
     if (standalone) {
-        // Reserves room so this header's own in-flow buttons (colour toggle,
-        // edit) never render underneath DashboardGrid's absolutely-positioned
-        // overlay buttons (close ~24px, pin ~another 24px, and — for plain
-        // summary charts only — the H/V/P chart-type-toggle group ~68px more).
-        const headerPaddingRight = 52 + (hasTypeToggle ? 68 : 0)
+        // Reserves room so this header's own in-flow buttons (model filter,
+        // colour toggle, edit) never render underneath DashboardGrid's
+        // absolutely-positioned overlay buttons (close ~24px, pin ~another
+        // 24px, and — for plain summary charts only — the H/V/P chart-type-
+        // toggle group ~68px more).
+        const headerPaddingRight = 52 + (hasTypeToggle ? 68 : 0) + (federatedModels.length > 0 ? 20 : 0)
         return (
             <div className="h-full flex flex-col relative">
                 {/* drag-zone title row — pr reserves space for DashboardGrid's overlay buttons */}
@@ -688,6 +756,13 @@ export function DynamicChart({
                             <span className="text-[10px] text-yellow-500 shrink-0">Loading…</span>
                         )}
                     </div>
+                    {federatedModels.length > 0 && (
+                        <ChartModelFilterDropdown
+                            models={federatedModels}
+                            selected={modelFilterKey}
+                            onSelect={key => onChangeModelFilter?.(key)}
+                        />
+                    )}
                     {canColorViewer && (
                         <button
                             onMouseDown={e => e.stopPropagation()}

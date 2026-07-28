@@ -11,6 +11,7 @@ import {
 } from '../utils/bcfClient'
 import { archiveLinkedSpeckleComment } from '../utils/bcfSync'
 import { PRIORITIES, PRIORITY_COLOR } from '../utils/bcfWorkflow'
+import { useAuth } from '../contexts/AuthContext'
 
 const TOPIC_TYPES = ['Issue', 'Clash', 'Request', 'Remark']
 
@@ -20,13 +21,6 @@ const STATUS_COLOR = {
     Closed: 'bg-emerald-500/20 text-emerald-400',
 }
 
-function getAuthorName() {
-    return localStorage.getItem('bcfAuthorName') || ''
-}
-function setAuthorName(name) {
-    localStorage.setItem('bcfAuthorName', name)
-}
-
 // `topics` is owned by App.jsx (synced automatically and silently with
 // Speckle on model load via bcfSync.js) — this component is a controlled
 // display over that shared state, with manual create/delete/.bcfzip actions.
@@ -34,6 +28,7 @@ export function BcfTopicPanel({
     projectId, viewerRef, topics = [], fullData = null, streamId = null, onTopicsChange, onRequestSync,
     serverUrl, serverToken,
 }) {
+    const { user } = useAuth()
     const [isOpen, setIsOpen] = useState(false)
     const [error, setError] = useState(null)
 
@@ -49,7 +44,6 @@ export function BcfTopicPanel({
     const [newType, setNewType] = useState('Issue')
     const [newPriority, setNewPriority] = useState('Normal')
 
-    const [author, setAuthor] = useState(getAuthorName)
     const importInputRef = useRef(null)
 
     // Markup editor state — `markupMode` is null | 'create' | 'add-viewpoint'.
@@ -129,8 +123,7 @@ export function BcfTopicPanel({
 
     const submitNewTopic = async () => {
         if (!newTitle.trim() || !projectId) return
-        const authorName = author.trim() || 'Dashboard User'
-        setAuthorName(authorName)
+        const authorName = user?.name || 'Dashboard User'
         try {
             const topic = await createTopic(projectId, {
                 title: newTitle.trim(),
@@ -228,8 +221,7 @@ export function BcfTopicPanel({
 
     const submitComment = async () => {
         if (!newComment.trim() || !selectedTopic) return
-        const authorName = author.trim() || 'Dashboard User'
-        setAuthorName(authorName)
+        const authorName = user?.name || 'Dashboard User'
         try {
             const comment = await createComment(projectId, selectedTopic.guid, {
                 comment: newComment.trim(),
@@ -305,7 +297,9 @@ export function BcfTopicPanel({
     return (
         <motion.div
             initial={false}
-            className="fixed bottom-6 right-6 z-50 flex flex-col items-end"
+            // z-[260]: above the Element panel (z-[245]) so this FAB stays clickable
+            // even when the panel is covering the bottom-right corner of the viewer.
+            className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] right-6 z-[260] flex flex-col items-end"
         >
             <AnimatePresence>
                 {isOpen && (
@@ -313,7 +307,7 @@ export function BcfTopicPanel({
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                        className="pointer-events-auto w-[350px] h-[500px] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
+                        className="pointer-events-auto w-[350px] h-[500px] max-w-[calc(100vw-3rem)] max-h-[calc(100vh-6rem)] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
                     >
                         {/* Header */}
                         <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between bg-white/5">
@@ -399,12 +393,6 @@ export function BcfTopicPanel({
                                             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
                                         </select>
                                     </div>
-                                    <input
-                                        value={author}
-                                        onChange={(e) => setAuthor(e.target.value)}
-                                        placeholder="Your name"
-                                        className="w-full px-2 py-1 text-sm rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
-                                    />
                                     <button
                                         onClick={submitNewTopic}
                                         disabled={!newTitle.trim()}

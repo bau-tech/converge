@@ -34,6 +34,23 @@ class ElementLinkRequest(BaseModel):
     speckle_ids: list[str]
 
 
+class DependencyCreateRequest(BaseModel):
+    predecessor_task_id: str
+    successor_task_id: str
+    sequence_type: str = 'FINISH_START'
+    lag_days: float | None = None
+
+
+class GenerateScheduleRequest(BaseModel):
+    strategy: str = 'storey'           # 'storey' | 'height'
+    start_date: str                    # 'YYYY-MM-DD'
+    days_per_group: float = 5
+    lag_days: float = 0
+    order: str = 'bottom-up'           # 'bottom-up' | 'top-down'
+    link_sequences: bool = True
+    height_band_m: float = 3.0         # only used when strategy == 'height'
+
+
 @router.get("/models/{model_id}/timeline/params")
 def get_timeline_params(model_id: str):
     """Discover parameters that can drive a 4D build-up animation."""
@@ -70,6 +87,19 @@ def get_schedule(model_id: str):
         release_conn(conn)
 
 
+@router.delete("/models/{model_id}/schedule")
+def delete_schedule(model_id: str):
+    """Wipe the entire schedule (all tasks, dependencies, element links) for a model."""
+    from db.connection import get_conn, release_conn
+    from db.schedule import delete_schedule as _delete_schedule
+    conn = get_conn()
+    try:
+        deleted = _delete_schedule(conn, model_id)
+        return {"deleted_tasks": deleted}
+    finally:
+        release_conn(conn)
+
+
 @router.post("/models/{model_id}/schedule/import")
 async def import_schedule(model_id: str, file: UploadFile):
     """Import a schedule into bim_tasks, from either an IFC file containing
@@ -102,6 +132,53 @@ async def import_schedule(model_id: str, file: UploadFile):
         raise HTTPException(status_code=422, detail=f'Import failed: {e}')
     finally:
         release_conn(conn)
+
+
+@router.post("/models/{model_id}/schedule/generate")
+def generate_schedule(model_id: str, body: GenerateScheduleRequest):
+    """Auto-generate a schedule from the model's own storey/geometry data —
+    one task per storey (or per Z-height band), elements auto-assigned,
+    consecutive tasks optionally chained FINISH_START. Replaces any existing
+    schedule, same as import."""
+    from db.connection import get_conn, release_conn
+    from db.schedule import generate_schedule as _generate_schedule
+    conn = get_conn()
+    try:
+        return _generate_schedule(
+            conn, model_id, body.strategy, body.start_date, body.days_per_group,
+            lag_days=body.lag_days, order=body.order, link_sequences=body.link_sequences,
+            height_band_m=body.height_band_m,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    finally:
+        release_conn(conn)
+
+
+@router.get("/models/{model_id}/schedule/export-ifc")
+def export_schedule_ifc(model_id: str):
+    """Minimal schedule-only IFC (no geometry) for round-tripping the current
+    schedule to other tools. Synchronous (unlike /export/ifc's async job)
+    since a schedule-only file is small/fast."""
+    from fastapi.responses import Response
+    from db.connection import get_conn, release_conn
+    from db.schedule import get_tasks_for_export
+    from ifc.export import export_schedule_only
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM bim_models WHERE model_id = %s", (model_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Model not found")
+            model_row = dict(zip([d[0] for d in cur.description], row))
+        tasks, _task_elements = get_tasks_for_export(conn, model_id)
+    finally:
+        release_conn(conn)
+
+    ifc_bytes = export_schedule_only(model_row, tasks)
+    return Response(content=ifc_bytes, media_type="application/x-step")
 
 
 @router.post("/models/{model_id}/schedule/tasks")
@@ -173,5 +250,39 @@ def unlink_task_elements(model_id: str, task_id: str, body: ElementLinkRequest):
     try:
         unlinked = unlink_elements_by_speckle_id(conn, task_id, model_id, body.speckle_ids)
         return {"unlinked": unlinked}
+    finally:
+        release_conn(conn)
+
+
+@router.post("/models/{model_id}/schedule/dependencies")
+def create_dependency(model_id: str, body: DependencyCreateRequest):
+    """Create (or edit the type/lag of an existing) dependency between two
+    tasks in this model. Rejects a request that would create a cycle, or
+    that references a task_id not belonging to this model, with HTTP 422.
+    Triggers a CPM recompute before returning."""
+    from db.connection import get_conn, release_conn
+    from db.schedule import create_dependency as _create_dependency
+    conn = get_conn()
+    try:
+        return _create_dependency(
+            conn, model_id, body.predecessor_task_id, body.successor_task_id,
+            body.sequence_type, body.lag_days,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    finally:
+        release_conn(conn)
+
+
+@router.delete("/models/{model_id}/schedule/dependencies/{dependency_id}")
+def delete_dependency(model_id: str, dependency_id: int):
+    from db.connection import get_conn, release_conn
+    from db.schedule import delete_dependency as _delete_dependency
+    conn = get_conn()
+    try:
+        deleted = _delete_dependency(conn, model_id, dependency_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Dependency not found")
+        return {"deleted": True}
     finally:
         release_conn(conn)

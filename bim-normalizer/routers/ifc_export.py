@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from job_registry import _content_disposition
+from job_registry import _content_disposition, fire_and_forget
+from process_pool import run_cpu_bound
 from db.jobs import create_job, update_job, get_job, prune_jobs
 
 router = APIRouter(tags=["ifc-export"])
@@ -69,7 +70,8 @@ def _load_export_data(model_id: str, coord_unit: str) -> tuple:
                 SELECT e.element_id, e.application_id, e.ifc_class, e.category,
                        e.name, e.storey, e.speckle_type,
                        g.bbox_min, g.bbox_max, g.centroid,
-                       g.mesh, g.volume_m3, g.area_m2
+                       g.mesh, g.volume_m3, g.area_m2,
+                       g.axis, g.footprint
                 FROM bim_elements e
                 LEFT JOIN bim_geometry g ON g.element_id = e.element_id
                 WHERE e.model_id = %s
@@ -81,18 +83,45 @@ def _load_export_data(model_id: str, coord_unit: str) -> tuple:
             if elements:
                 eids = [str(e["element_id"]) for e in elements]
                 cur.execute("""
-                    SELECT element_id::text, pset, key, value, datatype
+                    SELECT element_id::text, pset, key, value, datatype, canonical_key
                     FROM bim_parameters
                     WHERE element_id = ANY(%s::uuid[])
                     ORDER BY element_id, pset, key
                 """, (eids,))
-                for eid, pset, key, value, datatype in cur.fetchall():
+                for eid, pset, key, value, datatype, canonical_key in cur.fetchall():
                     params_by_element.setdefault(eid, []).append(
-                        {"pset": pset, "key": key, "value": value, "datatype": datatype}
+                        {"pset": pset, "key": key, "value": value, "datatype": datatype,
+                         "canonical_key": canonical_key}
                     )
     finally:
         release_conn(conn)
     return model_row, elements, params_by_element
+
+
+def _load_relationships_for_export(model_id: str) -> list[dict]:
+    """
+    Fetch this model's bim_relationships rows (parent/room/space links — see
+    db/insert.py's build_relationships()) for export_model() to emit as real
+    IFC relationship entities. Kept separate from _load_export_data() so its
+    other two callers (ids_check.py, clash_check.py, via
+    resolve_model_ifc_bytes' fallback path) aren't forced to fetch data they
+    don't need — export_model()'s relationships param defaults to None.
+    """
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT element_id::text, related_id::text, relation_type
+                FROM bim_relationships
+                WHERE element_id IN (SELECT element_id FROM bim_elements WHERE model_id = %s)
+            """, (model_id,))
+            return [
+                {"element_id": eid, "related_id": rid, "relation_type": rtype}
+                for eid, rid, rtype in cur.fetchall()
+            ]
+    finally:
+        release_conn(conn)
 
 
 async def resolve_model_ifc_bytes(
@@ -150,7 +179,10 @@ async def resolve_model_ifc_bytes(
 
     if ifc_bytes is None:
         model_row, elements, params = await asyncio.to_thread(_load_export_data, model_id, coord_unit)
-        ifc_bytes = await asyncio.to_thread(export_model, model_row, elements, params, coord_unit)
+        relationships = await asyncio.to_thread(_load_relationships_for_export, model_id)
+        ifc_bytes = await run_cpu_bound(
+            export_model, model_row, elements, params, coord_unit, None, None, relationships
+        )
 
     return ifc_bytes, ifc_source
 
@@ -209,16 +241,23 @@ async def start_export_ifc(model_id: str, coord_unit: str = "mm", include_schedu
             model_row, elements, params = await asyncio.to_thread(
                 _load_export_data, model_id, coord_unit
             )
+            relationships = await asyncio.to_thread(_load_relationships_for_export, model_id)
             tasks, task_elements = ([], {})
             if include_schedule:
                 tasks, task_elements = await asyncio.to_thread(_load_tasks, model_id)
             model_name = model_row.get("branch_name") or model_row.get("commit_id", model_id)[:8]
-            ifc_bytes = await asyncio.to_thread(
-                export_model, model_row, elements, params, coord_unit, tasks, task_elements
+            ifc_bytes = await run_cpu_bound(
+                export_model, model_row, elements, params, coord_unit, tasks, task_elements, relationships
             )
             filename = f"{model_name}_{model_id[:8]}.ifc"
             temp_path = _export_temp_path(job_id)
-            await asyncio.to_thread(lambda: open(temp_path, "wb").write(ifc_bytes))
+            def _write_export_file():
+                with open(temp_path, "wb") as f:
+                    f.write(ifc_bytes)
+            # Explicit `with` instead of the previous open(...).write(...)
+            # one-liner, which relied on CPython's refcounting to close the
+            # file promptly rather than guaranteeing it.
+            await asyncio.to_thread(_write_export_file)
             update_job(conn2, job_id, status="complete", result={
                 "filename": filename, "temp_path": temp_path,
             })
@@ -232,7 +271,7 @@ async def start_export_ifc(model_id: str, coord_unit: str = "mm", include_schedu
             finally:
                 release_conn(conn2)
 
-    asyncio.create_task(_run())
+    fire_and_forget(_run())
     return {"job_id": job_id, "status": "pending"}
 
 

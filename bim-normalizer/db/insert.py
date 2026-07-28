@@ -4,9 +4,10 @@ import os
 from typing import Any
 
 from psycopg2.extras import execute_values
+from specklepy.objects import Base
 
-from ifc.classify import classify_material_category
-from ifc.schema import sanitize_float, sanitize_floats
+from ifc.classify import classify_material_category, extract_profile_from_name
+from ifc.schema import LENGTH_TO_M, MASS_TO_KG, sanitize_float, sanitize_floats
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ def _load_canonical_map():
         # Build reverse lookups
         key_to_canonical: dict[str, str] = {}       # lowercase key → canonical
         pset_key_to_canonical: dict[tuple, str] = {}  # (pset, key) → canonical
+        builtin_to_canonical: dict[str, str] = {}   # Revit BuiltInParameter enum name → canonical
         for canonical, entry in data.items():
             if canonical.startswith("_"):
                 continue
@@ -37,16 +39,34 @@ def _load_canonical_map():
                 key  = ps_entry.get("key", "")
                 if pset and key:
                     pset_key_to_canonical[(pset, key)] = canonical
-        return key_to_canonical, pset_key_to_canonical
+            for builtin_name in entry.get("builtin_params", []):
+                builtin_to_canonical[builtin_name] = canonical
+        return key_to_canonical, pset_key_to_canonical, builtin_to_canonical
     except Exception as exc:
         logger.warning("Could not load mapping_canonical.json: %s — canonical_key will be NULL", exc)
-        return {}, {}
+        return {}, {}, {}
 
-_KEY_TO_CANONICAL, _PSET_KEY_TO_CANONICAL = _load_canonical_map()
+_KEY_TO_CANONICAL, _PSET_KEY_TO_CANONICAL, _BUILTIN_TO_CANONICAL = _load_canonical_map()
 
 
-def _resolve_canonical(pset: str | None, key: str) -> str | None:
-    """Return the canonical name for a (pset, key) pair, or None if not mapped."""
+def _resolve_canonical(pset: str | None, key: str, internal_definition_name: str | None = None) -> str | None:
+    """
+    Return the canonical name for a parameter, or None if not mapped.
+
+    internal_definition_name (Revit only — the connector's stable
+    BuiltInParameter enum name or shared-parameter GUID, see
+    ParameterDefinitionHandler.cs in the Revit connector) is checked first
+    when present: unlike `key` — the parameter's display name — it never
+    varies with the source Revit installation's UI language, so it's the
+    reliable match for Revit-sourced data regardless of locale. `key`-based
+    matching (mapping_canonical.json's "keys" lists) remains the only option
+    for non-Revit sources (Tekla/IFC/ArchiCAD), whose raw identifiers are
+    already locale-independent internal names, not translated display text.
+    """
+    if internal_definition_name:
+        canon = _BUILTIN_TO_CANONICAL.get(internal_definition_name)
+        if canon:
+            return canon
     if pset:
         canon = _PSET_KEY_TO_CANONICAL.get((pset, key))
         if canon:
@@ -111,9 +131,42 @@ def upsert_element(conn, model_id: str, application_id: str | None,
 # Geometry
 # ---------------------------------------------------------------------------
 
+def upsert_elements_batch(conn, model_id: str, rows: list[dict]) -> dict[str, str]:
+    """Batch version of upsert_element — one round trip for the whole list
+    instead of one per element (see the module-level batching note near
+    upsert_geometries_batch/upsert_parameters_batch for why this matters).
+    Each row dict needs: application_id, speckle_id, speckle_type, ifc_class,
+    category, name, storey, elem_hash. Returns {speckle_id: element_id}."""
+    if not rows:
+        return {}
+    with conn.cursor() as cur:
+        result = execute_values(cur, """
+            INSERT INTO bim_elements
+                (model_id, application_id, speckle_id, speckle_type,
+                 ifc_class, category, name, storey, hash)
+            VALUES %s
+            ON CONFLICT (model_id, speckle_id) DO UPDATE SET
+                application_id = EXCLUDED.application_id,
+                speckle_type   = EXCLUDED.speckle_type,
+                ifc_class      = EXCLUDED.ifc_class,
+                category       = EXCLUDED.category,
+                name           = EXCLUDED.name,
+                storey         = EXCLUDED.storey,
+                hash           = EXCLUDED.hash
+            RETURNING speckle_id, element_id
+        """, [
+            (model_id, r["application_id"], r["speckle_id"], r["speckle_type"],
+             r["ifc_class"], r["category"], r["name"], r["storey"], r["elem_hash"])
+            for r in rows
+        ], page_size=len(rows), fetch=True)
+    return {speckle_id: str(element_id) for speckle_id, element_id in result}
+
+
 def upsert_geometry(conn, element_id: str, geo: dict) -> None:
     """Insert or replace geometry row for an element."""
-    mesh_json = json.dumps(geo.get("mesh")) if geo.get("mesh") else None
+    mesh_json      = json.dumps(geo.get("mesh")) if geo.get("mesh") else None
+    axis_json      = json.dumps(geo.get("axis")) if geo.get("axis") else None
+    footprint_json = json.dumps(geo.get("footprint")) if geo.get("footprint") else None
     # Defense-in-depth: extract_geometry() already sanitizes NaN/Inf, but guard
     # here too in case a future caller bypasses it — NaN/Inf would otherwise
     # land in a Postgres FLOAT column or break downstream range queries silently.
@@ -130,8 +183,8 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_geometry
-                (element_id, bbox_min, bbox_max, centroid, centroid_si, volume_m3, area_m2, mesh)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                (element_id, bbox_min, bbox_max, centroid, centroid_si, volume_m3, area_m2, mesh, axis, footprint)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
             ON CONFLICT (element_id) DO UPDATE SET
                 bbox_min    = EXCLUDED.bbox_min,
                 bbox_max    = EXCLUDED.bbox_max,
@@ -139,7 +192,9 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
                 centroid_si = EXCLUDED.centroid_si,
                 volume_m3   = EXCLUDED.volume_m3,
                 area_m2     = EXCLUDED.area_m2,
-                mesh        = EXCLUDED.mesh
+                mesh        = EXCLUDED.mesh,
+                axis        = EXCLUDED.axis,
+                footprint   = EXCLUDED.footprint
         """, (
             element_id,
             bbox_min,
@@ -149,7 +204,55 @@ def upsert_geometry(conn, element_id: str, geo: dict) -> None:
             volume_m3,
             area_m2,
             mesh_json,
+            axis_json,
+            footprint_json,
         ))
+
+
+def upsert_geometries_batch(conn, rows: list[dict]) -> None:
+    """Batch version of upsert_geometry. Each row dict needs element_id + geo
+    (the same dict upsert_geometry takes) — one round trip for the whole
+    list. See the batching note near upsert_elements_batch: ingest_commit()
+    used to call upsert_element/upsert_geometry/upsert_parameters once per
+    element, meaning a 50k-element model did on the order of
+    150k-200k individual round trips to Postgres — dominating wall-clock
+    time (CPU sat at 30-45% because most of it was spent waiting on the
+    network, not computing) and, combined with holding all those rows
+    uncommitted at once, is what caused the shared-lock-table exhaustion
+    fixed alongside this. Batching cuts that to a couple of round trips per
+    ~500-element chunk."""
+    if not rows:
+        return
+    values = []
+    for r in rows:
+        geo = r["geo"]
+        mesh_json      = json.dumps(geo.get("mesh")) if geo.get("mesh") else None
+        axis_json      = json.dumps(geo.get("axis")) if geo.get("axis") else None
+        footprint_json = json.dumps(geo.get("footprint")) if geo.get("footprint") else None
+        bbox_min    = sanitize_floats(geo.get("bbox_min"))
+        bbox_max    = sanitize_floats(geo.get("bbox_max"))
+        centroid    = sanitize_floats(geo.get("centroid"))
+        centroid_si = sanitize_floats(geo.get("centroid_si"))
+        volume_m3   = sanitize_float(geo.get("volume_m3"))
+        area_m2     = sanitize_float(geo.get("area_m2"))
+        values.append((r["element_id"], bbox_min, bbox_max, centroid, centroid_si,
+                        volume_m3, area_m2, mesh_json, axis_json, footprint_json))
+    with conn.cursor() as cur:
+        execute_values(cur, """
+            INSERT INTO bim_geometry
+                (element_id, bbox_min, bbox_max, centroid, centroid_si, volume_m3, area_m2, mesh, axis, footprint)
+            VALUES %s
+            ON CONFLICT (element_id) DO UPDATE SET
+                bbox_min    = EXCLUDED.bbox_min,
+                bbox_max    = EXCLUDED.bbox_max,
+                centroid    = EXCLUDED.centroid,
+                centroid_si = EXCLUDED.centroid_si,
+                volume_m3   = EXCLUDED.volume_m3,
+                area_m2     = EXCLUDED.area_m2,
+                mesh        = EXCLUDED.mesh,
+                axis        = EXCLUDED.axis,
+                footprint   = EXCLUDED.footprint
+        """, values, template="(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb)", page_size=len(values))
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +281,25 @@ def upsert_element_embedding(conn, element_id: str, embed_text: str, vector: lis
                 embed_text = EXCLUDED.embed_text,
                 embedding  = EXCLUDED.embedding
         """, (element_id, embed_text, vector))
+
+
+def upsert_element_embeddings_batch(conn, rows: list[tuple[str, str, list[float]]]) -> None:
+    """Batch version of upsert_element_embedding. `rows` is
+    [(element_id, embed_text, vector), ...] — one round trip for the whole
+    batch instead of one insert per element (this loop used to do exactly
+    that inside _build_missing_embeddings, the same N+1 pattern the main
+    ingest loop had before batching)."""
+    if not rows:
+        return
+    values = [(eid, text, sanitize_floats(vector)) for eid, text, vector in rows]
+    with conn.cursor() as cur:
+        execute_values(cur, """
+            INSERT INTO bim_element_embeddings (element_id, embed_text, embedding)
+            VALUES %s
+            ON CONFLICT (element_id) DO UPDATE SET
+                embed_text = EXCLUDED.embed_text,
+                embedding  = EXCLUDED.embedding
+        """, values, page_size=len(values))
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +364,10 @@ def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None 
             if "name" in v and "value" in v and isinstance(v["name"], str):
                 key      = v["name"]
                 raw_val  = v["value"]
-                canonical = _resolve_canonical(pset, key)
+                # Revit only — see _resolve_canonical's docstring for why this
+                # is checked ahead of the display-name-based (pset, key) match.
+                internal_definition_name = v.get("internalDefinitionName")
+                canonical = _resolve_canonical(pset, key, internal_definition_name)
                 value_numeric = _numeric_val(raw_val)
                 unit = v.get("units") or default_unit
                 value_si, unit_si = _normalize_numeric(canonical, value_numeric, unit)
@@ -294,6 +419,13 @@ def _flatten_params(raw: Any, pset: str | None = None, default_unit: str | None 
                 "value_si":      None,
                 "unit_si":       None,
             })
+        elif v is None:
+            # An absent/inapplicable optional parameter (e.g. many of a
+            # connector's "System Type Parameters" fields on any given
+            # element) — not an anomaly, so no warning. This is the single
+            # most common branch hit in this loop; logging it per-occurrence
+            # was measurable per-element overhead across a whole model.
+            continue
         else:
             logger.warning(
                 "Unhandled parameter value type %s for key=%r pset=%r — dropping",
@@ -328,46 +460,55 @@ def _numeric_val(v: Any) -> float | None:
 # numeric filters (main.py, chat/agent.py) keep working unchanged.
 # ---------------------------------------------------------------------------
 
-_LENGTH_TO_M = {
-    "mm": 0.001, "millimeter": 0.001, "millimeters": 0.001, "millimetre": 0.001, "millimetres": 0.001,
-    "cm": 0.01, "centimeter": 0.01, "centimeters": 0.01, "centimetre": 0.01, "centimetres": 0.01,
-    "m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
-    "km": 1000.0, "kilometer": 1000.0, "kilometers": 1000.0,
-    "in": 0.0254, "inch": 0.0254, "inches": 0.0254,
-    "ft": 0.3048, "foot": 0.3048, "feet": 0.3048,
-    "yd": 0.9144, "yard": 0.9144, "yards": 0.9144,
-}
-
-_MASS_TO_KG = {
-    "kg": 1.0, "kilogram": 1.0, "kilograms": 1.0,
-    "g": 0.001, "gram": 0.001, "grams": 0.001,
-    "t": 1000.0, "tonne": 1000.0, "tonnes": 1000.0, "ton": 1000.0, "tons": 1000.0,
-    "lb": 0.45359237, "lbs": 0.45359237, "pound": 0.45359237, "pounds": 0.45359237,
-}
+# Length/mass unit tables live in ifc.schema (single source of truth, also
+# used by ifc/export.py's geometry math) — imported above as LENGTH_TO_M /
+# MASS_TO_KG rather than duplicated here.
 
 _LENGTH_CANONICALS = {"length"}
 _AREA_CANONICALS   = {"area"}
 _VOLUME_CANONICALS = {"volume"}
 _MASS_CANONICALS   = {"weight"}  # 'unit_mass' (kg/m) excluded — compound unit, can't convert from a single length/mass unit
 
+# Standard engineering constant for structural steel (ASTM A36/A992, S235/S355,
+# etc. all fall within ~7700-7900 kg/m³) — used as a Volume-based weight
+# fallback for sources (chiefly Revit) that expose Volume natively but no
+# Weight/Mass/UnitMass parameter at all. See the derivation below.
+_STEEL_DENSITY_KG_M3 = 7850.0
+
 
 def _si_factor(canonical: str | None, unit: str | None) -> tuple[float | None, str | None]:
     """Return (multiplier, SI unit symbol) to convert `unit` to SI for `canonical`, or (None, None)."""
-    if not canonical or not unit:
+    if not canonical:
+        return None, None
+    if canonical in _MASS_CANONICALS:
+        # Flat Tekla/UDA-style values (NET_WEIGHT etc.) carry no per-parameter
+        # unit at all — _flatten_params falls back to the model's LENGTH unit
+        # (obj.units, e.g. "mm") for every plain scalar regardless of what it
+        # actually measures, which is meaningless for a mass value. Without
+        # this, that bogus unit fails the _MASS_TO_KG lookup below and the
+        # reading is silently dropped from value_si (and therefore from
+        # total_steel_weight_kg's sum, which requires value_si IS NOT NULL)
+        # even though the raw number is almost always already in kg by
+        # convention. Treat any unit that isn't a recognized mass unit
+        # (including none at all) as already being kg; a real explicit mass
+        # unit (kg/g/t/lb) still converts normally below.
+        if unit:
+            f = MASS_TO_KG.get(unit.strip().lower())
+            if f:
+                return f, "kg"
+        return 1.0, "kg"
+    if not unit:
         return None, None
     u = unit.strip().lower()
     if canonical in _LENGTH_CANONICALS:
-        f = _LENGTH_TO_M.get(u)
+        f = LENGTH_TO_M.get(u)
         return (f, "m") if f else (None, None)
     if canonical in _AREA_CANONICALS:
-        f = _LENGTH_TO_M.get(u)
+        f = LENGTH_TO_M.get(u)
         return (f * f, "m2") if f else (None, None)
     if canonical in _VOLUME_CANONICALS:
-        f = _LENGTH_TO_M.get(u)
+        f = LENGTH_TO_M.get(u)
         return (f ** 3, "m3") if f else (None, None)
-    if canonical in _MASS_CANONICALS:
-        f = _MASS_TO_KG.get(u)
-        return (f, "kg") if f else (None, None)
     return None, None
 
 
@@ -455,10 +596,37 @@ def upsert_parameters(conn, element_id: str, params_raw: list[dict]) -> None:
         ])
 
 
-def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
+def upsert_parameters_batch(conn, rows: list[tuple[str, list[dict]]]) -> None:
+    """Batch version of upsert_parameters. `rows` is [(element_id, params_raw), ...]
+    — one DELETE (WHERE element_id = ANY(...)) and one execute_values INSERT
+    for the whole chunk, instead of a DELETE+INSERT round trip per element."""
+    element_ids = [eid for eid, _ in rows if eid]
+    if not element_ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM bim_parameters WHERE element_id = ANY(%s::uuid[])", (element_ids,))
+        flat = [
+            (
+                element_id, r.get("pset"), r["key"], r.get("value"), r.get("datatype"),
+                r.get("value_numeric"), r.get("canonical_key"), r.get("value_si"), r.get("unit_si"),
+            )
+            for element_id, params_raw in rows
+            for r in params_raw if r.get("key")
+        ]
+        if flat:
+            execute_values(cur, """
+                INSERT INTO bim_parameters (element_id, pset, key, value, datatype, value_numeric, canonical_key, value_si, unit_si)
+                VALUES %s
+            """, flat, page_size=len(flat))
+
+
+def extract_parameters(obj, speckle_id: str | None = None) -> list[dict]:
     """
-    Extract all parameters/properties from a Speckle Base object and upsert
-    into bim_parameters with canonical_key populated.
+    Extract all parameters/properties from a Speckle Base object into the
+    flat row-dict shape upsert_parameters/upsert_parameters_batch expect.
+    Pure computation — no DB access — so callers can extract every element's
+    parameters up front and upsert them all in one batch (see
+    upsert_parameters_batch) rather than one DB round trip per element.
 
     Sources covered:
       Revit   — obj.parameters (instance), obj.typeParameters (type-level: Fire Rating, etc.)
@@ -499,6 +667,26 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
         raw = type_params.__dict__ if hasattr(type_params, "__dict__") else type_params
         all_rows.extend(_flatten_params(raw, pset="typeParameters", default_unit=default_unit))
 
+    # ── v3 Revit connector instance/definition split ───────────────────────
+    # Same split that affects geometry (ifc/geometry.py's _get_all_meshes,
+    # see fix_structural_geometry_v3 note): structural family instances
+    # (beams, columns) carry their family-TYPE parameters on obj.definition,
+    # not on the instance object itself. "Structural Material" is set at the
+    # type level in Revit, so for these elements it lived only on
+    # obj.definition.typeParameters — never read by the blocks above, which
+    # is why steel/metal material silently went uncaptured for exactly the
+    # elements (structural framing) that most need it.
+    defn = getattr(obj, "definition", None)
+    if isinstance(defn, Base):
+        defn_params = getattr(defn, "parameters", None)
+        if defn_params is not None:
+            raw = defn_params.__dict__ if hasattr(defn_params, "__dict__") else defn_params
+            all_rows.extend(_flatten_params(raw, pset="definition.parameters", default_unit=default_unit))
+        defn_type_params = getattr(defn, "typeParameters", None)
+        if defn_type_params is not None:
+            raw = defn_type_params.__dict__ if hasattr(defn_type_params, "__dict__") else defn_type_params
+            all_rows.extend(_flatten_params(raw, pset="definition.typeParameters", default_unit=default_unit))
+
     # ── Tekla / v3 DataObject properties ──────────────────────────────────
     properties = getattr(obj, "properties", None)
     if isinstance(properties, dict):
@@ -538,9 +726,10 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
             all_rows.extend(_flatten_params(qto_val, pset=qto_name, default_unit=default_unit))
 
     # ── Derived: element weight from UnitMass × Length (IFC steel) ───────
-    # IFC's Pset_SteelStructuralElementCommon.UnitMass is in kg/m (per IFC
-    # standard) but cannot be auto-converted to kg because it is a compound
-    # unit (kg/m). When no explicit weight parameter is present, derive it.
+    # IFC's MassPerLength (Pset_ProfileMechanical, per the real IFC standard —
+    # see config/mapping_canonical.json's 'unit_mass' entry) is in kg/m but
+    # cannot be auto-converted to kg because it is a compound unit (kg/m).
+    # When no explicit weight parameter is present, derive it.
     if not any(r.get("canonical_key") == "weight" for r in all_rows):
         um_row  = next((r for r in all_rows if r.get("canonical_key") == "unit_mass"
                         and r.get("value_numeric") is not None), None)
@@ -569,6 +758,62 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
             "canonical_key": "material_category",
         })
 
+    # ── Derived: steel weight from Volume × density (Revit) ────────────────
+    # Revit's native structural framing/column parameters include Volume but
+    # no Weight/Mass/UnitMass at all (that's a Tekla/IFC-steel-detailing
+    # convention, covered by the UnitMass × Length derivation above) — so
+    # without this, total_steel_weight_kg (db/query.py's get_model_summary)
+    # stays 0 for pure-Revit models even once material_category is correctly
+    # classified as 'steel'. Only applies to elements already classified as
+    # steel — density is material-specific, so this must not run for
+    # concrete/timber/other volumes. Explicit source data (weight or
+    # unit_mass+length, both handled above) always takes precedence.
+    if category == "steel" and not any(r.get("canonical_key") == "weight" for r in all_rows):
+        # A source can expose both a Net and a Gross volume under the same
+        # canonical_key (see the collision-check comment below) — prefer a
+        # Net-labeled row, consistent with db/query.py's Net preference for
+        # every other volume/area aggregation, so this fallback doesn't
+        # quietly overestimate weight using the larger Gross figure.
+        vol_candidates = [r for r in all_rows if r.get("canonical_key") == "volume"
+                          and r.get("value_si") is not None]
+        vol_row = next((r for r in vol_candidates if "net" in (r.get("key") or "").lower()), None) \
+            or (vol_candidates[0] if vol_candidates else None)
+        if vol_row:
+            weight_kg = vol_row["value_si"] * _STEEL_DENSITY_KG_M3
+            all_rows.append({
+                "pset": None, "key": "Computed Weight (Volume × steel density)",
+                "value": str(round(weight_kg, 3)),
+                "datatype": "float",
+                "value_numeric": weight_kg,
+                "canonical_key": "weight",
+                "value_si": weight_kg,
+                "unit_si": "kg",
+            })
+
+    # ── Derived: profile designation from the element's own name ──────────
+    # Some Revit exports have no dedicated profile/section parameter at all
+    # (confirmed against a real German export: fields present were
+    # materialType/structuralAsset/Querschnittsform — a shape *category*
+    # like "I-Profil Breitflansch", not the size designation — with "HEA 400"
+    # only appearing in the element's own name, "Tragwerksstützen - HEA
+    # 400"). Only fires when nothing above already resolved a profile (never
+    # overrides a real Type Name/Section/Profile Name parameter) and the
+    # element is already classified as steel — single-letter section
+    # prefixes (C, L, T, U, W, S) can coincidentally match unrelated names
+    # (e.g. a wall type code), and the "Steel Profiles" chart is scoped to
+    # steel elements anyway, so this avoids a misleading "profile" value
+    # showing up elsewhere (element detail, CSV export) for a non-steel
+    # element that merely happens to contain a look-alike substring.
+    if category == "steel" and not any(r.get("canonical_key") == "profile" for r in all_rows):
+        obj_name = getattr(obj, "name", None)
+        profile_from_name = extract_profile_from_name(obj_name) if isinstance(obj_name, str) else None
+        if profile_from_name:
+            all_rows.append({
+                "pset": None, "key": "Profile (from name)", "value": profile_from_name,
+                "datatype": "string", "value_numeric": None,
+                "canonical_key": "profile",
+            })
+
     # Collision check: same canonical_key resolved from more than one pset with
     # different values. Precedence is implicit in insertion order above
     # (parameters > typeParameters > properties > udas > psets > archicadParameters
@@ -584,7 +829,96 @@ def extract_and_upsert_parameters(conn, element_id: str, obj) -> None:
         if len({v for _, v in distinct}) > 1:
             logger.warning(
                 "Parameter collision for element %s: canonical_key=%r has conflicting values across psets: %s",
-                element_id, ck, sorted(distinct, key=lambda x: (x[0] or "", x[1] or "")),
+                speckle_id, ck, sorted(distinct, key=lambda x: (x[0] or "", x[1] or "")),
             )
 
-    upsert_parameters(conn, element_id, all_rows)
+    return all_rows
+
+
+# ---------------------------------------------------------------------------
+# Element relationships — post-ingest pass
+# ---------------------------------------------------------------------------
+# bim_relationships existed in the schema from early on but nothing ever
+# populated or queried it. Revit already exposes host/room/space references
+# per hosted/MEP element (parentApplicationId, roomApplicationId,
+# spaceApplicationId) — extract_parameters above was already capturing
+# these as ordinary string-valued parameters, just never resolving
+# them into actual element-to-element links. build_relationships() does that
+# resolution as a separate pass, since the *referenced* element may not have
+# an element_id yet at the point any single element is processed during the
+# main per-object ingest loop — it must run after every element in the model
+# has been upserted, not per-object during that loop.
+
+# canonical_key -> relation_type stored in bim_relationships.
+_REFERENCE_CANONICALS = {
+    "parent_ref": "parent",
+    "room_ref":   "room",
+    "space_ref":  "space",
+}
+# Raw key names (lower-cased) to match when canonical_key wasn't populated —
+# data ingested before parent_ref/room_ref/space_ref existed in
+# mapping_canonical.json — mirroring the primary/fallback pattern the rest
+# of the canonical system already uses (see db/query.py's _param_distribution).
+_REFERENCE_RAW_KEYS = {
+    "parentapplicationid": "parent",
+    "hostapplicationid":   "parent",
+    "host id":             "parent",
+    "roomapplicationid":   "room",
+    "spaceapplicationid":  "space",
+}
+
+
+def build_relationships(conn, model_id: str) -> int:
+    """
+    Resolve reference-type parameters (parent/room/space — a parameter value
+    that's actually another element's application_id, not a scalar) into
+    real bim_relationships rows.
+
+    Idempotent: replaces this model's relationship rows on every call, so
+    re-ingesting (or re-running this as a one-off backfill against
+    already-ingested data) never accumulates stale or duplicate links.
+
+    Returns the number of relationship rows written.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT application_id, element_id FROM bim_elements "
+            "WHERE model_id = %s AND application_id IS NOT NULL AND application_id <> ''",
+            (model_id,),
+        )
+        app_id_to_element = {row[0]: row[1] for row in cur.fetchall()}
+        if not app_id_to_element:
+            return 0
+
+        cur.execute(
+            """SELECT p.element_id, p.canonical_key, p.key, p.value
+               FROM bim_parameters p
+               JOIN bim_elements e ON e.element_id = p.element_id
+               WHERE e.model_id = %s
+                 AND p.value IS NOT NULL AND p.value <> ''
+                 AND (p.canonical_key = ANY(%s) OR LOWER(p.key) = ANY(%s))""",
+            (model_id, list(_REFERENCE_CANONICALS), list(_REFERENCE_RAW_KEYS)),
+        )
+
+        links: set[tuple] = set()
+        for element_id, canonical_key, key, value in cur.fetchall():
+            relation_type = _REFERENCE_CANONICALS.get(canonical_key) or _REFERENCE_RAW_KEYS.get((key or "").lower())
+            if not relation_type:
+                continue
+            related_id = app_id_to_element.get(value)
+            if related_id and related_id != element_id:
+                links.add((element_id, related_id, relation_type))
+
+        cur.execute(
+            "DELETE FROM bim_relationships WHERE element_id IN "
+            "(SELECT element_id FROM bim_elements WHERE model_id = %s)",
+            (model_id,),
+        )
+        if links:
+            execute_values(
+                cur,
+                "INSERT INTO bim_relationships (element_id, related_id, relation_type) VALUES %s "
+                "ON CONFLICT (element_id, related_id, relation_type) DO NOTHING",
+                list(links),
+            )
+        return len(links)

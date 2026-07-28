@@ -15,11 +15,25 @@ function loadWidth() {
 
 export function useDrawerWidth() {
     const [width, setWidth] = useState(loadWidth)
+    const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
     const draggingRef = useRef(false)
 
     useEffect(() => {
         localStorage.setItem(STORAGE_KEY, String(width))
     }, [width])
+
+    // MIN_WIDTH (420) is a sensible floor for a desktop drag gesture, but on
+    // a phone (~320-430px logical width) it's wider than the screen itself —
+    // the drawer would render past the left edge, clipping its own content
+    // and overlapping whatever's underneath. Track viewport width and clamp
+    // what's actually rendered, independent of the persisted drag preference
+    // (`width`), so resizing back to a wide window restores the user's real
+    // setting instead of permanently shrinking it.
+    useEffect(() => {
+        const onResize = () => setViewportWidth(window.innerWidth)
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+    }, [])
 
     const startResize = useCallback((e) => {
         e.preventDefault()
@@ -48,5 +62,7 @@ export function useDrawerWidth() {
         window.addEventListener('mouseup', onUp)
     }, [width])
 
-    return [width, startResize]
+    const effectiveWidth = Math.min(width, Math.max(viewportWidth - 16, 240))
+
+    return [effectiveWidth, startResize]
 }

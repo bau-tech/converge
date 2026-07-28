@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from db.jobs import create_job, update_job, find_running_job, prune_jobs
+from job_registry import fire_and_forget
+from process_pool import run_cpu_bound
 
 router = APIRouter(tags=["sync"])
 logger = logging.getLogger(__name__)
@@ -121,7 +123,7 @@ async def upsert_auto_sync_server(body: AutoSyncServerBody):
         release_conn(conn)
 
     if body.enabled:
-        asyncio.create_task(asyncio.to_thread(scan_server, server_url, body.token))
+        fire_and_forget(asyncio.to_thread(scan_server, server_url, body.token))
 
     return {"status": "ok"}
 
@@ -138,7 +140,7 @@ async def trigger_auto_sync_scan():
     """
     from speckle.webhooks import scan_all_enabled_servers
 
-    asyncio.create_task(scan_all_enabled_servers())
+    fire_and_forget(scan_all_enabled_servers())
     return {"status": "scan_started"}
 
 
@@ -263,6 +265,17 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
 
     job_conn = get_conn()
     try:
+        # Same check-then-act race as routers/ingest.py's /ingest endpoint —
+        # Speckle retries a webhook delivery on timeout, so two near-
+        # simultaneous deliveries for the same commit can both pass this
+        # check before either commits its create_job() insert. Serialize
+        # per stream_id+commit_id; the lock auto-releases at create_job()'s
+        # commit below.
+        with job_conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"ingest:{stream_id}:{commit_id}",),
+            )
         running_job_id = find_running_job(job_conn, "ingest", stream_id=stream_id, commit_id=commit_id)
         if running_job_id:
             return {"job_id": running_job_id, "status": "pending"}
@@ -275,7 +288,7 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
     async def _run():
         conn2 = get_conn()
         try:
-            result = await asyncio.to_thread(
+            result = await run_cpu_bound(
                 ingest_commit, stream_id=stream_id, commit_id=commit_id,
                 token=token, server_url=server_url,
             )
@@ -295,6 +308,6 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
             finally:
                 release_conn(conn2)
 
-    asyncio.create_task(_run())
+    fire_and_forget(_run())
     logger.info("Webhook %s: started ingest job %s for commit %s", webhook_row_id, job_id, commit_id)
     return {"job_id": job_id, "status": "pending"}

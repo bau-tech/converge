@@ -90,6 +90,21 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     const messagesEndRef = useRef(null)
     const dragControls = useDragControls() // Initialize drag controls
 
+    // ChatWidget stays mounted across model switches (it's not remounted per
+    // model), so a streaming /chat/stream request started against one model
+    // can still be in flight when the user switches to another before it
+    // finishes. abortRef cancels the stale request outright on a model
+    // change; activeModelRef is a defense-in-depth guard in case a response
+    // is already fully buffered and completes right as the switch happens —
+    // either way, onFilter(finalIds) never gets applied to a model other
+    // than the one the ids were actually computed for.
+    const abortRef = useRef(null)
+    const activeModelRef = useRef(modelId)
+    useEffect(() => {
+        activeModelRef.current = modelId
+        abortRef.current?.abort()
+    }, [modelId])
+
     // LLM Configuration
     const [provider, setProvider] = useState(() => localStorage.getItem('chat_ai_provider') || 'openai')
     const [ollamaConfig, setOllamaConfig] = useState(() => ({
@@ -132,6 +147,10 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
 
         const userMsg = input.trim()
         setInput('')
+        const requestModelId = modelId
+        abortRef.current?.abort()
+        const controller = new AbortController()
+        abortRef.current = controller
 
         const history = messages
             .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -163,6 +182,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body,
+                signal: controller.signal,
             })
 
             if (!response.ok) throw new Error(`Server error: ${response.status}`)
@@ -242,13 +262,22 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                 return next
             })
 
-            if (finalIds.length > 0) {
-                if (onFilter) onFilter(finalIds)
-            } else if (onFilter) {
-                onFilter(null)
+            // Skip if the user switched models while this response was
+            // streaming — applying finalIds now would filter the *new*
+            // model's viewer/table using element ids computed for the old
+            // one (aborting the request above already prevents this in the
+            // common case; this covers the response completing right as
+            // the switch happens, before the abort takes effect).
+            if (requestModelId === activeModelRef.current) {
+                if (finalIds.length > 0) {
+                    if (onFilter) onFilter(finalIds)
+                } else if (onFilter) {
+                    onFilter(null)
+                }
             }
 
         } catch (error) {
+            if (error.name === 'AbortError') return
             console.error('Chat error:', error)
             setMessages(prev => [
                 ...prev.filter(m => m.role !== 'thinking'),
@@ -266,7 +295,9 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             dragControls={dragControls}
             dragListener={false} // Disable dragging by default, enable on specific elements
             initial={false}
-            className="fixed bottom-24 right-6 z-50 flex flex-col items-end"
+            // z-[260]: above the Element panel (z-[245]) so this FAB stays clickable
+            // even when the panel is covering the bottom-right corner of the viewer.
+            className="fixed bottom-[calc(6rem+env(safe-area-inset-bottom))] right-6 z-[260] flex flex-col items-end"
         >
 
             {/* Chat Window */}
@@ -276,7 +307,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                        className="pointer-events-auto w-[350px] h-[500px] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
+                        className="pointer-events-auto w-[350px] h-[500px] max-w-[calc(100vw-3rem)] max-h-[calc(100vh-8rem)] panel-thin flex flex-col overflow-hidden mb-4 shadow-2xl"
                     >
                         {/* Header */}
                         <div

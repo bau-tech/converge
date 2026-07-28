@@ -8,6 +8,7 @@ import { createTopic, createViewpoint } from '../utils/bcfClient'
 import { useDrawerWidth } from '../utils/useDrawerWidth'
 import { IdsGraphEditor } from './IdsGraphEditor'
 import { parseIdsXmlToGraph } from '../utils/idsXmlToGraph'
+import { useAuth } from '../contexts/AuthContext'
 import { IdsLogoIcon } from './IdsLogoIcon'
 
 function failureKey(specIdx, reqIdx, entity) {
@@ -109,6 +110,7 @@ function SpecificationBlock({ specIdx, specification, selected, onToggle, viewer
 // call BcfTopicPanel/BcfKanbanBoard already use.
 export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, onClose, serverUrl, serverToken }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
+    const { user } = useAuth()
     const [width, startResize] = useDrawerWidth()
 
     const [specs, setSpecs] = useState([])
@@ -293,7 +295,7 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
         if (!projectId || selected.size === 0) return
         setPushing(true)
         setPushedMsg(null)
-        const authorName = localStorage.getItem('bcfAuthorName') || 'IDS Check'
+        const authorName = user?.name || 'IDS Check'
         const created = []
         let snapshotCount = 0
         for (const { requirement, entity } of selected.values()) {

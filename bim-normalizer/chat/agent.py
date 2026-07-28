@@ -7,13 +7,23 @@ Items implemented here:
  7. Model diff awareness via get_model_changes tool
  9. stream_chat_agent generator for SSE streaming
 """
+import asyncio
+import concurrent.futures
 import json
 import logging
+import time
+import uuid
 from collections import Counter
 from decimal import Decimal
 from typing import Generator
 
 import requests
+
+# Tool-call rounds per user turn. Was 5 — a genuinely multi-step question
+# ("check clashes, then check IDS compliance, then open a BCF issue" is 3+
+# tool calls plus the final answer round) could silently hit the cap and
+# return "I reached the response limit" instead of finishing.
+MAX_TOOL_ROUNDS = 10
 
 
 def _jdump(obj) -> str:
@@ -28,6 +38,11 @@ from db.query import (
     find_nearby_elements,
     get_qa_elements,
     get_element_details,
+    semantic_search_elements,
+    _steel_element_ids,
+    get_element_relationships,
+    get_model_diff,
+    get_quantity_takeoff,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,6 +179,61 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "estimate_cost",
+            "description": (
+                "Apply unit rates to model quantities to produce a rough cost estimate (5D). "
+                "Use when the user gives a rate (e.g. '180 EUR per m3 of concrete', '40 USD per m2 of "
+                "flooring') and asks for a cost, budget, or price estimate. "
+                "Each rate rule matches group names by case-insensitive substring against the "
+                "group_by dimension (e.g. rule match='Concrete' matches a category named 'Concrete Walls'). "
+                "Groups with no matching rule are listed separately so the rate card can be extended — "
+                "always mention them to the user rather than silently omitting them from the total."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rates": {
+                        "type": "array",
+                        "description": (
+                            "Rate rules, e.g. "
+                            "[{\"match\":\"Concrete\",\"unit\":\"m3\",\"rate\":180,\"currency\":\"EUR\"}, "
+                            "{\"match\":\"Steel\",\"unit\":\"m3\",\"rate\":7800,\"currency\":\"EUR\"}]"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "match": {
+                                    "type": "string",
+                                    "description": "Substring to match against the group name (case-insensitive).",
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["m3", "m2", "count"],
+                                    "description": "m3=volume, m2=area, count=element count.",
+                                },
+                                "rate": {"type": "number", "description": "Cost per unit."},
+                                "currency": {
+                                    "type": "string",
+                                    "description": "Optional currency label, e.g. EUR, USD. Rules with "
+                                                    "different currencies are subtotaled separately, never summed together.",
+                                },
+                            },
+                            "required": ["match", "unit", "rate"],
+                        },
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "enum": ["category", "storey", "ifc_class"],
+                        "description": "Dimension to group quantities by before applying rates. Defaults to category.",
+                    },
+                },
+                "required": ["rates"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_model_changes",
             "description": (
                 "Compare the current model against a previous version to see what elements were added, "
@@ -225,11 +295,13 @@ _TOOLS = [
         "function": {
             "name": "get_version_history",
             "description": (
-                "Get the version history for the current model's stream: element counts and "
-                "category breakdowns for every ingested version, ordered oldest to newest. "
-                "Use when the user asks 'how has this model evolved?', 'show version history', "
-                "or 'what's the trend over versions?'. For comparing two specific versions in "
-                "detail, use get_model_changes instead."
+                "Get the version history for the current model's stream: element counts, volume (m3), "
+                "and area (m2) — overall and per category — for every ingested version, ordered oldest "
+                "to newest. Use when the user asks 'how has this model evolved?', 'show version history', "
+                "'what's the trend over versions?', or construction-monitoring questions like "
+                "'is concrete volume growing as planned per pour?' or 'how has structural volume trended "
+                "across versions?'. For comparing two specific versions element-by-element (added/removed/ "
+                "changed), use get_model_changes instead."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -262,6 +334,32 @@ _TOOLS = [
                     },
                 },
                 "required": ["reference", "radius_m"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_related_elements",
+            "description": (
+                "Get elements directly related to a given element via parent/room/space "
+                "references — e.g. a device's host wall, the room/space it's located in, "
+                "or everything hosted by/located in a given element. Use for 'what wall is "
+                "this hosted on?', 'what's in this room?', 'what room is this in?', or similar "
+                "containment/hosting questions. Only reflects relationships captured at ingest "
+                "time (Revit parent/room/space references) — returns nothing for models "
+                "without that data, or where the referenced elements (e.g. Rooms) weren't "
+                "themselves ingested."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "Speckle ID or (partial) name of the element to look up relationships for.",
+                    },
+                },
+                "required": ["reference"],
             },
         },
     },
@@ -313,6 +411,211 @@ _TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "semantic_search",
+            "description": (
+                "Find elements by meaning rather than exact text match — describe what you're "
+                "looking for in plain language (e.g. 'fire rated door', 'load bearing column on "
+                "the ground floor') and get back the closest matches, even if the words don't "
+                "literally appear in the element's name or parameters. Prefer this over "
+                "query_by_parameter/filter_elements when you don't know the exact field names or "
+                "wording used in the source model. Requires the model to have been ingested after "
+                "semantic search existed — an empty result means no embeddings, not no matches."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Free-text description of what to find."},
+                    "limit": {"type": "integer", "description": "Max results (default 10)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_clashes",
+            "description": (
+                "Run geometric clash detection between two categories/IFC classes in this model "
+                "(e.g. structural columns vs walls) and highlight the colliding elements in the 3D "
+                "viewer. Use when the user asks to 'check for clashes', 'find collisions', or "
+                "'does X clash with Y'. Can take up to a minute or more for a large model."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector_a": {"type": "string", "description": "IFC class or category to check, e.g. IfcColumn or Walls."},
+                    "selector_b": {
+                        "type": "string",
+                        "description": "Optional: second IFC class/category to check selector_a against. Omit to check selector_a against itself.",
+                    },
+                    "mode": {
+                        "type": "string", "enum": ["collision", "intersection", "clearance"],
+                        "description": "Clash mode (default collision).",
+                    },
+                    "clearance": {"type": "number", "description": "Required minimum clearance in meters, only for mode=clearance."},
+                },
+                "required": ["selector_a"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_ids_specs",
+            "description": (
+                "List IDS (buildingSMART Information Delivery Specification) compliance specs "
+                "already uploaded for this model, via the IDS Check panel. Use before "
+                "check_ids_compliance to find a spec_id."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_ids_compliance",
+            "description": (
+                "Run an IDS compliance check against a previously uploaded spec and report pass/"
+                "fail per requirement. Use when the user asks to 'check IDS compliance' or "
+                "'validate against the spec'. Find spec_id via list_ids_specs first if not already "
+                "known. Can take up to a minute or more for a large model."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spec_id": {"type": "string", "description": "The IDS spec id to check against (see list_ids_specs)."},
+                },
+                "required": ["spec_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_documents",
+            "description": (
+                "List CDE (Common Data Environment) documents for this project — drawings, specs, "
+                "and other files with their WIP/Shared/Published/Archived status and approval "
+                "gates. Use when the user asks 'what documents are there', 'is X approved', or "
+                "'what's in WIP'. Read-only — approving/moving documents happens in the Documents "
+                "panel, not here."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string", "enum": ["WIP", "Shared", "Published", "Archived"],
+                        "description": "Optional: filter by status.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_document_status",
+            "description": "Get full status/approval-gate detail and audit history for one document by filename.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Document filename or partial match."},
+                },
+                "required": ["filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_topics",
+            "description": "List BCF coordination topics (issues) logged against this model.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_topic",
+            "description": "Get full detail for one BCF topic by title (partial match) or guid.",
+            "parameters": {
+                "type": "object",
+                "properties": {"reference": {"type": "string", "description": "Topic title (partial match) or guid."}},
+                "required": ["reference"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_topic",
+            "description": (
+                "Log a new BCF coordination topic (issue) on this model — e.g. to record a clash "
+                "or QA finding as a trackable issue. Use after check_clashes/check_data_quality "
+                "when the user wants to log what was found, or whenever they ask to 'create an "
+                "issue' / 'log this'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "string", "description": "e.g. Low, Normal, High, Critical."},
+                    "assigned_to": {"type": "string"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_topic",
+            "description": "Update a BCF topic's status, priority, or assignee. Only pass the fields to change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {"type": "string", "description": "Topic title (partial match) or guid."},
+                    "topic_status": {"type": "string", "description": "e.g. Open, In Progress, Closed."},
+                    "priority": {"type": "string"},
+                    "assigned_to": {"type": "string"},
+                },
+                "required": ["reference"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_topic_comments",
+            "description": "List all comments on a BCF topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {"reference": {"type": "string", "description": "Topic title (partial match) or guid."}},
+                "required": ["reference"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_topic_comment",
+            "description": "Add a comment to a BCF topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {"type": "string", "description": "Topic title (partial match) or guid."},
+                    "comment": {"type": "string"},
+                },
+                "required": ["reference", "comment"],
+            },
+        },
+    },
 ]
 
 
@@ -335,6 +638,31 @@ def _get_url_and_headers(provider: str, api_key: str, base_url: str) -> tuple[st
     return f"{base_url.rstrip('/')}/chat/completions", {"Content-Type": "application/json"}
 
 
+def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
+                        stream: bool = False, max_retries: int = 2):
+    """POST with backoff on transient failures — connection errors/timeouts,
+    429 rate limits, and 5xx server errors. Does NOT retry other 4xx errors
+    (bad request, auth) since the same unchanged request would just fail the
+    same way again. Previously a single requests.post() meant any transient
+    network hiccup or provider rate limit surfaced straight to the user as a
+    raw error instead of the agent quietly recovering."""
+    resp = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=stream)
+        except requests.exceptions.RequestException:
+            if attempt == max_retries:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+                continue
+        return resp
+    return resp  # pragma: no cover — loop always returns or raises above
+
+
 def _call_llm(provider: str, model: str, api_key: str, base_url: str,
               messages: list, tools: list) -> dict:
     url, headers = _get_url_and_headers(provider, api_key, base_url)
@@ -346,7 +674,7 @@ def _call_llm(provider: str, model: str, api_key: str, base_url: str,
         "temperature": 0.1,
         "max_tokens": 2048,
     }
-    resp = requests.post(url, json=body, headers=headers, timeout=60)
+    resp = _post_with_retries(url, headers, body, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
@@ -369,7 +697,10 @@ def _call_llm_stream(provider: str, model: str, api_key: str, base_url: str,
         "max_tokens": 2048,
         "stream": True,
     }
-    resp = requests.post(url, json=body, headers=headers, stream=True, timeout=120)
+    # Retries only cover establishing the connection/initial response — once
+    # iter_lines() below starts yielding tokens to the frontend, a retry would
+    # duplicate already-sent content, so there's no retry inside that loop.
+    resp = _post_with_retries(url, headers, body, timeout=120, stream=True)
     resp.raise_for_status()
 
     # Accumulate tool_call argument chunks keyed by index
@@ -443,26 +774,76 @@ def _query_elements(conn, model_id: str, category: str = None, ifc_class: str = 
 
 
 def _query_summary(conn, model_id: str, group_by: str) -> list[dict]:
-    col_map = {"category": "e.category", "storey": "e.storey", "ifc_class": "e.ifc_class"}
-    col = col_map.get(group_by, "e.category")
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT {col} AS label,
-                   COUNT(*) AS count,
-                   ROUND(SUM(COALESCE(g.volume_m3, 0))::numeric, 2) AS volume_m3,
-                   ROUND(SUM(COALESCE(g.area_m2,   0))::numeric, 2) AS area_m2
-            FROM bim_elements e
-            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
-            WHERE e.model_id = %s
-            GROUP BY {col}
-            ORDER BY count DESC
-            LIMIT 50
-            """,
-            (model_id,),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    """
+    Thin wrapper around db.query.get_quantity_takeoff() — reuses its
+    GROUP BY/SUM/JOIN query instead of a second, independent copy of the
+    same SQL. Re-shaped here (label/count field names, count-desc ordering,
+    2-decimal rounding, top-50 cap) to preserve this function's existing
+    external contract exactly, since get_summary's tool response shape is
+    part of the agent's established behavior.
+    """
+    field = group_by if group_by in ("category", "storey", "ifc_class") else "category"
+    takeoff = get_quantity_takeoff(conn, model_id, field)
+    rows = [
+        {
+            "label": r["group"],
+            "count": r["element_count"],
+            "volume_m3": round(float(r["volume_m3"] or 0), 2),
+            "area_m2": round(float(r["area_m2"] or 0), 2),
+        }
+        for r in takeoff["rows"]
+    ]
+    rows.sort(key=lambda r: -r["count"])
+    return rows[:50]
+
+
+_COST_UNIT_FIELDS = {"m3": "volume_m3", "m2": "area_m2", "count": "count"}
+
+
+def _apply_cost_rates(summary_rows: list[dict], rates: list[dict]) -> dict:
+    """Match rate rules (case-insensitive substring on group label) against
+    _query_summary() rows and price each group. Mirrors speckle_mcp.py's
+    speckle_cost_estimate — kept as a separate in-process implementation
+    (not a shared import) since the two tool ecosystems are intentionally
+    decoupled; see the "keep them separate" decision for the chat agent vs
+    the MCP server.
+    """
+    def _match(group_name: str):
+        for r in rates:
+            if r.get("match", "").lower() in (group_name or "").lower():
+                return r
+        return None
+
+    priced, unmatched = [], []
+    for row in summary_rows:
+        group = row.get("label") or "Unknown"
+        rule = _match(group)
+        if not rule:
+            unmatched.append(group)
+            continue
+        unit = rule.get("unit", "count")
+        rate = float(rule.get("rate", 0))
+        qty = float(row.get(_COST_UNIT_FIELDS.get(unit, "count"), 0) or 0)
+        # Each matched rule carries its own currency rather than assuming one
+        # global currency — otherwise mixed-currency rate cards would silently
+        # sum incompatible units into one misleading total.
+        currency = rule.get("currency", "")
+        priced.append({
+            "group": group, "unit": unit, "quantity": round(qty, 2),
+            "rate": rate, "cost": round(qty * rate, 2), "currency": currency,
+        })
+
+    priced.sort(key=lambda r: -r["cost"])
+    currencies = {r["currency"] for r in priced}
+    if len(currencies) <= 1:
+        totals = [{"currency": next(iter(currencies), ""), "total": round(sum(r["cost"] for r in priced), 2)}]
+    else:
+        totals = [
+            {"currency": cur, "total": round(sum(r["cost"] for r in priced if r["currency"] == cur), 2)}
+            for cur in sorted(currencies, key=lambda c: c or "")
+        ]
+
+    return {"priced": priced, "totals": totals, "unmatched_groups": unmatched}
 
 
 def _query_by_parameter(conn, model_id: str, key: str, value: str,
@@ -519,6 +900,15 @@ def _query_available_param_values(conn, model_id: str, key: str, limit: int = 10
 
 
 def _query_materials(conn, model_id: str, category: str = None) -> list[dict]:
+    """
+    Primary path: canonical_key='material' — the IFC-standard, source-agnostic
+    name db/query.py's own material queries already treat as the primary
+    signal (populated at ingest from mapping_canonical.json). Falls back to
+    the raw 'material%'-prefixed key match only when canonical_key finds
+    nothing, for models ingested before canonical_key existed — this used to
+    be the *only* path here, independently re-deriving a weaker version of
+    logic db/query.py's dashboard-facing queries already got right.
+    """
     extra_where = ""
     params: list = [model_id]
     if category:
@@ -532,7 +922,26 @@ def _query_materials(conn, model_id: str, category: str = None) -> list[dict]:
                 FROM bim_parameters p
                 JOIN bim_elements e ON e.element_id = p.element_id
                 LEFT JOIN bim_geometry g ON g.element_id = e.element_id
-                WHERE e.model_id = %s AND p.key ILIKE 'material%' {extra_where}
+                WHERE e.model_id = %s AND p.canonical_key = 'material' {extra_where}
+                  AND p.value IS NOT NULL
+                GROUP BY p.value
+                ORDER BY count DESC
+                LIMIT 30""",
+            params,
+        )
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if rows:
+            return rows
+
+        cur.execute(
+            f"""SELECT p.value AS material,
+                       COUNT(DISTINCT e.element_id) AS count,
+                       ROUND(SUM(COALESCE(g.volume_m3, 0))::numeric, 2) AS volume_m3
+                FROM bim_parameters p
+                JOIN bim_elements e ON e.element_id = p.element_id
+                LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                WHERE e.model_id = %s AND p.key ILIKE 'material%%' {extra_where}
                   AND p.value IS NOT NULL
                 GROUP BY p.value
                 ORDER BY count DESC
@@ -544,81 +953,217 @@ def _query_materials(conn, model_id: str, category: str = None) -> list[dict]:
 
 
 def _query_profiles(conn, model_id: str) -> list[dict]:
+    """
+    Primary path: canonical_key IN ('profile', 'grade') — same reasoning as
+    _query_materials above. Falls back to the raw key-pattern match (profile/
+    grade/section-ish key names) only when canonical_key finds nothing.
+
+    Scoped to steel elements (via the same _steel_element_ids() the
+    dashboard's own by_profile chart already uses) when material/grade data
+    exists at all — this tool is documented as "structural profiles ... and
+    steel grades", but without this scope canonical_key='profile' alone
+    would sweep in unrelated matches too: one of profile's own canonical
+    aliases is a bare "Name" key (correct for Tekla, where NAME genuinely
+    means the profile designation), which on non-Tekla models can collide
+    with any other element's unrelated "Name" parameter (duct/pipe size
+    codes showed up this way on a real Revit model during testing).
+    _steel_element_ids() returns None (not an empty set) when there's no
+    material/grade data at all, so unfiltered models still fall back to
+    showing whatever profile/grade values exist instead of an empty result.
+    """
     with conn.cursor() as cur:
+        steel_ids = _steel_element_ids(cur, model_id)
+        scope_sql, scope_params = "", []
+        if steel_ids is not None:
+            scope_sql = "AND p.element_id = ANY(%s::uuid[])"
+            scope_params = [list(steel_ids)]
+
         cur.execute(
-            """SELECT p.key AS param, p.value AS value,
+            f"""SELECT p.key AS param, p.value AS value,
+                      COUNT(DISTINCT e.element_id) AS count,
+                      ROUND(SUM(COALESCE(g.volume_m3, 0))::numeric, 2) AS volume_m3
+               FROM bim_parameters p
+               JOIN bim_elements e ON e.element_id = p.element_id
+               LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+               WHERE e.model_id = %s AND p.canonical_key IN ('profile', 'grade') {scope_sql}
+                 AND p.value IS NOT NULL
+               GROUP BY p.key, p.value
+               ORDER BY count DESC
+               LIMIT 40""",
+            [model_id] + scope_params,
+        )
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if rows:
+            return rows
+
+        cur.execute(
+            f"""SELECT p.key AS param, p.value AS value,
                       COUNT(DISTINCT e.element_id) AS count,
                       ROUND(SUM(COALESCE(g.volume_m3, 0))::numeric, 2) AS volume_m3
                FROM bim_parameters p
                JOIN bim_elements e ON e.element_id = p.element_id
                LEFT JOIN bim_geometry g ON g.element_id = e.element_id
                WHERE e.model_id = %s
-                 AND (p.key ILIKE '%profile%' OR p.key ILIKE '%grade%'
-                      OR p.key ILIKE 'section%' OR p.key = 'PROFILE'
-                      OR p.key ILIKE '%structural_section%')
+                 AND (p.key ILIKE '%%profile%%' OR p.key ILIKE '%%grade%%'
+                      OR p.key ILIKE 'section%%' OR p.key = 'PROFILE'
+                      OR p.key ILIKE '%%structural_section%%')
+                 {scope_sql}
                  AND p.value IS NOT NULL
                GROUP BY p.key, p.value
                ORDER BY count DESC
                LIMIT 40""",
-            (model_id,),
+            [model_id] + scope_params,
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def _query_model_changes(conn, model_id_current: str, model_id_baseline: str) -> dict:
-    """Diff current model against a baseline — item 7."""
-    with conn.cursor() as cur:
-        # Added (in current, not in baseline)
-        cur.execute(
-            """SELECT b.speckle_id, b.category, b.name
-               FROM bim_elements b
-               WHERE b.model_id = %s
-                 AND b.application_id IS NOT NULL AND b.application_id <> ''
-                 AND NOT EXISTS (
-                     SELECT 1 FROM bim_elements a
-                     WHERE a.model_id = %s AND a.application_id = b.application_id
-                 )""",
-            (model_id_current, model_id_baseline),
-        )
-        added = cur.fetchall()
+    """
+    Diff current model against a baseline — item 7. Thin wrapper around
+    db.query.get_model_diff() (model_id_a=baseline, model_id_b=current in
+    that function's own convention) instead of a second, independent copy
+    of the added/removed/changed SQL also used by routers/analytics.py's
+    /diff/{a}/{b} endpoint.
+    """
+    d = get_model_diff(conn, model_id_baseline, model_id_current)
+    added = d["added"]
 
-        # Removed count (in baseline, not in current)
-        cur.execute(
-            """SELECT COUNT(*) FROM bim_elements a
-               WHERE a.model_id = %s
-                 AND a.application_id IS NOT NULL AND a.application_id <> ''
-                 AND NOT EXISTS (
-                     SELECT 1 FROM bim_elements b
-                     WHERE b.model_id = %s AND b.application_id = a.application_id
-                 )""",
-            (model_id_baseline, model_id_current),
-        )
-        _row = cur.fetchone()
-        removed_count = int((_row[0] if _row else 0) or 0)
-
-        # Changed (same app_id, different hash)
-        cur.execute(
-            """SELECT COUNT(*) FROM bim_elements a
-               JOIN bim_elements b ON a.application_id = b.application_id
-               WHERE a.model_id = %s AND b.model_id = %s
-                 AND a.hash IS NOT NULL AND b.hash IS NOT NULL
-                 AND a.hash <> b.hash""",
-            (model_id_baseline, model_id_current),
-        )
-        _row = cur.fetchone()
-        changed_count = int((_row[0] if _row else 0) or 0)
-
-    added_by_cat = Counter(r[1] or "Unknown" for r in added)
-    added_ids = [r[0] for r in added if r[0]]
+    added_by_cat = Counter((r.get("category") or "Unknown") for r in added)
+    added_ids = [r["speckle_id"] for r in added if r.get("speckle_id")]
 
     return {
         "added_count":      len(added),
-        "removed_count":    removed_count,
-        "changed_count":    changed_count,
+        "removed_count":    len(d["removed"]),
+        "changed_count":    len(d["changed"]),
         "added_by_category": dict(added_by_cat.most_common(10)),
         "added_speckle_ids": added_ids[:500],
     }
+
+
+def _run_async(coro):
+    """Run an async coroutine to completion from this file's synchronous tool
+    code, safely whether or not the calling thread already has a running
+    event loop. run_chat_agent runs inside asyncio.to_thread's worker thread
+    (no loop of its own — plain asyncio.run() would be fine there), but
+    stream_chat_agent's generator is iterated directly on the FastAPI
+    event-loop thread (routers/chat.py's SSE generator has no to_thread
+    wrapper) — asyncio.run() would raise "cannot be called from a running
+    event loop" there. Always spinning a dedicated thread sidesteps the
+    difference entirely."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+async def _resolve_and_check_clashes(model_id: str, rule: dict) -> tuple[list[dict], str]:
+    from routers.ifc_export import resolve_model_ifc_bytes
+    from clash_check import run_clash_checks
+    from process_pool import run_cpu_bound
+
+    ifc_bytes, ifc_source = await resolve_model_ifc_bytes(model_id, None, None, "mm")
+    results = await run_cpu_bound(run_clash_checks, ifc_bytes, [rule], ifc_source == "synthetic_export")
+    return results, ifc_source
+
+
+async def _resolve_and_check_ids(model_id: str, ids_content: str) -> tuple[dict, str]:
+    from routers.ifc_export import resolve_model_ifc_bytes
+    from ids_check import run_ids_check
+    from process_pool import run_cpu_bound
+
+    ifc_bytes, ifc_source = await resolve_model_ifc_bytes(model_id, None, None, "mm")
+    report = await run_cpu_bound(run_ids_check, ifc_bytes, ids_content, ifc_source == "synthetic_export")
+    return report, ifc_source
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _resolve_topic(conn, model_id: str, reference: str) -> dict | None:
+    """Resolve a BCF topic by guid or partial title match — same 'reference'
+    convention as get_element_details/find_nearby_elements above. guid is a
+    native UUID column, so only query it when reference actually parses as
+    one — Postgres raises a hard type error (not just 'no rows') for
+    invalid UUID syntax, which would otherwise crash on the overwhelmingly
+    common case of a caller passing a title instead of a guid."""
+    with conn.cursor() as cur:
+        if _is_uuid(reference):
+            cur.execute("SELECT * FROM bcf_topics WHERE model_id = %s AND guid = %s", (model_id, reference))
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+            if row:
+                return dict(zip(cols, row))
+        cur.execute(
+            "SELECT * FROM bcf_topics WHERE model_id = %s AND title ILIKE %s ORDER BY creation_date DESC LIMIT 1",
+            (model_id, f"%{reference}%"),
+        )
+        cols = [d[0] for d in cur.description]
+        row = cur.fetchone()
+        return dict(zip(cols, row)) if row else None
+
+
+def _create_topic_row(
+    conn, model_id: str, stream_id: str | None, title: str, description=None,
+    priority=None, assigned_to=None, creation_author: str = "AI Assistant",
+) -> dict:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_advisory_xact_lock(hashtext(%s));
+                INSERT INTO bcf_topics
+                    (model_id, stream_id, title, description, priority, assigned_to, creation_author, creation_date, "index")
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, NOW(),
+                    COALESCE((SELECT MAX("index") FROM bcf_topics WHERE model_id = %s), 0) + 1
+                )
+                RETURNING guid, title, topic_status, priority
+                """,
+                (model_id, model_id, stream_id, title, description, priority, assigned_to, creation_author, model_id),
+            )
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+        conn.commit()
+        return dict(zip(cols, row))
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _update_topic_row(conn, topic_guid: str, fields: dict) -> dict:
+    try:
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE bcf_topics SET {set_clause}, modified_author = %s, modified_date = NOW()
+                    WHERE guid = %s RETURNING guid, title, topic_status, priority""",
+                (*fields.values(), "AI Assistant", topic_guid),
+            )
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+        conn.commit()
+        return dict(zip(cols, row))
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _add_comment_row(conn, topic_guid: str, comment: str, author: str = "AI Assistant") -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO bcf_comments (topic_guid, comment, author, date) VALUES (%s, %s, %s, NOW())",
+                (topic_guid, comment, author),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +1172,24 @@ def _query_model_changes(conn, model_id_current: str, model_id_baseline: str) ->
 # ---------------------------------------------------------------------------
 
 def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[str] | None]:
+    """Thin safety-net wrapper around _execute_tool_impl: any unhandled
+    exception (a bad query, a write that half-completed, ...) must roll the
+    connection back before returning — otherwise release_conn() (called by
+    routers/chat.py's finally block) hands a poisoned aborted-transaction
+    connection back to the shared pool, breaking the *next* unrelated
+    request that happens to draw it."""
+    try:
+        return _execute_tool_impl(conn, model_id, fn, args)
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.error("Tool %s failed: %s", fn, exc, exc_info=True)
+        return f"Tool '{fn}' failed: {exc}", None
+
+
+def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[str] | None]:
     if fn == "filter_elements":
         ids = _query_elements(conn, model_id, **{k: v for k, v in args.items()
                                                   if k in ("category", "ifc_class", "storey", "name")})
@@ -689,6 +1252,15 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
             "for steel-related keys.", None
         )
 
+    if fn == "estimate_cost":
+        rates = args.get("rates") or []
+        if not rates:
+            return "estimate_cost requires at least one rate rule in 'rates'.", None
+        rows = _query_summary(conn, model_id, args.get("group_by", "category"))
+        if not rows:
+            return "No quantity data available for this model.", None
+        return _jdump(_apply_cost_rates(rows, rates)), None
+
     if fn == "get_model_changes":
         baseline = args.get("compared_to", "")
         if not baseline:
@@ -721,9 +1293,9 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
             return "Could not determine the stream for this model.", None
         versions = get_model_trend(conn, stream_id)
         for v in versions:
-            v["by_category"] = dict(
-                sorted(v["by_category"].items(), key=lambda kv: kv[1], reverse=True)[:8]
-            )
+            top_cats = [k for k, _ in sorted(v["by_category"].items(), key=lambda kv: kv[1], reverse=True)[:8]]
+            v["by_category"] = {k: v["by_category"][k] for k in top_cats}
+            v["volume_by_category"] = {k: v["volume_by_category"].get(k, 0) for k in top_cats}
         return _jdump(versions), None
 
     if fn == "find_nearby_elements":
@@ -769,6 +1341,239 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
             return f"No element found matching '{reference}'.", None
         ids = [element["speckle_id"]] if element.get("speckle_id") else None
         return _jdump(element), ids
+
+    if fn == "get_related_elements":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        element = get_element_details(conn, model_id, reference)
+        if not element:
+            return f"No element found matching '{reference}'.", None
+        rels = get_element_relationships(conn, element["element_id"])
+        if not rels:
+            return (
+                f"No relationships found for '{reference}'. This only reflects parent/room/space "
+                "references captured at ingest time — this model may not have that data, or the "
+                "referenced elements (e.g. Rooms) may not have been ingested.", None,
+            )
+        ids = [r["speckle_id"] for r in rels if r.get("speckle_id")]
+        return _jdump(rels), (ids or None)
+
+    if fn == "semantic_search":
+        query = args.get("query", "")
+        if not query:
+            return "'query' is required.", None
+        try:
+            matches = semantic_search_elements(conn, model_id, query, limit=int(args.get("limit") or 10))
+        except Exception as exc:
+            return f"Semantic search failed: {exc}", None
+        if not matches:
+            return (
+                "No embeddings found for this model — semantic search requires it to have been "
+                "ingested after this feature existed. Try query_by_parameter or filter_elements "
+                "instead, or re-ingest this model to build embeddings.", None
+            )
+        ids = [m["speckle_id"] for m in matches if m.get("speckle_id")]
+        return _jdump(matches), ids
+
+    if fn == "check_clashes":
+        selector_a = args.get("selector_a", "")
+        if not selector_a:
+            return "'selector_a' is required.", None
+        rule = {
+            "name": f"{selector_a} vs {args.get('selector_b') or selector_a}",
+            "selector_a": selector_a,
+            "mode": args.get("mode", "collision"),
+        }
+        if args.get("selector_b"):
+            rule["selector_b"] = args["selector_b"]
+        if args.get("clearance") is not None:
+            rule["clearance"] = args["clearance"]
+        try:
+            results, ifc_source = _run_async(_resolve_and_check_clashes(model_id, rule))
+        except Exception as exc:
+            return f"Clash check failed: {exc}", None
+
+        r = results[0] if results else {"count": 0, "clashes": []}
+        count = r.get("count", 0)
+        ids = None
+        if count and ifc_source == "synthetic_export":
+            app_ids = list({c.get("a_global_id") for c in r["clashes"]} | {c.get("b_global_id") for c in r["clashes"]})
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT speckle_id FROM bim_elements WHERE model_id = %s AND application_id = ANY(%s)",
+                    (model_id, app_ids),
+                )
+                ids = [row[0] for row in cur.fetchall() if row[0]]
+        result = f"Clash check ({rule['name']}, mode={rule['mode']}): {count} clash(es) found."
+        if count and ifc_source != "synthetic_export":
+            result += (
+                " (3D highlighting unavailable — this check ran against the model's original IFC "
+                "file, which has no Speckle-ID mapping.)"
+            )
+        return result, ids
+
+    if fn == "list_ids_specs":
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT spec_id, filename, uploaded_at FROM bim_ids_specs WHERE model_id = %s ORDER BY uploaded_at DESC",
+                (model_id,),
+            )
+            specs = [
+                {"spec_id": str(r[0]), "filename": r[1], "uploaded_at": r[2].isoformat()}
+                for r in cur.fetchall()
+            ]
+        if not specs:
+            return "No IDS specs uploaded for this model yet — upload one via the IDS Check panel first.", None
+        return _jdump(specs), None
+
+    if fn == "check_ids_compliance":
+        spec_id = args.get("spec_id", "")
+        if not spec_id:
+            return "'spec_id' is required — use list_ids_specs first.", None
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT content FROM bim_ids_specs WHERE model_id = %s AND spec_id = %s",
+                (model_id, spec_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return f"IDS spec {spec_id} not found for this model.", None
+        try:
+            report, ifc_source = _run_async(_resolve_and_check_ids(model_id, row[0]))
+        except Exception as exc:
+            return f"IDS check failed: {exc}", None
+        overall = "PASS" if report.get("status") else "FAIL"
+        lines = [
+            f"IDS check {overall} — {report.get('total_specifications_pass', 0)}/"
+            f"{report.get('total_specifications', 0)} specifications passed "
+            f"(checked against {ifc_source})."
+        ]
+        for spec in report.get("specifications", []):
+            icon = "✓" if spec.get("status") else "✗"
+            lines.append(
+                f"  {icon} {spec.get('name', 'Unnamed')} "
+                f"({spec.get('total_checks_pass', 0)}/{spec.get('total_checks', 0)} checks)"
+            )
+        return "\n".join(lines), None
+
+    if fn == "list_documents":
+        stream_id = get_model_stream_id(conn, model_id)
+        if not stream_id:
+            return "Could not determine the project for this model.", None
+        from db.documents import list_documents as _list_docs
+        docs = _list_docs(conn, stream_id, status=args.get("status"))
+        if not docs:
+            filt = f" with status={args['status']}" if args.get("status") else ""
+            return f"No documents found{filt}.", None
+        summary = [
+            {
+                "filename": d["filename"], "status": d["status"], "revision": d["revision"],
+                "reviewed": d["reviewed"], "approved": d["approved"], "verified": d["verified"],
+            }
+            for d in docs
+        ]
+        return _jdump(summary), None
+
+    if fn == "get_document_status":
+        filename = args.get("filename", "")
+        if not filename:
+            return "'filename' is required.", None
+        stream_id = get_model_stream_id(conn, model_id)
+        if not stream_id:
+            return "Could not determine the project for this model.", None
+        from db.documents import list_documents as _list_docs, list_events
+        docs = _list_docs(conn, stream_id)
+        match = next((d for d in docs if filename.lower() in d["filename"].lower()), None)
+        if not match:
+            return f"No document matching '{filename}' found.", None
+        match["events"] = list_events(conn, match["doc_id"])
+        return _jdump(match), None
+
+    if fn == "list_topics":
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT guid, title, topic_status, priority, assigned_to, due_date "
+                "FROM bcf_topics WHERE model_id = %s ORDER BY creation_date DESC",
+                (model_id,),
+            )
+            cols = [d[0] for d in cur.description]
+            topics = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if not topics:
+            return "No BCF topics logged for this model yet.", None
+        return _jdump(topics), None
+
+    if fn == "get_topic":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        topic = _resolve_topic(conn, model_id, reference)
+        if not topic:
+            return f"No topic matching '{reference}' found.", None
+        return _jdump(topic), None
+
+    if fn == "create_topic":
+        title = args.get("title", "")
+        if not title:
+            return "'title' is required.", None
+        stream_id = get_model_stream_id(conn, model_id)
+        try:
+            topic = _create_topic_row(
+                conn, model_id, stream_id, title,
+                description=args.get("description"), priority=args.get("priority"),
+                assigned_to=args.get("assigned_to"),
+            )
+        except Exception as exc:
+            return f"Could not create topic: {exc}", None
+        return f"Created topic '{topic['title']}' (guid={topic['guid']}).", None
+
+    if fn == "update_topic":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        topic = _resolve_topic(conn, model_id, reference)
+        if not topic:
+            return f"No topic matching '{reference}' found.", None
+        fields = {k: args[k] for k in ("topic_status", "priority", "assigned_to") if args.get(k)}
+        if not fields:
+            return "No fields provided to update.", None
+        try:
+            updated = _update_topic_row(conn, topic["guid"], fields)
+        except Exception as exc:
+            return f"Could not update topic: {exc}", None
+        return f"Updated topic '{updated['title']}': status={updated['topic_status']} priority={updated['priority']}", None
+
+    if fn == "list_topic_comments":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        topic = _resolve_topic(conn, model_id, reference)
+        if not topic:
+            return f"No topic matching '{reference}' found.", None
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT author, comment, date FROM bcf_comments WHERE topic_guid = %s ORDER BY date",
+                (topic["guid"],),
+            )
+            cols = [d[0] for d in cur.description]
+            comments = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if not comments:
+            return "No comments on this topic yet.", None
+        return _jdump(comments), None
+
+    if fn == "add_topic_comment":
+        reference = args.get("reference", "")
+        comment = args.get("comment", "")
+        if not reference or not comment:
+            return "Both 'reference' and 'comment' are required.", None
+        topic = _resolve_topic(conn, model_id, reference)
+        if not topic:
+            return f"No topic matching '{reference}' found.", None
+        try:
+            _add_comment_row(conn, topic["guid"], comment)
+        except Exception as exc:
+            return f"Could not add comment: {exc}", None
+        return f"Comment added to '{topic['title']}'.", None
 
     return "Unknown tool.", None
 
@@ -916,13 +1721,21 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
         "- query_by_parameter: find elements by any parameter key/value; supports numeric ops (gt/lt/gte/lte)\n"
         "- get_materials: list all materials with element counts and volumes\n"
         "- get_profiles: list structural profiles and steel grades\n"
+        "- estimate_cost: apply user-supplied unit rates to quantities for a rough cost/budget estimate\n"
         "- get_model_changes: diff current model against another version (show added/removed/changed)\n"
         "- check_data_quality: BIM QA score + issues (missing names/storeys/materials/geometry, duplicates)\n"
         "- get_parameter_completeness: fill-rate % per parameter, worst-covered first\n"
-        "- get_version_history: element-count/category trend across all ingested versions of this model\n"
+        "- get_version_history: element-count/volume/area trend (overall + per category) across all ingested versions of this model\n"
         "- find_nearby_elements: find elements within a radius (meters) of a reference element or coordinate\n"
+        "- get_related_elements: parent/room/space relationships (host wall, room contents, etc.) for an element\n"
         "- get_qa_elements: drill into a specific data-quality issue and highlight the affected elements\n"
-        "- get_element_details: full details (geometry, all parameters) for one specific element\n\n"
+        "- get_element_details: full details (geometry, all parameters) for one specific element\n"
+        "- semantic_search: find elements by meaning/description rather than exact text match\n"
+        "- check_clashes: geometric clash detection between two categories/IFC classes (can be slow)\n"
+        "- list_ids_specs / check_ids_compliance: buildingSMART IDS spec compliance checking (can be slow)\n"
+        "- list_documents / get_document_status: CDE document status and approval gates (read-only)\n"
+        "- list_topics / get_topic / create_topic / update_topic / list_topic_comments / add_topic_comment: "
+        "BCF coordination issues — log/track/discuss findings as trackable topics\n\n"
         "## Reasoning Guidance\n"
         "Before calling tools, briefly state your plan in one sentence (e.g. 'I'll filter beams by "
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "
@@ -960,7 +1773,7 @@ def run_chat_agent(
     element_ids: list[str] = []
     reasoning_steps: list[str] = []
 
-    for _ in range(5):  # extra round for CoT reasoning step
+    for _ in range(MAX_TOOL_ROUNDS):
         result = _call_llm(provider, model_name, api_key, base_url, messages, _TOOLS)
         choice = result["choices"][0]
         msg = choice["message"]
@@ -1040,7 +1853,7 @@ def stream_chat_agent(
     tools_used: list[str] = []
     element_ids: list[str] = []
 
-    for _ in range(5):
+    for _ in range(MAX_TOOL_ROUNDS):
         msg = None
         for event_type, event_data in _call_llm_stream(provider, model_name, api_key, base_url, messages, _TOOLS):
             if event_type == "text_delta":
@@ -1081,5 +1894,9 @@ def stream_chat_agent(
 
             messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_result})
 
+    # Exhausted MAX_TOOL_ROUNDS without a final non-tool-call reply. Previously
+    # this fell straight through to "elements"/"done" with no text_delta ever
+    # sent — the frontend showed a blank assistant bubble with no explanation.
+    yield _sse({"type": "text_delta", "delta": "I reached the response limit before finishing. Please try a more specific question."})
     yield _sse({"type": "elements", "ids": element_ids})
     yield _sse({"type": "done", "toolsUsed": tools_used})

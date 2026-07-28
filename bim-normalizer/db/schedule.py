@@ -3,7 +3,9 @@
 """
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+
+from db.cpm import recompute_and_persist_cpm
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +102,11 @@ def create_task(conn, model_id: str, name: str, planned_start=None, planned_fini
     with conn.cursor() as cur:
         cur.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM bim_tasks WHERE model_id = %s", (model_id,))
         sort_order = cur.fetchone()[0]
-    task_id = _insert_task(conn, model_id, None, name, 'NOTSTARTED', is_milestone,
+    task_id = _insert_task(conn, model_id, None, name, 'NOTSTARTED', is_milestone, False,
                            _parse_ifc_date(planned_start), _parse_ifc_date(planned_finish),
                            _parse_ifc_date(actual_start), _parse_ifc_date(actual_finish),
-                           None, parent_task_id, wbs_code, sort_order)
+                           None, None, parent_task_id, wbs_code, sort_order)
+    recompute_and_persist_cpm(conn, model_id)
     conn.commit()
     return task_id
 
@@ -132,6 +135,8 @@ def update_task(conn, model_id: str, task_id: str, **fields) -> bool:
             (*updates.values(), task_id, model_id),
         )
         updated = cur.rowcount > 0
+    if updated:
+        recompute_and_persist_cpm(conn, model_id)
     conn.commit()
     return updated
 
@@ -140,24 +145,204 @@ def delete_task(conn, model_id: str, task_id: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM bim_tasks WHERE task_id = %s AND model_id = %s", (task_id, model_id))
         deleted = cur.rowcount > 0
+    if deleted:
+        recompute_and_persist_cpm(conn, model_id)
     conn.commit()
     return deleted
 
 
-def _insert_task(conn, model_id, app_id, name, status, is_milestone,
+def delete_schedule(conn, model_id: str) -> int:
+    """Wipe the entire schedule for a model (bim_task_elements/bim_task_dependencies
+    cascade off bim_tasks). Same statement the import_from_* functions already run
+    before re-populating, exposed standalone for a plain "delete plan" action."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM bim_tasks WHERE model_id = %s", (model_id,))
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Auto-generate a schedule from the model's own data (no IFC/MSPDI import)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# One task per group, elements assigned to their group's task, groups laid
+# out sequentially along a calendar. Modeled on ifc-lite's client-side
+# "Generate schedule" dialog (github.com/LTplus-AG/ifc-lite,
+# apps/viewer/src/components/viewer/schedule/generate-schedule.ts), but
+# computed here from data already captured at ingest time —
+# bim_elements.storey and bim_geometry.centroid_si — rather than re-parsing
+# an IFC file or scanning mesh vertices in the browser.
+GENERATE_STRATEGIES = {'storey', 'height'}
+GENERATE_ORDERS = {'bottom-up', 'top-down'}
+
+
+def _group_elements_by_storey(conn, model_id: str) -> list[dict]:
+    """One group per distinct bim_elements.storey value. Elements with no
+    storey assigned are excluded — nothing to schedule them by. Ordered by
+    each group's mean geometry Z (ascending); groups with no geometry at all
+    sort as if Z=0 rather than being dropped, since storey is still a
+    meaningful grouping even without geometry to order by precisely."""
+    # element_id::text — array_agg(uuid) comes back as an unparsed literal
+    # string ("{a,b,c}") rather than a Python list, since this connection has
+    # no uuid[] typecaster registered (only scalar uuid, via the ::text casts
+    # used elsewhere in this file); text[] is one of psycopg2's built-in
+    # array types and needs no such registration.
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.storey, array_agg(e.element_id::text) AS element_ids, AVG(g.centroid_si[3]) AS avg_z
+            FROM bim_elements e
+            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+            WHERE e.model_id = %s AND e.storey IS NOT NULL AND e.storey <> ''
+            GROUP BY e.storey
+        """, (model_id,))
+        rows = cur.fetchall()
+
+    groups = [
+        {'name': storey, 'element_ids': list(element_ids), 'sort_key': avg_z if avg_z is not None else 0.0}
+        for storey, element_ids, avg_z in rows
+    ]
+    groups.sort(key=lambda g: g['sort_key'])
+    return groups
+
+
+def _format_z(z: float) -> str:
+    """'+3 m' for whole metres, '+3.25 m' when the band boundary isn't."""
+    rounded = round(z, 2)
+    text = f'{rounded:g}'
+    return f"{'+' if rounded >= 0 else ''}{text} m"
+
+
+def _group_elements_by_height(conn, model_id: str, band_m: float) -> list[dict]:
+    """Ignores the spatial hierarchy entirely and buckets elements into
+    band_m-metre Z bands using bim_geometry.centroid_si — a rescue path for
+    models where storey assignment is missing or unreliable (a common
+    authoring issue: everything pooled under the ground floor regardless of
+    real elevation). Elements with no geometry are excluded."""
+    band_m = max(0.1, band_m)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT FLOOR(g.centroid_si[3] / %s)::int AS bin, array_agg(e.element_id::text) AS element_ids
+            FROM bim_elements e
+            JOIN bim_geometry g ON g.element_id = e.element_id
+            WHERE e.model_id = %s AND g.centroid_si IS NOT NULL
+            GROUP BY bin
+            ORDER BY bin
+        """, (band_m, model_id))
+        rows = cur.fetchall()
+
+    groups = []
+    for bin_idx, element_ids in rows:
+        z_from = bin_idx * band_m
+        z_to = z_from + band_m
+        groups.append({
+            'name': f'Elements {_format_z(z_from)} – {_format_z(z_to)}',
+            'element_ids': list(element_ids),
+            'sort_key': bin_idx,
+        })
+    return groups
+
+
+def generate_schedule(
+    conn, model_id: str, strategy: str, start_date, days_per_group: float,
+    lag_days: float = 0, order: str = 'bottom-up', link_sequences: bool = True,
+    height_band_m: float = 3.0,
+) -> dict:
+    """Replace this model's schedule with one auto-generated from its own
+    grouping data — always a full replace (like import_from_ifc/mspdi), not
+    a merge, so re-running with different options doesn't leave orphaned
+    tasks from a previous attempt.
+
+    strategy: 'storey' groups by bim_elements.storey; 'height' buckets by
+      Z elevation in height_band_m-metre bands (ignores storey — see
+      _group_elements_by_height for why that's sometimes the better choice).
+    order: 'bottom-up' (ascending Z — site/ground first) or 'top-down'.
+    Raises ValueError on bad input (caller maps this to HTTP 422).
+    """
+    if strategy not in GENERATE_STRATEGIES:
+        raise ValueError(f"strategy must be one of {sorted(GENERATE_STRATEGIES)}, got {strategy!r}")
+    if order not in GENERATE_ORDERS:
+        raise ValueError(f"order must be one of {sorted(GENERATE_ORDERS)}, got {order!r}")
+    if not days_per_group or days_per_group <= 0:
+        raise ValueError('days_per_group must be positive')
+    if lag_days is None or lag_days < 0:
+        lag_days = 0
+
+    start = start_date if isinstance(start_date, date) else _parse_ifc_date(start_date)
+    if not start:
+        raise ValueError(f'Invalid start_date: {start_date!r}')
+
+    groups = (
+        _group_elements_by_storey(conn, model_id) if strategy == 'storey'
+        else _group_elements_by_height(conn, model_id, height_band_m)
+    )
+    if order == 'top-down':
+        groups.reverse()
+
+    if not groups:
+        return {'tasks': 0, 'products_linked': 0, 'groups': 0}
+
+    with conn.cursor() as cur:
+        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+
+    duration = timedelta(days=days_per_group)
+    stride = duration + timedelta(days=lag_days)
+
+    tasks_created = 0
+    products_linked = 0
+    prev_task_id = None
+
+    for index, group in enumerate(groups):
+        group_start = start + index * stride
+        group_finish = group_start + duration
+
+        task_id = _insert_task(
+            conn, model_id, None, group['name'], 'NOTSTARTED', False, False,
+            group_start, group_finish, None, None,
+            days_per_group, None, None, None, index,
+        )
+        if not task_id:
+            continue
+        tasks_created += 1
+
+        if group['element_ids']:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bim_task_elements (task_id, element_id)
+                    SELECT %s, unnest(%s::uuid[])
+                    ON CONFLICT DO NOTHING
+                """, (task_id, group['element_ids']))
+            products_linked += len(group['element_ids'])
+
+        if link_sequences and prev_task_id:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
+                    VALUES (%s, %s, 'FINISH_START', %s)
+                    ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
+                        sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
+                """, (prev_task_id, task_id, lag_days if lag_days > 0 else None))
+        prev_task_id = task_id
+
+    recompute_and_persist_cpm(conn, model_id)
+    conn.commit()
+    return {'tasks': tasks_created, 'products_linked': products_linked, 'groups': len(groups)}
+
+
+def _insert_task(conn, model_id, app_id, name, status, is_milestone, is_critical,
                  planned_start, planned_finish, actual_start, actual_finish,
-                 duration_days, parent_db_id, wbs_code, sort_order) -> str | None:
+                 duration_days, float_days, parent_db_id, wbs_code, sort_order) -> str | None:
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_tasks (
-                model_id, application_id, name, status, is_milestone,
+                model_id, application_id, name, status, is_milestone, is_critical,
                 planned_start, planned_finish, actual_start, actual_finish,
-                duration_days, parent_task_id, wbs_code, sort_order
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                duration_days, float_days, parent_task_id, wbs_code, sort_order
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             RETURNING task_id
-        """, (model_id, app_id, name, status, is_milestone,
+        """, (model_id, app_id, name, status, is_milestone, is_critical,
               planned_start, planned_finish, actual_start, actual_finish,
-              duration_days, parent_db_id, wbs_code, sort_order))
+              duration_days, float_days, parent_db_id, wbs_code, sort_order))
         row = cur.fetchone()
         return str(row[0]) if row else None
 
@@ -173,6 +358,12 @@ def _walk_task(ifc, conn, model_id: str, task, parent_db_id: str | None,
     actual_start   = _parse_ifc_date(getattr(tt, 'ActualStart',    None) if tt else None)
     actual_finish  = _parse_ifc_date(getattr(tt, 'ActualFinish',   None) if tt else None)
     duration_days  = _parse_ifc_duration(getattr(tt, 'ScheduleDuration', None) if tt else None)
+    # IsCritical/TotalFloat are standard IfcTaskTime attributes (IFC4/IFC4X3
+    # spec, not a vendor extension) — confirmed against a real scheduling
+    # tool's writer (Open Planner Studio's ifcWriter.ts writes both), but
+    # previously only ever read from the MSPDI import path, never from IFC.
+    is_critical    = bool(getattr(tt, 'IsCritical', False)) if tt else False
+    float_days     = _parse_ifc_duration(getattr(tt, 'TotalFloat', None) if tt else None)
     status         = getattr(task, 'Status', None) or 'NOTSTARTED'
     is_milestone   = bool(getattr(task, 'IsMilestone', False))
     wbs            = getattr(task, 'Identification', None) or getattr(task, 'TaskId', None)
@@ -180,9 +371,9 @@ def _walk_task(ifc, conn, model_id: str, task, parent_db_id: str | None,
     sort_order = sort_counter[0]
     sort_counter[0] += 1
 
-    db_id = _insert_task(conn, model_id, app_id, name, status, is_milestone,
+    db_id = _insert_task(conn, model_id, app_id, name, status, is_milestone, is_critical,
                          planned_start, planned_finish, actual_start, actual_finish,
-                         duration_days, parent_db_id, wbs, sort_order)
+                         duration_days, float_days, parent_db_id, wbs, sort_order)
     if db_id:
         task_id_map[app_id] = db_id
 
@@ -199,6 +390,52 @@ def _walk_task(ifc, conn, model_id: str, task, parent_db_id: str | None,
         for nested in (getattr(rel, 'RelatedObjects', []) or []):
             if nested.is_a('IfcTask'):
                 _walk_task(ifc, conn, model_id, nested, db_id, task_id_map, sort_counter)
+
+
+_SEQUENCE_TYPES = {'FINISH_START', 'START_START', 'FINISH_FINISH', 'START_FINISH'}
+
+
+def _import_dependencies(conn, ifc, task_id_map: dict[str, str]) -> int:
+    """Parse IfcRelSequence (predecessor/successor task links) into
+    bim_task_dependencies. Standard IFC4/IFC4X3 entity — confirmed against a
+    real scheduling tool's writer (RelatingProcess=predecessor,
+    RelatedProcess=successor, optional TimeLag, SequenceType enum).
+    Silently skips relations referencing a task outside this schedule
+    (not in task_id_map) rather than failing the whole import."""
+    count = 0
+    with conn.cursor() as cur:
+        for seq in ifc.by_type('IfcRelSequence'):
+            pred = getattr(seq, 'RelatingProcess', None)
+            succ = getattr(seq, 'RelatedProcess', None)
+            if not pred or not succ or not pred.is_a('IfcTask') or not succ.is_a('IfcTask'):
+                continue
+            pred_id = task_id_map.get(pred.GlobalId)
+            succ_id = task_id_map.get(succ.GlobalId)
+            if not pred_id or not succ_id:
+                continue
+
+            seq_type = getattr(seq, 'SequenceType', None)
+            seq_type = seq_type if seq_type in _SEQUENCE_TYPES else 'FINISH_START'
+
+            lag_days = None
+            time_lag = getattr(seq, 'TimeLag', None)
+            if time_lag is not None:
+                lag_value = getattr(time_lag, 'LagValue', None)
+                # LagValue is an IFC SELECT type (IfcDuration | IfcRatio) — ifcopenshell
+                # may hand back a wrapper with the raw value under `wrappedValue` rather
+                # than a plain string. Percentage-based lag (IfcRatio) won't match the
+                # ISO-8601 duration regex and safely stays None rather than raising.
+                lag_value = getattr(lag_value, 'wrappedValue', lag_value)
+                lag_days = _parse_ifc_duration(lag_value)
+
+            cur.execute("""
+                INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
+                    sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
+            """, (pred_id, succ_id, seq_type, lag_days))
+            count += 1
+    return count
 
 
 def import_from_ifc(conn, model_id: str, ifc_path: str) -> dict:
@@ -222,8 +459,11 @@ def import_from_ifc(conn, model_id: str, ifc_path: str) -> dict:
                 if obj.is_a('IfcTask'):
                     _walk_task(ifc, conn, model_id, obj, None, task_id_map, sort_counter)
 
+    dependency_count = _import_dependencies(conn, ifc, task_id_map)
+
+    recompute_and_persist_cpm(conn, model_id)
     conn.commit()
-    return {'schedules': len(schedules), 'tasks': sort_counter[0]}
+    return {'schedules': len(schedules), 'tasks': sort_counter[0], 'dependencies': dependency_count}
 
 
 def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
@@ -291,9 +531,12 @@ def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
             level_stack.pop()
         parent_db_id = level_stack[-1][1] if level_stack else None
 
-        db_id = _insert_task(conn, model_id, None, name, status, is_milestone,
+        # is_critical is set via the bulk UPDATE below (existing pattern); MSPDI's
+        # TotalSlack isn't wired to float_days yet (unverified units without a
+        # real sample) — leave None rather than guess.
+        db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
                              planned_start, planned_finish, actual_start, actual_finish,
-                             duration_days, parent_db_id, wbs, sort_order)
+                             duration_days, None, parent_db_id, wbs, sort_order)
         sort_order += 1
         if db_id:
             level_stack.append((level, db_id))
@@ -304,8 +547,87 @@ def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
         with conn.cursor() as cur:
             cur.execute('UPDATE bim_tasks SET is_critical = TRUE WHERE task_id = ANY(%s::uuid[])', (critical_ids,))
 
+    recompute_and_persist_cpm(conn, model_id)
     conn.commit()
     return {'schedules': 1, 'tasks': sort_order}
+
+
+def _would_create_cycle(conn, model_id: str, predecessor_task_id: str, successor_task_id: str) -> bool:
+    """BFS forward from successor_task_id over existing dependency edges; if
+    predecessor_task_id is reachable, adding predecessor->successor would
+    close a cycle."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT d.predecessor_task_id::text, d.successor_task_id::text
+            FROM bim_task_dependencies d
+            JOIN bim_tasks t ON t.task_id = d.predecessor_task_id
+            WHERE t.model_id = %s
+        """, (model_id,))
+        edges = cur.fetchall()
+
+    succs: dict[str, list[str]] = {}
+    for pred_id, succ_id in edges:
+        succs.setdefault(pred_id, []).append(succ_id)
+
+    seen = set()
+    queue = [successor_task_id]
+    while queue:
+        tid = queue.pop()
+        if tid == predecessor_task_id:
+            return True
+        if tid in seen:
+            continue
+        seen.add(tid)
+        queue.extend(succs.get(tid, []))
+    return False
+
+
+def create_dependency(conn, model_id: str, predecessor_task_id: str, successor_task_id: str,
+                      sequence_type: str = 'FINISH_START', lag_days: float | None = None) -> dict:
+    if predecessor_task_id == successor_task_id:
+        raise ValueError('A task cannot depend on itself')
+    if sequence_type not in _SEQUENCE_TYPES:
+        sequence_type = 'FINISH_START'
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT task_id FROM bim_tasks WHERE model_id = %s AND task_id = ANY(%s::uuid[])",
+            (model_id, [predecessor_task_id, successor_task_id]),
+        )
+        found = {str(row[0]) for row in cur.fetchall()}
+    if len(found) != 2:
+        raise ValueError('Task not found in this model')
+
+    if _would_create_cycle(conn, model_id, predecessor_task_id, successor_task_id):
+        raise ValueError('This would create a circular dependency')
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
+                sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
+            RETURNING id
+        """, (predecessor_task_id, successor_task_id, sequence_type, lag_days))
+        dependency_id = cur.fetchone()[0]
+
+    recompute_and_persist_cpm(conn, model_id)
+    conn.commit()
+    return {'dependency_id': str(dependency_id)}
+
+
+def delete_dependency(conn, model_id: str, dependency_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM bim_task_dependencies d
+            USING bim_tasks t
+            WHERE d.id = %s AND d.predecessor_task_id = t.task_id AND t.model_id = %s
+        """, (dependency_id, model_id))
+        deleted = cur.rowcount > 0
+    if deleted:
+        recompute_and_persist_cpm(conn, model_id)
+    conn.commit()
+    return deleted
 
 
 def get_schedule(conn, model_id: str) -> dict:
@@ -347,7 +669,7 @@ def get_schedule(conn, model_id: str) -> dict:
         rows = cur.fetchall()
 
     if not rows:
-        return {'tasks': [], 'project_start': None, 'project_end': None, 'task_count': 0}
+        return {'tasks': [], 'dependencies': [], 'project_start': None, 'project_end': None, 'task_count': 0}
 
     tasks = []
     all_starts, all_ends = [], []
@@ -383,8 +705,27 @@ def get_schedule(conn, model_id: str) -> dict:
         if eff_end:
             all_ends.append(eff_end)
 
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT d.id, d.predecessor_task_id, d.successor_task_id, d.sequence_type, d.lag_days
+            FROM bim_task_dependencies d
+            JOIN bim_tasks t ON t.task_id = d.predecessor_task_id
+            WHERE t.model_id = %s
+        """, (model_id,))
+        dependencies = [
+            {
+                'dependency_id':       str(dep_id),
+                'predecessor_task_id': str(pred_id),
+                'successor_task_id':   str(succ_id),
+                'sequence_type':       seq_type,
+                'lag_days':            lag_days,
+            }
+            for dep_id, pred_id, succ_id, seq_type, lag_days in cur.fetchall()
+        ]
+
     return {
         'tasks':         tasks,
+        'dependencies':  dependencies,
         'task_count':    len(tasks),
         'project_start': min(all_starts).isoformat() if all_starts else None,
         'project_end':   max(all_ends).isoformat()   if all_ends   else None,
@@ -400,7 +741,7 @@ def get_tasks_for_export(conn, model_id: str) -> tuple[list[dict], dict[str, lis
     """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT task_id, name, wbs_code, is_milestone,
+            SELECT task_id, name, wbs_code, status, is_milestone, is_critical, float_days,
                    planned_start, planned_finish, actual_start, actual_finish,
                    parent_task_id, sort_order
             FROM bim_tasks
@@ -412,15 +753,18 @@ def get_tasks_for_export(conn, model_id: str) -> tuple[list[dict], dict[str, lis
             'task_id':         str(task_id),
             'name':            name or 'Unnamed Task',
             'wbs_code':        wbs,
+            'status':          status,
             'is_milestone':    is_milestone,
+            'is_critical':     is_critical,
+            'float_days':      float_d,
             'planned_start':   p_start.isoformat()  if p_start  else None,
             'planned_finish':  p_finish.isoformat() if p_finish else None,
             'actual_start':    a_start.isoformat()  if a_start  else None,
             'actual_finish':   a_finish.isoformat() if a_finish else None,
             'parent_task_id':  str(parent_id) if parent_id else None,
             'sort_order':      sort_order,
-        } for (task_id, name, wbs, is_milestone, p_start, p_finish, a_start, a_finish,
-               parent_id, sort_order) in rows]
+        } for (task_id, name, wbs, status, is_milestone, is_critical, float_d,
+               p_start, p_finish, a_start, a_finish, parent_id, sort_order) in rows]
 
         if not tasks:
             return [], {}

@@ -209,6 +209,14 @@ html {
   border-radius: 6px;
   background: var(--speckle-foundation);
   position: relative; /* needed so the absolute close button positions correctly */
+  /* Without this, position:relative alone doesn't create a stacking context, so a
+     child's z-index (e.g. .panel-header's z-index:110) escapes this box and stacks
+     directly against SIBLING panels instead of staying scoped inside its own —
+     on mobile, where the pinned viewer panel is position:sticky with a much lower
+     z-index (35), that let a scrolling chart panel's header render on top of the
+     pinned viewer instead of sliding underneath it. isolation:isolate forces every
+     panel-thin to be one atomic stacking unit. */
+  isolation: isolate;
 }
 
 
@@ -494,6 +502,22 @@ html {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;                     /* Chrome/Safari/WebKit */
+}
+
+/* Across the app, row/card action buttons (delete, copy, filter, unpin,
+   resize handles, etc.) are hidden behind `opacity-0 group-hover:opacity-100`
+   so lists stay visually quiet until the mouse is over a row. Touch devices
+   (iPhone/iPad, no real :hover) never trigger group-hover, so on a phone
+   these controls are invisible — not just harder to reach, genuinely
+   undiscoverable, since tapping blindly where an unseen button sits still
+   works but nobody knows to do that. `(hover: none)` targets exactly
+   coarse-pointer/touch devices without affecting desktop's hover-to-reveal
+   behavior, so this is a single global fix instead of editing every
+   component that uses the pattern. */
+@media (hover: none) {
+  [class*="group-hover:opacity-100"] {
+    opacity: 1 !important;
+  }
 }
 
 /* Select styling - dark default */

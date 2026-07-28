@@ -12,6 +12,7 @@ import {
 } from '../utils/bcfWorkflow'
 import { BcfLogoIcon } from './BcfLogoIcon'
 import { ViewpointMarkupEditor } from './ViewpointMarkupEditor'
+import { useAuth } from '../contexts/AuthContext'
 
 const COLUMN_COLOR = {
     Backlog: { border: 'border-zinc-400/50', bg: 'bg-zinc-400/10', text: 'text-zinc-300', badge: 'bg-zinc-400/20 text-zinc-200' },
@@ -102,6 +103,7 @@ function Card({ topic, snapshotUrl, onOpen, onDelete }) {
 // BcfTopicPanel (same `topics`/`onTopicsChange` — single source of truth,
 // no separate fetch). Reachable as a web overlay, not a separate app.
 export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChange, onClose }) {
+    const { user } = useAuth()
     const [snapshots, setSnapshots] = useState({})
     const [viewpoints, setViewpoints] = useState({})
     const [selectedTopic, setSelectedTopic] = useState(null)
@@ -286,7 +288,7 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
 
     const submitComment = async () => {
         if (!newComment.trim() || !selectedTopic) return
-        const authorName = localStorage.getItem('bcfAuthorName') || 'Dashboard User'
+        const authorName = user?.name || 'Dashboard User'
         try {
             const comment = await createComment(projectId, selectedTopic.guid, { comment: newComment.trim(), author: authorName })
             setTopicComments(prev => [...prev, comment])
@@ -345,7 +347,7 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                 <motion.div
                     initial={{ x: 360 }} animate={{ x: 0 }} exit={{ x: 360 }}
                     transition={{ duration: 0.18 }}
-                    className="absolute top-0 right-0 h-full w-[360px] glass-card rounded-none border-l border-[var(--speckle-outline-3)] flex flex-col overflow-hidden"
+                    className="absolute top-0 right-0 h-full w-[360px] max-w-[calc(100vw-2rem)] glass-card rounded-none border-l border-[var(--speckle-outline-3)] flex flex-col overflow-hidden"
                 >
                     <div className="p-4 border-b border-[var(--speckle-outline-3)] flex items-center justify-between shrink-0">
                         <button onClick={() => setSelectedTopic(null)} className="flex items-center gap-1 text-xs text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]">

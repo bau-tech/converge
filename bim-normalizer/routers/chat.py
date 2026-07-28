@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,30 +15,27 @@ class ChatRequest(BaseModel):
     model_id: str | None = None   # normalizer model UUID (bim_models.model_id)
     history: list = []
     ai_provider: str = "openai"
+    openai_config: dict | None = None
     ollama_config: dict | None = None
     lmstudio_config: dict | None = None
     mistral_config: dict | None = None
     model_context: dict | None = None  # optional frontend-supplied context (families, phases, worksets, etc.)
 
 
-@router.post("/chat")
-async def chat(request: ChatRequest):
-    """
-    Agentic chat endpoint. Calls the configured LLM with tools that can
-    query the normalizer DB (filter elements, get summaries). Returns
-    {text, elementIds, toolsUsed} so the frontend can highlight elements.
-    """
-    import os
-    from chat.agent import run_chat_agent
-    from db.connection import get_conn, release_conn
+def _resolve_provider(request: ChatRequest) -> tuple[str, str, str, str]:
+    """Returns (provider, api_key, model_name, base_url).
 
-    if not request.model_id:
-        raise HTTPException(status_code=400, detail="model_id is required")
-
+    OpenAI's model used to be hardcoded to gpt-4o-mini regardless of anything
+    the frontend sent — unlike every other provider, which already accepted a
+    model override via its own *_config dict. openai_config brings it in line;
+    the default is unchanged so this doesn't silently change cost/behavior for
+    existing callers that don't pass it.
+    """
     provider = request.ai_provider
     if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        model_name = "gpt-4o-mini"
+        cfg = request.openai_config or {}
+        api_key = cfg.get("apiKey") or os.getenv("OPENAI_API_KEY", "")
+        model_name = cfg.get("model", "gpt-4o-mini")
         base_url = ""
     elif provider == "mistral":
         cfg = request.mistral_config or {}
@@ -54,6 +52,23 @@ async def chat(request: ChatRequest):
         api_key = ""
         model_name = cfg.get("model", "local-model")
         base_url = cfg.get("baseUrl", "http://localhost:1234/v1")
+    return provider, api_key, model_name, base_url
+
+
+@router.post("/chat")
+async def chat(request: ChatRequest):
+    """
+    Agentic chat endpoint. Calls the configured LLM with tools that can
+    query the normalizer DB (filter elements, get summaries). Returns
+    {text, elementIds, toolsUsed} so the frontend can highlight elements.
+    """
+    from chat.agent import run_chat_agent
+    from db.connection import get_conn, release_conn
+
+    if not request.model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    provider, api_key, model_name, base_url = _resolve_provider(request)
 
     conn = get_conn()
     try:
@@ -89,33 +104,13 @@ async def chat_stream(request: ChatRequest):
       data: {"type":"done","toolsUsed":[...]}
     """
     import asyncio
-    import os
     from chat.agent import stream_chat_agent
     from db.connection import get_conn, release_conn
 
     if not request.model_id:
         raise HTTPException(status_code=400, detail="model_id is required")
 
-    provider = request.ai_provider
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        model_name = "gpt-4o-mini"
-        base_url = ""
-    elif provider == "mistral":
-        cfg = request.mistral_config or {}
-        api_key = cfg.get("apiKey") or os.getenv("MISTRAL_API_KEY", "")
-        model_name = cfg.get("model", "mistral-large-latest")
-        base_url = ""
-    elif provider == "ollama":
-        cfg = request.ollama_config or {}
-        api_key = ""
-        model_name = cfg.get("model", "llama3")
-        base_url = cfg.get("baseUrl", "http://localhost:11434")
-    else:  # lmstudio
-        cfg = request.lmstudio_config or {}
-        api_key = ""
-        model_name = cfg.get("model", "local-model")
-        base_url = cfg.get("baseUrl", "http://localhost:1234/v1")
+    provider, api_key, model_name, base_url = _resolve_provider(request)
 
     async def generator():
         conn = get_conn()

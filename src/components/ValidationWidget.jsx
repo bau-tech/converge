@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X } from 'lucide-react'
+import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X, Search } from 'lucide-react'
 import EChart from './EChart'
 import { baseOption } from '../lib/echartsTheme'
 import { discoverProperties, discoverNumericProperties } from '../utils/propertyScanner'
@@ -13,6 +13,93 @@ function rulesKey(widgetId) {
 
 function logicKey(widgetId) {
     return `validation-logic-${widgetId || 'default'}`
+}
+
+// Select constrained to one of `options` (unlike SearchableCombobox, which
+// allows free-typed values) with a search box to filter a long, dynamically
+// discovered property list — propertyOptions below can run into the dozens
+// once numeric/string properties from the actual model are included, and a
+// plain <select> gives no way to find one by typing.
+function PropertySelect({ options, value, onChange }) {
+    const [open, setOpen] = useState(false)
+    const [query, setQuery] = useState('')
+    const containerRef = useRef(null)
+
+    // Divider rows (disabled, used to group the plain <select> this replaces)
+    // don't make sense as clickable search results — drop them here.
+    const selectableOptions = useMemo(() => options.filter(o => !o.disabled), [options])
+    const selected = selectableOptions.find(o => o.value === value)
+
+    const filtered = useMemo(() => {
+        if (!query.trim()) return selectableOptions
+        const needle = query.toLowerCase()
+        return selectableOptions.filter(o =>
+            o.label.toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)
+        )
+    }, [selectableOptions, query])
+
+    useEffect(() => {
+        if (!open) return
+        const handleOutside = (e) => {
+            if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false)
+        }
+        document.addEventListener('mousedown', handleOutside)
+        return () => document.removeEventListener('mousedown', handleOutside)
+    }, [open])
+
+    const commit = (opt) => {
+        onChange(opt.value)
+        setOpen(false)
+        setQuery('')
+    }
+
+    return (
+        <div className="relative" ref={containerRef}>
+            <button
+                type="button"
+                onClick={() => setOpen(o => !o)}
+                className="w-full flex items-center justify-between gap-2 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 hover:border-white/20 transition-colors"
+            >
+                <span className="truncate">{selected?.label || 'Select property...'}</span>
+                <ChevronDown className={`w-3 h-3 text-zinc-500 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+            </button>
+            {open && (
+                <div className="absolute z-20 mt-1 w-full rounded-lg border border-white/10 bg-zinc-900 shadow-xl overflow-hidden">
+                    <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-white/5">
+                        <Search className="w-3 h-3 text-zinc-500 shrink-0" />
+                        <input
+                            autoFocus
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Escape') setOpen(false)
+                                if (e.key === 'Enter' && filtered[0]) commit(filtered[0])
+                            }}
+                            placeholder="Search properties..."
+                            className="w-full bg-transparent text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none"
+                        />
+                    </div>
+                    <div className="max-h-48 overflow-y-auto custom-scrollbar">
+                        {filtered.length === 0 ? (
+                            <div className="px-2 py-2 text-[11px] text-zinc-500 text-center">No matches</div>
+                        ) : (
+                            filtered.map(opt => (
+                                <div
+                                    key={opt.value}
+                                    onMouseDown={(e) => { e.preventDefault(); commit(opt) }}
+                                    className={`px-2 py-1.5 text-xs cursor-pointer truncate ${
+                                        opt.value === value ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-300 hover:bg-white/5'
+                                    }`}
+                                >
+                                    {opt.label}
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    )
 }
 
 
@@ -53,8 +140,15 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
     const propertyOptions = useMemo(() => {
         if (!fullData) return []
 
-        const stringProps = discoverProperties(fullData)
-        const numericProps = discoverNumericProperties(fullData)
+        // minUniqueValues/minCount: 1, not the chart-oriented default of 2 —
+        // a validation rule like "fire_rating is_defined" is exactly as
+        // useful when every element that has the property shares one value
+        // (e.g. every fire-rated wall being the same "F 120" class) as when
+        // values vary, unlike a chart grouping which needs variation to mean
+        // anything. Without this, such properties don't appear as an option
+        // at all, even though the underlying data is real.
+        const stringProps = discoverProperties(fullData, { minUniqueValues: 1 })
+        const numericProps = discoverNumericProperties(fullData, { minCount: 1 })
 
         // Combine and format for select options
         const options = [
@@ -277,15 +371,11 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                 </div>
 
                                 <div className="grid grid-cols-1 gap-2">
-                                    <select
+                                    <PropertySelect
+                                        options={propertyOptions}
                                         value={rule.property}
-                                        onChange={(e) => updateRule(rule.id, 'property', e.target.value)}
-                                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300"
-                                    >
-                                        {propertyOptions.map((opt, i) => (
-                                            <option key={opt.disabled ? `sep-${i}` : opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
-                                        ))}
-                                    </select>
+                                        onChange={(val) => updateRule(rule.id, 'property', val)}
+                                    />
 
                                     <div className="flex gap-2">
                                         <select

@@ -58,6 +58,20 @@ CREATE TABLE IF NOT EXISTS bim_geometry (
 -- within 5m of X") work regardless of whether the source used mm, ft, etc.
 -- NULL for elements ingested before this column was added.
 ALTER TABLE bim_geometry ADD COLUMN IF NOT EXISTS centroid_si FLOAT[];
+-- axis: structural centerline (2+ points, {"points": [[x,y,z],...]}, in the
+-- element's own raw units — same convention as bbox_min/mesh, NOT SI) for
+-- beams/columns/walls, extracted from bespoke Structural/Tekla structural
+-- properties when present (preferred, more complete/current) or the generic
+-- Speckle `location` attribute as fallback. NULL when no source was
+-- available (older data, non-linear elements) — this is enrichment, not
+-- required.
+-- footprint: 2D plan contour loops (outer boundary + inner holes,
+-- {"loops": [[[x,y,z],...], ...]}, same raw-units convention) for
+-- slabs/floors/plates, from Structural.contours, Tekla flat contourPoints,
+-- or a closed generic `location` Polycurve.
+-- Both feed ifc/export.py's Axis/FootPrint IfcShapeRepresentations.
+ALTER TABLE bim_geometry ADD COLUMN IF NOT EXISTS axis JSONB;
+ALTER TABLE bim_geometry ADD COLUMN IF NOT EXISTS footprint JSONB;
 
 CREATE TABLE IF NOT EXISTS bim_parameters (
     id            BIGSERIAL PRIMARY KEY,
@@ -151,6 +165,22 @@ CREATE TABLE IF NOT EXISTS bim_task_elements (
 CREATE INDEX IF NOT EXISTS idx_bim_task_el_task    ON bim_task_elements(task_id);
 CREATE INDEX IF NOT EXISTS idx_bim_task_el_element ON bim_task_elements(element_id);
 
+-- Task predecessor/successor links, parsed from IFC's IfcRelSequence (a
+-- standard IFC4/IFC4X3 entity, not a vendor extension — confirmed against a
+-- real scheduling tool's IFC writer). Previously not read/stored at all, so
+-- imported schedules had no dependency graph regardless of source richness.
+CREATE TABLE IF NOT EXISTS bim_task_dependencies (
+    id                  BIGSERIAL PRIMARY KEY,
+    predecessor_task_id UUID NOT NULL REFERENCES bim_tasks(task_id) ON DELETE CASCADE,
+    successor_task_id   UUID NOT NULL REFERENCES bim_tasks(task_id) ON DELETE CASCADE,
+    sequence_type       TEXT NOT NULL DEFAULT 'FINISH_START',
+    lag_days            FLOAT,
+    UNIQUE (predecessor_task_id, successor_task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bim_task_dep_pred ON bim_task_dependencies(predecessor_task_id);
+CREATE INDEX IF NOT EXISTS idx_bim_task_dep_succ ON bim_task_dependencies(successor_task_id);
+
 -- Per-project default dashboard layout: what a first-time visitor sees before
 -- they have any localStorage state of their own. Distinct from the in-memory
 -- /share snapshots (main.py), which are short-lived, explicitly-created links.
@@ -228,6 +258,130 @@ CREATE TABLE IF NOT EXISTS bim_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_bim_jobs_type_status ON bim_jobs(job_type, status);
 CREATE INDEX IF NOT EXISTS idx_bim_jobs_created ON bim_jobs(created_at);
+
+-- Documents (Nextcloud-backed document management, see nextcloud/client.py).
+-- Scoped by stream_id (survives re-ingestion), not model_id, which is minted
+-- fresh per ingested commit and would orphan documents on every re-sync.
+CREATE TABLE IF NOT EXISTS bim_documents (
+    doc_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stream_id         TEXT NOT NULL,
+    model_id          UUID REFERENCES bim_models(model_id) ON DELETE SET NULL,
+
+    nc_fileid         BIGINT NOT NULL,
+    nc_path           TEXT NOT NULL,
+    nc_group_folder   TEXT NOT NULL,
+    filename          TEXT NOT NULL,
+    mime_type         TEXT,
+    size_bytes        BIGINT,
+    etag              TEXT,
+
+    status            TEXT NOT NULL,
+    nc_last_modified  TIMESTAMPTZ,
+
+    approved          BOOLEAN NOT NULL DEFAULT FALSE,
+    approved_by       TEXT,
+    approved_at       TIMESTAMPTZ,
+    revision          INT NOT NULL DEFAULT 1,
+
+    -- Soft links, no DB FK: bcf-server is a fully separate FastAPI process
+    -- with its own schema-init, not reachable from this app's init_schema().
+    linked_bcf_topic  UUID,
+    linked_element    TEXT,
+
+    deleted_at        TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (nc_group_folder, nc_fileid)
+);
+CREATE INDEX IF NOT EXISTS idx_bim_documents_stream  ON bim_documents(stream_id);
+CREATE INDEX IF NOT EXISTS idx_bim_documents_status  ON bim_documents(status);
+CREATE INDEX IF NOT EXISTS idx_bim_documents_topic   ON bim_documents(linked_bcf_topic) WHERE linked_bcf_topic IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bim_documents_element ON bim_documents(linked_element) WHERE linked_element IS NOT NULL;
+
+-- Append-only audit trail for document actions.
+CREATE TABLE IF NOT EXISTS bim_document_events (
+    id          BIGSERIAL PRIMARY KEY,
+    doc_id      UUID NOT NULL REFERENCES bim_documents(doc_id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    from_value  TEXT,
+    to_value    TEXT,
+    actor       TEXT,
+    occurred_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_bim_document_events_doc ON bim_document_events(doc_id);
+-- Soft ref to bcf_users.guid (same no-FK reasoning as bim_documents.linked_bcf_topic
+-- above) — lets old free-text-only audit rows be told apart from rows recorded
+-- after real dashboard login shipped (actor_guid IS NULL == unverified identity).
+ALTER TABLE bim_document_events ADD COLUMN IF NOT EXISTS actor_guid UUID;
+
+-- ISO 19650 state-transition gating: WIP->Shared needs `reviewed` (review),
+-- Shared->Published needs the pre-existing `approved` (authorisation),
+-- ->Archived needs `verified` (verification). Each mirrors the existing
+-- approved/approved_by/approved_at triad. bump_revision() resets all three
+-- on every new version — a revised document must re-earn every gate again.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS reviewed          BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS reviewed_by       TEXT;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS reviewed_by_guid  UUID;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS reviewed_at       TIMESTAMPTZ;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS verified          BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS verified_by       TEXT;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS verified_by_guid  UUID;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS verified_at       TIMESTAMPTZ;
+-- Real reference alongside the pre-existing free-text approved_by, which
+-- stays as-is for back-compat with data recorded before real dashboard
+-- login existed.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS approved_by_guid  UUID;
+
+-- Distinguishes drawings (always tied to a model, via the pre-existing
+-- model_id column) from generic documents (model_id optional/best-effort —
+-- see upload_document's docstring). model_id-required-for-drawing is
+-- enforced in routers/documents.py, not a DB constraint, matching this
+-- table's existing soft-reference style. Deliberately excluded from
+-- upsert_document's ON CONFLICT DO UPDATE SET — reconcile.py's drift-scan
+-- re-upserts existing rows with no knowledge of doc_type, so it must never
+-- be able to reclassify an existing drawing back to 'document'.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS doc_type TEXT NOT NULL DEFAULT 'document';
+DO $$ BEGIN
+    ALTER TABLE bim_documents ADD CONSTRAINT bim_documents_doc_type_check CHECK (doc_type IN ('document', 'drawing'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Per-project (stream_id) document-workflow role grants — ISO 19650 RBAC.
+-- Soft reference to bcf_users.guid, no FK: bcf_users is created by
+-- bcf-server's own init_bcf_schema() (a separate process, `python
+-- bcf_server.py`, not sequenced before this app's init_schema() — see
+-- bcf-server's docker-compose depends_on: bim-normalizer, not the reverse).
+-- A user may hold more than one role on the same project, hence role is
+-- part of the primary key rather than a single-valued column.
+-- stream_id = '*' is a reserved sentinel meaning "all projects, including
+-- ones ingested later" — db/roles.py's get_user_roles() always unions it in
+-- alongside whatever project-specific grants exist, so every role check
+-- downstream (require_role, /my-roles) respects it automatically with no
+-- special-casing. Granted/revoked from the admin panel the same way as any
+-- other row, just with stream_id='*' instead of a real Speckle project id.
+CREATE TABLE IF NOT EXISTS bim_document_roles (
+    user_guid   UUID NOT NULL,
+    stream_id   TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK (role IN ('author', 'reviewer', 'approver')),
+    granted_by  UUID,
+    granted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_guid, stream_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_doc_roles_stream ON bim_document_roles(stream_id);
+CREATE INDEX IF NOT EXISTS idx_doc_roles_user   ON bim_document_roles(user_guid);
+
+-- Per-branch ("model") WIP/Shared/Published/Archived status, mirroring
+-- bim_documents' workflow but for whole Speckle models rather than files.
+-- Keyed by (stream_id, branch_name), not model_id, for the same reason as
+-- bim_documents: model_id is minted fresh per ingested commit and would
+-- orphan the status on every re-ingest, while a branch's name is stable.
+CREATE TABLE IF NOT EXISTS bim_model_status (
+    stream_id    TEXT NOT NULL,
+    branch_name  TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'WIP',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (stream_id, branch_name)
+);
 """
 
 

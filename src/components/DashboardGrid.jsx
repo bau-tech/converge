@@ -5,6 +5,7 @@ import GridLayout from 'react-grid-layout'
 import 'react-grid-layout/css/styles.css'
 import 'react-resizable/css/styles.css'
 import { settingBtnCls, settingBtnInactive, settingBtnActive, settingInputCls, ColorRow } from './chartSettingsUI'
+import { COLOR_SCHEMES } from './AdaptiveCharts'
 
 const MOBILE_BREAKPOINT = 768
 // iPhone 7 reference viewport (375x667 CSS px) — mobile panel heights are
@@ -80,14 +81,38 @@ const MOBILE_PANEL_HEIGHT = Math.round(MOBILE_VIEWPORT_HEIGHT / 2)  // half the 
 // snapping was still too coarse. Margin/containerPadding halved again
 // (2 -> 1) alongside the unit doubling to keep the margin term from
 // dominating calcGridItemWHPx's pixel-size formula.
-const LAYOUT_KEY = 'dashboard-panel-layout-v15'
+//
+// v15 -> v16: rowHeight stops being a fixed 3px constant and becomes
+// calcColWidth(containerWidth) instead — i.e. row units and column units are
+// now the same number of pixels. Previously colWidth scaled with the window
+// (cols is a fixed count over a fluid width) while rowHeight never did, so a
+// panel's aspect ratio silently drifted with window width (relatively flatter
+// on wide monitors, relatively taller/narrower on small ones) and "w equals
+// h" never actually meant square except at whatever one width it was
+// eyeballed at. With rowHeight tied to colWidth, w === h is a true square at
+// any width. This changes the px-per-unit conversion for every panel
+// (colWidth at typical desktop widths is ~2-3x the old fixed 3px), so
+// existing saved layouts would render wildly oversized under the new scale —
+// hence the version bump. VIEWER_W/VIEWER_H/SLOT_W/SLOT_H/TABLE_H below are
+// re-tuned for this new scale (see their own comments).
+const LAYOUT_KEY = 'dashboard-panel-layout-v16'
 const CHART_SETTINGS_KEY = 'dashboard-chart-settings'
 const PINNED_VIEWER_KEY = 'dashboard-viewer-pinned'
 const PINNED_CHARTS_KEY = 'dashboard-pinned-chart-panels'
 const PIN_TOP_GAP = 1   // px gap below the header, matches the grid's own margin/containerPadding
 const PIN_Z_INDEX = 35  // below header's z-50, above ordinary scrolling panel content
 const COLS = 192
-const ROW_HEIGHT = 3
+const GRID_MARGIN = 1
+const GRID_CONTAINER_PADDING = 1
+
+// Row height in px, made equal to the live column width so grid units are
+// square (see the v15->v16 note above) — matches react-grid-layout's own
+// calcGridColWidth formula (lib/calculateUtils.js) exactly, since this value
+// is fed straight into its `rowHeight` prop and needs to equal what it
+// computes internally for `colWidth` on the same render.
+function calcColWidth(containerWidthPx) {
+    return (containerWidthPx - GRID_MARGIN * (COLS - 1) - GRID_CONTAINER_PADDING * 2) / COLS
+}
 
 function useIsMobile() {
     const [isMobile, setIsMobile] = useState(
@@ -126,15 +151,32 @@ function loadSavedLayout() {
     } catch { return [] }
 }
 
-// Standard sizes tuned by hand in the live dashboard (viewer + one chart,
-// resized side by side until they read well at typical desktop widths) and
-// captured from the resulting saved layout — not derived from the grid math.
-const VIEWER_W = 54
-const VIEWER_H = 85
-const SLOT_W = 39
-const SLOT_H = 85
+// VIEWER_W/H: captured from a live resize (viewer widened until its internal
+// diff-menu toolbar fit on a single row, at a 1912px container width) rather
+// than derived from the grid math — same "tune by hand, capture the result"
+// approach as before. The measured width was 76, bumped 2 units to 78 so
+// (COLS - VIEWER_W) divides evenly by 3 (see SLOT_W below) instead of leaving
+// a sliver at the right edge — widening only gives the diff toolbar more
+// room, so it can't reintroduce the wrap this was tuned to avoid. VIEWER_H is
+// the *old* fixed-rowHeight measurement (170 units @ 3px = 679px tall)
+// converted to the new dynamic-rowHeight scale (h * (colWidth + margin) -
+// margin = target px) so the viewer keeps the same on-screen height it had
+// when it was tuned, instead of ballooning ~2.5x under the new pixels-per-unit.
+const VIEWER_W = 78
+const VIEWER_H = 68
+// SLOT_W: (COLS - VIEWER_W) split into 3 equal columns so three chart panels
+// tile flush alongside the viewer at one row each, right up to the canvas's
+// far edge — 192 - 78 = 114 = 38 * 3 exactly, no leftover sliver.
+// SLOT_H === SLOT_W: with rowHeight now equal to colWidth (see calcColWidth
+// above), any panel with w === h renders as an exact square at any window
+// width — no separate height conversion needed here, unlike VIEWER_H above.
+const SLOT_W = 38
+const SLOT_H = 38
 const TABLE_W = COLS    // tables default to full width to show their columns usefully
-const TABLE_H = 64
+// TABLE_H: old fixed-rowHeight measurement (64 units @ 3px = 255px tall)
+// converted the same way as VIEWER_H so tables don't change height under the
+// new scale.
+const TABLE_H = 26
 
 // Only ever called for viewer/table — charts and every other widget type are
 // always repacked directly in mergeLayouts (see below) instead of going
@@ -253,15 +295,6 @@ const CHART_TYPES = [
     { type: 'pie', orientation: null, label: 'Pie'   },
 ]
 
-const COLOR_SCHEMES = [
-    { id: 'default', label: 'Purple',  colors: ['#A855F7','#D946EF','#EC4899','#8B5CF6','#6366F1','#3B82F6','#0EA5E9'] },
-    { id: 'speckle', label: 'Speckle', colors: ['#136CFF','#276FE5','#4B40C9','#34D399','#FBBF24','#F87171','#B8C0CC'] },
-    { id: 'emerald', label: 'Green',   colors: ['#10B981','#34D399','#6EE7B7','#059669','#047857','#065F46','#064E3B'] },
-    { id: 'blue',    label: 'Blue',    colors: ['#3B82F6','#60A5FA','#93C5FD','#2563EB','#1D4ED8','#1E40AF','#1E3A8A'] },
-    { id: 'amber',   label: 'Amber',   colors: ['#F59E0B','#FBBF24','#FCD34D','#D97706','#B45309','#92400E','#78350F'] },
-    { id: 'rose',    label: 'Rose',    colors: ['#F43F5E','#FB7185','#FDA4AF','#E11D48','#BE123C','#9F1239','#881337'] },
-]
-
 const SORT_OPTIONS = [
     { id: 'desc', label: 'Most first'  },
     { id: 'asc',  label: 'Least first' },
@@ -309,11 +342,15 @@ const DEFAULT_CHART_SETTINGS = {
     showPriorityChips: true,
 }
 
-export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true }) {
+export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true, readOnly = false }) {
     const isMobile = useIsMobile()
     const headerHeight = useHeaderHeight()
     const containerRef = useRef(null)
     const [containerWidth, setContainerWidth] = useState(1200)
+    // Square grid units (see the v15->v16 note above calcColWidth): recomputed
+    // on every resize alongside containerWidth so it never drifts out of sync
+    // with what react-grid-layout derives internally for colWidth.
+    const rowHeightPx = useMemo(() => calcColWidth(containerWidth), [containerWidth])
 
     const [chartSettings, setChartSettings] = useState(() => {
         try {
@@ -464,17 +501,22 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
             // so handleLayoutChange persists whatever isDraggable value was here into
             // liveLayoutRef.current; only setting it while pinned would let `false`
             // leak into the saved layout and stick around after unpinning.
-            if (item.i === 'viewer') return { ...item, isDraggable: !pinnedViewer }
+            // readOnly is ANDed in here too, not just on the grid-level isDraggable prop
+            // below — RGL's per-item isDraggable/isResizable, when explicitly set (as
+            // these always are, see above), overrides the grid-level default rather than
+            // inheriting it, so leaving readOnly out of these per-item values would let a
+            // read-only share visitor still drag the viewer or resize ordinary panels.
+            if (item.i === 'viewer') return { ...item, isDraggable: !pinnedViewer && !readOnly }
             // Pinned charts stay fully draggable — only resizing is locked — and,
             // same reasoning as above, isResizable is always set explicitly so a
             // stale `false` from a since-unpinned chart can't leak into liveLayoutRef.
             if (pinnedCharts.has(item.i)) return { ...item, isResizable: false }
-            return { ...item, isResizable: true }
+            return { ...item, isResizable: !readOnly }
         })
     },
         // liveLayoutRef.current is intentionally read only when one of these changes
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [panelKey, purgeTick, pinnedViewer, pinnedCharts, layoutVersion]
+        [panelKey, purgeTick, pinnedViewer, pinnedCharts, layoutVersion, readOnly]
     )
 
     useEffect(() => {
@@ -571,10 +613,10 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
             <GridLayout
                 layout={layoutForGridLayout}
                 cols={COLS}
-                rowHeight={ROW_HEIGHT}
+                rowHeight={rowHeightPx}
                 width={containerWidth}
-                margin={[1, 1]}
-                containerPadding={[1, 1]}
+                margin={[GRID_MARGIN, GRID_MARGIN]}
+                containerPadding={[GRID_CONTAINER_PADDING, GRID_CONTAINER_PADDING]}
                 draggableHandle=".drag-zone"
                 draggableCancel="button,input,select,textarea,a,[role='button']"
                 resizeHandles={['se', 'sw', 's', 'n', 'e', 'w']}
@@ -582,8 +624,8 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
                 dragConfig={{ handle: '.drag-zone', cancel: 'button,input,select,textarea,a,[role="button"]' }}
                 compactType="vertical"
                 preventCollision={false}
-                isDraggable
-                isResizable
+                isDraggable={!readOnly}
+                isResizable={!readOnly}
                 useCSSTransforms
                 onLayoutChange={handleLayoutChange}
                 onDragStop={handleLayoutEnd}

@@ -268,6 +268,67 @@ def classify_section_family(profile_name: str | None) -> str | None:
         return family
     return "Other Sections"
 
+
+# Matches a known profile prefix (same list as _SECTION_PREFIX_MAP) as a
+# distinct token within a larger string — e.g. "HEA 400" or "HEA400" inside
+# "Tragwerksstützen - HEA 400", or "HEA200" inside Revit's own "Family:Type"
+# convention "M_HEA-Column:HEA200" — rather than requiring the whole string
+# to be just the profile designation the way classify_section_family does.
+# Anchored on: a boundary before the prefix (start/whitespace/hyphen/
+# underscore/slash/comma/colon) and a boundary after the size number, so
+# single-letter prefixes (L, C, T, U, W, S) can't match a stray capital
+# letter followed by digits elsewhere in an unrelated name. No IGNORECASE —
+# real-world profile callouts are conventionally uppercase, and matching
+# lowercase would meaningfully raise the false-positive rate for almost no
+# practical benefit.
+_PROFILE_IN_TEXT_RE = re.compile(
+    r'(?:^|[\s\-_/,:])(' + '|'.join(re.escape(p) for p in sorted(_SECTION_PREFIX_MAP, key=len, reverse=True)) + r')'
+    r'\s?(\d{2,4}(?:\s?[xX×]\s?\d{1,4}){0,2}(?:\.\d+)?)'
+    r'(?=$|[\s\-_/,.):])'
+)
+
+
+def extract_profile_from_name(name: str | None) -> str | None:
+    """
+    Best-effort fallback: pull a steel profile designation (e.g. "HEA400")
+    out of an element's own name/type string, for sources — chiefly Revit
+    exports with no dedicated profile/section parameter at all — where the
+    profile only appears embedded in a compound name like "Tragwerksstützen
+    - HEA 400". Returns the matched prefix+size with the separating space
+    (if any) removed, for consistent grouping regardless of source
+    formatting. Returns None if no known profile prefix is found.
+    """
+    if not name:
+        return None
+    m = _PROFILE_IN_TEXT_RE.search(name)
+    if not m:
+        return None
+    return m.group(1) + m.group(2).replace(" ", "")
+
+
+def normalize_profile_label(value: str | None) -> str | None:
+    """
+    Collapse whitespace between a known profile prefix and its size number
+    ("HEA 400" -> "HEA400") so the *same* physical profile doesn't fragment
+    into separate "Steel Profiles" chart bars just because different sources
+    (or a real Type Name/Section parameter vs. extract_profile_from_name's
+    own name-parsing fallback) formatted it differently. Values with no
+    recognized prefix are returned unchanged (still merged if identical, but
+    not otherwise altered) — this only fixes known profile-format variance,
+    it doesn't invent structure that isn't there.
+    """
+    if not value:
+        return value
+    stripped = value.strip()
+    m = _PROFILE_IN_TEXT_RE.search(stripped)
+    if not m or m.span() != (0, len(stripped)):
+        # Only collapse when the *entire* (trimmed) value is the profile
+        # token itself (the common case for a real Type Name/Section/profile
+        # parameter) — don't rewrite part of a longer compound string here,
+        # that's what extract_profile_from_name is for.
+        return value
+    return m.group(1) + m.group(2).replace(" ", "")
+
 # IFC export attribute names that Tekla / the connector may write into obj.properties
 _TEKLA_IFC_PROP_KEYS = (
     "IfcExportAs", "ifc_export_as", "IFC_EXPORT_TYPE",
@@ -335,14 +396,23 @@ def _tekla_name_is_footing(name: str) -> bool:
     return any(k in n for k in _FOOTING_NAME_KEYS)
 
 
+_TEKLA_WALL_NAME_KEYS = ("WALL", "PANEL")
+
+
 def _tekla_beam_is_wall(obj: "Base") -> bool:
     """
-    True when a TSM Beam should be reclassified as a wall.
-    1. obj.name contains "WALL"
+    True when a TSM Beam/PolyBeam/ContourPlate should be reclassified as a wall.
+    1. obj.name contains "WALL" or "PANEL" — Tekla users commonly model precast/
+       cast-in-place wall panels as PolyBeam or ContourPlate parts (there's no
+       dedicated wall class in TSM's own part hierarchy the way Revit has a
+       Wall category), named "PANEL" rather than "WALL" — confirmed against a
+       real model (branch literally named "walls and floors") where every
+       such element fell into "Structural Framing" instead of "Walls" because
+       only "WALL" was matched, never "PANEL".
     2. profile height > 0.5 * member length (plate-wall heuristic)
     """
     obj_name = (getattr(obj, "name", None) or "").upper()
-    if "WALL" in obj_name:
+    if any(k in obj_name for k in _TEKLA_WALL_NAME_KEYS):
         return True
     profile_h = _tekla_profile_height(getattr(obj, "profile", None) or "")
     if profile_h is not None:

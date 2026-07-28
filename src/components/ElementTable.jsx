@@ -448,7 +448,12 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
                                             style={{ maxWidth: col.width }}
                                             title={typeof value === 'string' ? value : ''}
                                         >
-                                            {value || '-'}
+                                            {/* value || '-' rendered legitimate 0/false property
+                                                values (e.g. a boolean IFC property like
+                                                IsExternal: false, or a genuinely-zero dimension)
+                                                identically to a missing value — only nullish/empty
+                                                should fall back to the placeholder. */}
+                                            {(value === null || value === undefined || value === '') ? '-' : String(value)}
                                         </td>
                                     )
                                 })}

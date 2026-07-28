@@ -5,7 +5,10 @@
   <meta charset="UTF-8" />
   <link rel="icon" type="image/x-icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover opts into safe-area-inset-* env() variables — without
+       it, bottom-anchored floating widgets (FAB, chat, BCF panel) have no way
+       to avoid sitting under the iOS home-indicator/gesture bar on notched devices. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Converge</title>
   <!-- Inter — Speckle's official typeface -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />

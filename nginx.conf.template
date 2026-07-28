@@ -14,6 +14,23 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    # index.html doesn't carry a content hash, so without an explicit
+    # Cache-Control a browser's heuristic freshness (RFC 7234 4.2.2, keyed
+    # off Last-Modified) can treat a stale copy as "fresh enough" and skip
+    # revalidation entirely after a rebuild — this bit us: the dashboard only
+    # loaded correctly in incognito (empty cache) until this was added.
+    # no-cache still allows caching, it just forces an If-None-Match/ETag
+    # revalidation on every load, so a rebuilt page is always picked up.
+    # Hashed asset filenames (Vite's default assetsDir) never change content
+    # under the same name, so those get the opposite: cached forever.
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
     # Proxy normalizer requests to bim-normalizer
     location /normalizer/ {
         proxy_pass ${NORMALIZER_URL};

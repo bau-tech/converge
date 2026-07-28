@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from db.jobs import create_job, update_job, get_job, prune_jobs
+from job_registry import fire_and_forget
+from process_pool import run_cpu_bound
 from routers.ifc_export import resolve_model_ifc_bytes
 
 router = APIRouter(tags=["clash-check"])
@@ -70,7 +72,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
                     "Clash check job %s: checking %s (%s) against %s (%s)",
                     job_id, model_id, ifc_source_a, body.compare_model_id, ifc_source_b,
                 )
-                results = await asyncio.to_thread(
+                results = await run_cpu_bound(
                     run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, rule_dicts,
                     ifc_source_a == "synthetic_export", ifc_source_b == "synthetic_export",
                 )
@@ -105,7 +107,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
             )
 
             logger.info("Clash check job %s: checking against %s (%d bytes)", job_id, ifc_source, len(ifc_bytes))
-            results = await asyncio.to_thread(
+            results = await run_cpu_bound(
                 run_clash_checks, ifc_bytes, rule_dicts,
                 ifc_source == "synthetic_export",
             )
@@ -126,7 +128,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
             finally:
                 release_conn(conn2)
 
-    asyncio.create_task(_run())
+    fire_and_forget(_run())
     return {"job_id": job_id, "status": "pending"}
 
 

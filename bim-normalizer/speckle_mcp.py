@@ -9,6 +9,8 @@ A single MCP server combining:
 
   Speckle server tools  (GraphQL → https://speckle.example.com)
     speckle_list_projects / speckle_list_models / speckle_list_versions
+    speckle_delete_project / speckle_delete_model / speckle_delete_version
+                                 permanent deletes — require confirm=True
 
   Normalizer tools  (REST API at NORMALIZER_URL)
     speckle_list_ingested / speckle_get_summary / speckle_query_elements
@@ -18,10 +20,16 @@ A single MCP server combining:
   Intelligence tools
     speckle_get_object          raw Speckle object properties (streaming, first object only)
     speckle_element_detail      full element: geometry quantities + all parameter sets
+    speckle_element_relationships  parent/room/space links resolved at ingest time (no IFC load needed)
     speckle_diff_models         added/removed/changed elements + per-category deltas
     speckle_qa_check            0-1 quality score: names, storeys, geometry, materials, duplicates
     speckle_compare_categories  side-by-side category table for up to 6 models
     speckle_find_element        name search across all ingested models
+    ifc_dependency_graph        multi-hop IFC relationship traversal (aggregation, containment,
+                                 connections, openings) from a given element — requires a loaded model
+    speckle_detect_anomalies    statistical outliers in volume/area vs. peers in the same group
+    speckle_suggest_classification  suggest ifc_class/category for an unclassified element via its
+                                 nearest already-classified semantic-search neighbors
 
   ifc5d / 5D quantity tools  (cost estimation & Bill of Quantities)
     ifc5d_quantities            IfcElementQuantity takeoff from the loaded IFC (volume/area per group)
@@ -29,18 +37,42 @@ A single MCP server combining:
     ifc5d_boq_export            export BoQ to ODS (via ifc5d) or CSV fallback
     speckle_quantities          DB-backed quantity takeoff — no IFC load needed
 
+  Documents / CDE tools  (Nextcloud-backed workflow, session-login required)
+    speckle_list_documents / speckle_document_detail / speckle_upload_document
+    speckle_move_document        WIP -> Shared -> Published -> Archived
+    speckle_set_document_review / _approval / _verification   the three ISO 19650 gates
+    speckle_link_document_topic / speckle_link_document_element
+    speckle_delete_document       soft-delete (tombstone, not permanent)
+
+  BCF tools  (bcf-server — coordination issues, Bearer BCF_API_KEY auth)
+    speckle_list_topics / speckle_topic_detail / speckle_create_topic / speckle_update_topic
+    speckle_list_comments / speckle_add_comment
+    speckle_list_viewpoints
+
+  IDS compliance tools  (buildingSMART Information Delivery Specification)
+    speckle_list_ids_specs / speckle_upload_ids_spec / speckle_delete_ids_spec
+    speckle_ids_check            run + wait, same shape as speckle_clash_check
+
 Configuration (env or .env file next to this script):
-  SPECKLE_SERVER_URL  default https://speckle.example.com   (also set in .mcp.json)
-  SPECKLE_TOKEN       personal access token                 (loaded from .env)
-  NORMALIZER_URL      default http://localhost:8002         (also set in .mcp.json)
+  SPECKLE_SERVER_URL      default https://speckle.example.com   (also set in .mcp.json)
+  SPECKLE_TOKEN           personal access token                 (loaded from .env)
+  NORMALIZER_URL          default http://localhost:8002         (also set in .mcp.json)
+  BCF_SERVER_URL          default http://localhost:8004         (bcf-server, for BCF tools)
+  BCF_API_KEY             shared Bearer credential — same var bcf-server itself uses
+  MCP_DASHBOARD_EMAIL/PASSWORD   real bcf_users login for Documents tools — needs
+                          per-project author/reviewer/approver roles for anything
+                          past reads (grant via bcf-server's /admin panel). Falls
+                          back to BCF_ADMIN_EMAIL/BCF_ADMIN_PASSWORD if unset.
 """
 
 import json
 import os
+import statistics
 import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -87,6 +119,30 @@ _MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
 mcp = FastMCP("speckle-ifc")
 
+
+def _requests_with_retry(method: str, url: str, *, retries: int = 2, **kwargs) -> "requests.Response":
+    """
+    Thin wrapper around requests.get/post/put/delete that retries transient
+    connection errors/timeouts with backoff — mirrors _gql's resilience for
+    the Speckle GraphQL API (below), which every direct requests.*(NORMALIZER_
+    URL/BCF_SERVER_URL ...) call elsewhere in this file used to lack entirely:
+    a normalizer restart or brief network blip raised a raw, uncaught
+    exception instead of the clean error message every 4xx/404 status-code
+    check already provides. Does NOT retry on a returned 4xx/5xx status —
+    those are handed back as-is for the caller's existing status-code checks.
+    """
+    fn = getattr(requests, method.lower())
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(url, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_err = exc
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+    raise last_err  # type: ignore[misc]
+
+
 # ── Short-TTL read cache ──────────────────────────────────────────────────────
 # Smooths a burst of related calls within one exchange (e.g. speckle_full_qa_report
 # and a follow-up speckle_investigate_element both hitting /qa or /summary for the
@@ -104,8 +160,13 @@ def _cached_get(url: str, params: dict | None = None, timeout: int = 30) -> "req
     hit = _cache.get(key)
     if hit and now - hit[0] < _CACHE_TTL_S:
         return hit[1]
-    resp = requests.get(url, params=params, timeout=timeout)
-    _cache[key] = (now, resp)
+    resp = _requests_with_retry("GET", url, params=params, timeout=timeout)
+    # Only cache success responses — caching a transient 4xx/5xx (a brief DB
+    # hiccup, a momentary backend restart) meant any retry of the exact same
+    # call within the 45s TTL kept returning the same stale failure instead
+    # of getting a chance to hit a now-healthy backend.
+    if resp.ok:
+        _cache[key] = (now, resp)
     return resp
 
 
@@ -158,6 +219,34 @@ _tmp_path: str | None = None  # temp IFC written by speckle_load; cleaned up on 
 _model_lock = threading.RLock()  # guards all writes to the three globals above
 
 
+# ── Optional file-path sandbox ────────────────────────────────────────────────
+# By default (MCP_ALLOWED_FILE_ROOT unset) this server can read/write any path
+# the process has access to — the expected behavior for the common case of a
+# single trusted developer running it locally via Claude Desktop over stdio.
+# Set MCP_ALLOWED_FILE_ROOT to confine ifc_load/ifc_save/speckle_export_csv/
+# speckle_upload_document/speckle_upload_ids_spec to that directory (and its
+# subdirectories) — recommended for any streamable-http/SSE deployment reachable
+# by less-trusted clients, since those tools otherwise let a client read or
+# write any file the server process can reach.
+_ALLOWED_FILE_ROOT = os.getenv("MCP_ALLOWED_FILE_ROOT", "")
+
+
+def _check_path_allowed(path: str) -> str | None:
+    """Returns an error message if path falls outside _ALLOWED_FILE_ROOT (when
+    set), else None. Resolves symlinks/`..` so a path can't escape the root
+    through a relative traversal or a symlinked directory."""
+    if not _ALLOWED_FILE_ROOT or not path:
+        return None
+    root = os.path.realpath(_ALLOWED_FILE_ROOT)
+    resolved = os.path.realpath(path)
+    if resolved != root and not resolved.startswith(root + os.sep):
+        return (
+            f"Path {path!r} is outside the allowed directory ({_ALLOWED_FILE_ROOT!r}). "
+            "This server has MCP_ALLOWED_FILE_ROOT set, restricting file access to that directory."
+        )
+    return None
+
+
 def _require_model() -> "ifcopenshell.file":
     with _model_lock:
         if _model is None:
@@ -194,10 +283,22 @@ def _gql(query: str, variables: dict | None = None, _retries: int = 2) -> dict:
     raise last_err  # type: ignore[misc]
 
 
+class _OriginalBlobFetchError(Exception):
+    """Raised when reaching/parsing the Speckle blob API itself fails
+    (network error, expired token, malformed GraphQL response) — distinct
+    from _download_original_ifc_blob returning None, which means the
+    request succeeded and this stream simply has no IFC blob. Callers used
+    to see both cases as an identical None and silently fall through to the
+    slower normalizer re-export with no indication the fast path was
+    actually broken, not just unavailable."""
+
+
 def _download_original_ifc_blob(stream_id: str) -> bytes | None:
     """
     Query the Speckle server for IFC blobs on a stream and return the raw bytes
-    of the most recent successfully uploaded one.  Returns None if none found.
+    of the most recent successfully uploaded one. Returns None if the stream
+    genuinely has none. Raises _OriginalBlobFetchError if reaching or parsing
+    the Speckle API itself fails.
     """
     if not _SPECKLE_TOKEN:
         return None
@@ -229,8 +330,8 @@ def _download_original_ifc_blob(stream_id: str) -> bytes | None:
         )
         resp.raise_for_status()
         return resp.content
-    except Exception:
-        return None
+    except Exception as exc:
+        raise _OriginalBlobFetchError(str(exc)) from exc
 
 
 def _psets_for(model: "ifcopenshell.file", el: "ifcopenshell.entity_instance") -> dict:
@@ -281,6 +382,9 @@ def ifc_new(schema: str = "IFC4") -> str:
 def ifc_load(path: str) -> str:
     """Load an IFC file from disk into the in-memory model."""
     global _model, _model_source
+    denied = _check_path_allowed(path)
+    if denied:
+        return denied
     with _model_lock:
         try:
             m = ifcopenshell.open(path)
@@ -318,6 +422,9 @@ def ifc_save(path: str = "") -> str:
         target = path or (_model_source if _model_source and not _model_source.startswith("speckle:") else "")
         if not target:
             raise ValueError("Provide a path — model was not loaded from disk.")
+        denied = _check_path_allowed(target)
+        if denied:
+            return denied
         m.write(target)
     return f"Saved to {target!r}."
 
@@ -462,6 +569,138 @@ def ifc_materials() -> str:
     return "\n".join(lines)
 
 
+# Relationship types walked by ifc_dependency_graph, each as
+# (ifc_class, relating_attr, related_attr, relating_role_label, related_role_label).
+# related_attr may hold a single entity or a list — both are handled uniformly.
+# Every relationship becomes two labeled directed edges (relating->related and
+# related->relating) so a plain BFS can walk the whole graph without needing
+# separate "upstream"/"downstream" logic per relationship type — the label on
+# each edge already says which role the neighbor plays.
+_IFC_GRAPH_REL_TYPES = [
+    ("IfcRelAggregates", "RelatingObject", "RelatedObjects", "has part", "is part of"),
+    ("IfcRelNests", "RelatingObject", "RelatedObjects", "nests", "is nested in"),
+    ("IfcRelContainedInSpatialStructure", "RelatingStructure", "RelatedElements", "contains", "is contained in"),
+    ("IfcRelConnectsElements", "RelatingElement", "RelatedElement", "connects to", "connects to"),
+    ("IfcRelVoidsElement", "RelatingBuildingElement", "RelatedOpeningElement", "has opening", "voids"),
+    ("IfcRelFillsElement", "RelatingOpeningElement", "RelatedBuildingElement", "is filled by", "fills"),
+]
+
+
+def _build_ifc_graph_edges(m: "ifcopenshell.file") -> dict:
+    """One pass over the loaded model building an undirected-for-traversal
+    adjacency map keyed by entity STEP id: {step_id: [(other_step_id, label), ...]}."""
+    edges: dict = {}
+    for ifc_class, relating_attr, related_attr, relating_label, related_label in _IFC_GRAPH_REL_TYPES:
+        for rel in m.by_type(ifc_class):
+            relating = getattr(rel, relating_attr, None)
+            related = getattr(rel, related_attr, None)
+            if relating is None or related is None or not hasattr(relating, "id"):
+                continue
+            related_list = related if isinstance(related, (list, tuple)) else [related]
+            for r in related_list:
+                if not hasattr(r, "id"):
+                    continue
+                edges.setdefault(relating.id(), []).append((r.id(), relating_label))
+                edges.setdefault(r.id(), []).append((relating.id(), related_label))
+    return edges
+
+
+@mcp.tool()
+def ifc_dependency_graph(element_id: str, max_depth: int = 2) -> str:
+    """
+    Trace an element's connections through the loaded IFC model's actual
+    relationship graph — aggregation/decomposition, spatial containment,
+    physical connections (IfcRelConnectsElements), and openings — walking
+    outward up to max_depth hops. Unlike ifc_relations() (that element's own
+    direct attributes, one hop only), this answers "what's connected to/
+    contains/depends on this, possibly through an intermediate element" by
+    grouping results by hop distance.
+
+    element_id: the DB element_id UUID — same vocabulary as every other
+    speckle_* tool. Resolved to the loaded IFC entity via its GlobalId
+    (stored as application_id) — only works for IFC-sourced models where
+    application_id IS the GlobalId (same limitation speckle_load's filtered-
+    model rebuild has); Revit-sourced models will not resolve.
+    Requires a model already loaded via speckle_load(model_id) or
+    ifc_load(path) — call one of those first.
+
+    max_depth: relationship hops to follow outward (default 2, clamped to
+    1-4 — this can grow large fast in a densely-connected model).
+    """
+    m = _require_model()
+    max_depth = max(1, min(max_depth, 4))
+
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
+    if resp.status_code == 404:
+        return f"Element {element_id} not found. Use speckle_query_elements() to find element IDs."
+    resp.raise_for_status()
+    d = resp.json()
+    guid = d.get("application_id")
+    if not guid:
+        return f"Element {element_id} has no application_id (GlobalId) stored — cannot resolve it in the loaded IFC model."
+
+    # speckle_load's fast path (original IFC blob from Speckle) preserves the
+    # real GlobalId, so try that first. But its fallback path — re-exporting
+    # from the normalizer DB (ifc/export.py) — always mints a *fresh* random
+    # GlobalId for every element and stores the original application_id only
+    # in that entity's Tag attribute instead (never as GlobalId). A model
+    # loaded via that fallback would never resolve through by_guid() alone,
+    # so fall back to scanning by Tag before giving up.
+    try:
+        start = m.by_guid(guid)
+    except Exception:
+        start = next(
+            (el for el in m.by_type("IfcElement") if getattr(el, "Tag", None) == guid),
+            None,
+        )
+    if start is None:
+        return (
+            f"No entity matching application_id {guid!r} (checked both GlobalId and Tag) found in the "
+            "currently loaded IFC model. Make sure speckle_load(model_id) was called for the model this "
+            "element belongs to, and that it's an IFC-sourced model."
+        )
+
+    edges = _build_ifc_graph_edges(m)
+
+    # BFS by hop distance: visited maps entity STEP id -> (depth, via_label, from_step_id)
+    visited = {start.id(): (0, None, None)}
+    frontier = [start.id()]
+    for depth in range(1, max_depth + 1):
+        next_frontier = []
+        for eid in frontier:
+            for other_id, label in edges.get(eid, []):
+                if other_id in visited:
+                    continue
+                visited[other_id] = (depth, label, eid)
+                next_frontier.append(other_id)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
+    def _label(ent) -> str:
+        return f"{ent.is_a()} '{getattr(ent, 'Name', '') or '(unnamed)'}'"
+
+    if len(visited) == 1:
+        return f"{_label(start)} has no traceable relationships in the loaded model."
+
+    by_depth: dict = {}
+    for eid, (depth, label, from_eid) in visited.items():
+        if depth == 0:
+            continue
+        by_depth.setdefault(depth, []).append((eid, label, from_eid))
+
+    lines = [f"Dependency graph from {_label(start)} (#{start.id()}):"]
+    for depth in sorted(by_depth):
+        entries = by_depth[depth]
+        lines.append(f"\n  Hop {depth} ({len(entries)}):")
+        for eid, label, from_eid in entries[:40]:
+            lines.append(f"    {_label(m.by_id(eid))}  [{label}]  {_label(m.by_id(from_eid))}")
+        if len(entries) > 40:
+            lines.append(f"    ... and {len(entries) - 40} more at this hop")
+
+    return "\n".join(lines)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SPECKLE SERVER TOOLS  (GraphQL)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -531,6 +770,97 @@ def speckle_list_versions(project_id: str, model_name: str, limit: int = 10) -> 
     return "\n".join(lines)
 
 
+def _confirm_or_refuse(kind: str, target: str, confirm: bool, warning: str) -> str | None:
+    """Shared guard for the three speckle_delete_* mutations below: returns a
+    refusal message if confirm is False, else None (caller proceeds)."""
+    if confirm:
+        return None
+    return (
+        f"Refusing to delete {kind} {target} without confirm=True. {warning} "
+        "Re-call with confirm=True to proceed."
+    )
+
+
+@mcp.tool()
+def speckle_delete_project(project_id: str, confirm: bool = False) -> str:
+    """
+    PERMANENTLY delete a Speckle project (stream) — all its models, versions,
+    comments, and webhooks go with it. Cannot be undone.
+    Refuses unless called with confirm=True (first call without it to see the
+    warning; re-call with confirm=True once you're sure).
+    Use speckle_list_projects() to find project_id.
+    """
+    refusal = _confirm_or_refuse(
+        "project", project_id, confirm,
+        "This permanently deletes the project and ALL its models, versions, and comments — irreversible.",
+    )
+    if refusal:
+        return refusal
+    _gql("""
+        mutation($id: String!) {
+            projectMutations { delete(id: $id) }
+        }
+    """, {"id": project_id})
+    return f"Project {project_id} permanently deleted."
+
+
+@mcp.tool()
+def speckle_delete_model(project_id: str, model_name: str, confirm: bool = False) -> str:
+    """
+    PERMANENTLY delete a model (branch) from a project, including all of its
+    versions. Cannot be undone.
+    Refuses unless called with confirm=True (first call without it to see the
+    warning; re-call with confirm=True once you're sure).
+    Use speckle_list_models(project_id) to find model_name.
+    """
+    refusal = _confirm_or_refuse(
+        "model", f"'{model_name}' in project {project_id}", confirm,
+        "This permanently deletes the model and all its versions — irreversible.",
+    )
+    if refusal:
+        return refusal
+    data = _gql("""
+        query($streamId: String!, $branchName: String!) {
+            stream(id: $streamId) { branch(name: $branchName) { id } }
+        }
+    """, {"streamId": project_id, "branchName": model_name})
+    branch = (data.get("stream") or {}).get("branch")
+    if not branch:
+        return f"Model '{model_name}' not found in project {project_id}. Use speckle_list_models() to verify."
+    _gql("""
+        mutation($input: DeleteModelInput!) {
+            modelMutations { delete(input: $input) }
+        }
+    """, {"input": {"projectId": project_id, "id": branch["id"]}})
+    return f"Model '{model_name}' deleted from project {project_id}."
+
+
+@mcp.tool()
+def speckle_delete_version(project_id: str, version_ids: str, confirm: bool = False) -> str:
+    """
+    PERMANENTLY delete one or more versions (commits) from a project. Cannot be undone.
+    version_ids: comma-separated commit ids (e.g. "abc123" or "abc123,def456").
+    Refuses unless called with confirm=True (first call without it to see the
+    warning; re-call with confirm=True once you're sure).
+    Use speckle_list_versions(project_id, model_name) to find version ids (commit_id).
+    """
+    ids = [v.strip() for v in version_ids.split(",") if v.strip()]
+    if not ids:
+        return "version_ids must contain at least one commit id."
+    refusal = _confirm_or_refuse(
+        "version(s)", f"{ids} in project {project_id}", confirm,
+        "This permanently deletes the version(s) — irreversible.",
+    )
+    if refusal:
+        return refusal
+    _gql("""
+        mutation($input: DeleteVersionsInput!) {
+            versionMutations { delete(input: $input) }
+        }
+    """, {"input": {"projectId": project_id, "versionIds": ids}})
+    return f"Deleted {len(ids)} version(s) from project {project_id}: {', '.join(ids)}"
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # NORMALIZER TOOLS  (REST API)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -543,7 +873,7 @@ def speckle_list_ingested() -> str:
     → use model_id with: speckle_get_summary, speckle_query_elements,
       speckle_query_by_parameter, speckle_quantities, speckle_load, speckle_qa_check
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models", timeout=30)
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models", timeout=30)
     resp.raise_for_status()
     models = resp.json()
     if not models:
@@ -603,7 +933,7 @@ def speckle_query_elements(
     if storey:
         params["storey"] = storey
 
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/elements", params=params, timeout=30)
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}/elements", params=params, timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found."
     resp.raise_for_status()
@@ -628,7 +958,7 @@ def speckle_ingest(stream_id: str, commit_id: str) -> str:
     Get stream_id and commit_id from speckle_list_projects / speckle_list_versions.
     → after success, use MODEL_ID with: speckle_load, speckle_query_elements, speckle_get_summary
     """
-    resp = requests.post(
+    resp = _requests_with_retry("POST", 
         f"{_NORMALIZER_URL}/ingest",
         json={"stream_id": stream_id, "commit_id": commit_id},
         timeout=30,
@@ -653,7 +983,7 @@ def speckle_ingest(stream_id: str, commit_id: str) -> str:
     t0 = time.time()
     for attempt in range(120):
         time.sleep(5)
-        poll = requests.get(f"{_NORMALIZER_URL}/ingest/status/{job_id}", timeout=15)
+        poll = _requests_with_retry("GET", f"{_NORMALIZER_URL}/ingest/status/{job_id}", timeout=15)
         poll.raise_for_status()
         status = poll.json()
         if status["status"] == "complete":
@@ -671,7 +1001,6 @@ def speckle_ingest(stream_id: str, commit_id: str) -> str:
     return f"Timed out after 10 minutes waiting for ingest job {job_id}."
 
 
-@mcp.tool()
 def _build_ifc_subset(derived_model_id: str) -> str | None:
     """
     Build a filtered IFC from the in-memory source model containing only the elements
@@ -685,7 +1014,7 @@ def _build_ifc_subset(derived_model_id: str) -> str | None:
     if source_model is None:
         return None
 
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{derived_model_id}/elements/flat",
         params={"limit": 999_999},
         timeout=60,
@@ -700,21 +1029,39 @@ def _build_ifc_subset(derived_model_id: str) -> str | None:
     # Write full source model → temp → reload → remove unwanted elements → save
     with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
         tmp_path = f.name
-    source_model.write(tmp_path)
-    filtered = ifcopenshell.open(tmp_path)
-    removed = 0
-    for el in list(filtered.by_type("IfcElement")):
-        if el.GlobalId not in keep_ids:
-            filtered.remove(el)
-            removed += 1
-    if removed == 0:
-        # No GlobalId match — source is probably not IFC; signal failure
-        os.unlink(tmp_path)
+    try:
+        source_model.write(tmp_path)
+        filtered = ifcopenshell.open(tmp_path)
+        all_elements = list(filtered.by_type("IfcElement"))
+        # Matched (not "removed") is the right signal for "source is IFC and
+        # keep_ids overlaps it" — removed == 0 also happens legitimately
+        # when every element in the source already belongs to keep_ids
+        # (nothing needs filtering out), which the old check misread as "no
+        # GlobalId match at all" and discarded a perfectly valid subset for.
+        matched = sum(1 for el in all_elements if el.GlobalId in keep_ids)
+        if matched == 0:
+            # No GlobalId overlap whatsoever — source is probably not IFC; signal failure
+            os.unlink(tmp_path)
+            return None
+        for el in all_elements:
+            if el.GlobalId not in keep_ids:
+                filtered.remove(el)
+        filtered.write(tmp_path)
+        return tmp_path
+    except Exception:
+        # Match the function's own "return None if not possible" contract —
+        # this used to leak tmp_path on any write/open/remove failure and
+        # let the exception propagate uncaught out of speckle_load, turning
+        # what should be a graceful fallback (re-export from the normalizer
+        # instead) into a hard tool failure.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return None
-    filtered.write(tmp_path)
-    return tmp_path
 
 
+@mcp.tool()
 def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
     """
     Export a normalized model as IFC4X3 and load it into the in-memory IFC model.
@@ -729,8 +1076,36 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
     """
     global _model, _model_source, _tmp_path
 
-    # Evict any previous temp file before writing a new one
-    with _model_lock:
+    # The whole function (eviction through final commit) runs under one lock
+    # acquisition, not just the two small blocks that mutate _model/
+    # _model_source/_tmp_path — see the historical note below for why. That
+    # correctly prevents two overlapping loads/resets from interleaving, but
+    # it also means every *other* IFC tool call (ifc_summary, ifc_tree, ...)
+    # blocks for however long this one's multi-minute network fetch/export/
+    # poll takes, with no feedback. A non-blocking acquire turns "silently
+    # hang for up to 3 minutes" into an immediate, actionable message for the
+    # much more likely case (another tool call arriving while a load is
+    # already running) without changing the actual locking semantics at all.
+    if not _model_lock.acquire(blocking=False):
+        return (
+            "Another IFC operation (speckle_load/ifc_load/ifc_reset) is already "
+            "in progress in this session. Wait for it to finish, then retry."
+        )
+    try:
+        # Historical note: previously only two small blocks around the mutation
+        # of _model/_model_source/_tmp_path were locked, and the multi-minute
+        # network fetch/export/poll ran unlocked in between. Two overlapping
+        # speckle_load calls (or a speckle_load racing an ifc_load/ifc_reset)
+        # could interleave: whichever finished last silently won, the other's
+        # temp file was never unlinked (eviction only happened at the *start*
+        # of the *next* call), and its own "Loaded model X" return message no
+        # longer matched the actual in-memory state by the time the caller
+        # read it. Serializing the whole operation is the correct semantic
+        # for this single-shared-session server — you can't sensibly run
+        # another IFC-session tool while a load is replacing the session's
+        # model — the non-blocking acquire above only changes how a *second*
+        # caller finds that out.
+        # Evict any previous temp file before writing a new one
         if _tmp_path:
             try:
                 os.unlink(_tmp_path)
@@ -738,120 +1113,134 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
                 pass
             _tmp_path = None
 
-    # Fetch model metadata so we know the source and stream_id
-    meta_resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}", timeout=15)
-    if meta_resp.status_code == 404:
-        return f"Model {model_id} not found. Run speckle_list_ingested() to see available models."
-    meta_resp.raise_for_status()
-    meta = meta_resp.json()
-    source = (meta.get("source") or "").lower()
-    stream_id = meta.get("stream_id") or ""
+        # Fetch model metadata so we know the source and stream_id
+        meta_resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}", timeout=15)
+        if meta_resp.status_code == 404:
+            return f"Model {model_id} not found. Run speckle_list_ingested() to see available models."
+        meta_resp.raise_for_status()
+        meta = meta_resp.json()
+        source = (meta.get("source") or "").lower()
+        stream_id = meta.get("stream_id") or ""
 
-    # If this model was produced by speckle_filter_publish its source is stored as
-    # "filtered" in the normalizer DB — skip the stream blob (which would return the
-    # full original IFC) and instead build a filtered IFC from the in-memory model.
-    is_derived = source == "filtered"
-    if is_derived:
-        tmp_path = _build_ifc_subset(model_id)
-        if tmp_path:
-            m = ifcopenshell.open(tmp_path)
-            with _model_lock:
+        # If this model was produced by speckle_filter_publish its source is stored as
+        # "filtered" in the normalizer DB — skip the stream blob (which would return the
+        # full original IFC) and instead build a filtered IFC from the in-memory model.
+        is_derived = source == "filtered"
+        if is_derived:
+            tmp_path = _build_ifc_subset(model_id)
+            if tmp_path:
+                m = ifcopenshell.open(tmp_path)
                 _tmp_path = tmp_path
                 _model = m
                 _model_source = f"speckle:{model_id}"
-            count = len(list(m))
-            elements = len(m.by_type("IfcElement"))
-            return (
-                f"Loaded filtered IFC built from source model — {elements} element(s).\n"
-                f"  Schema: {m.schema}\n"
-                f"  Total entities: {count}\n"
-                f"  Temp file: {tmp_path}\n"
-                f"You can now use ifc_summary(), ifc_tree(), ifc_select(), ifc_save(), etc."
-            )
-        # Source model not in memory (session restart) or not IFC — fall through to normalizer export
+                count = len(list(m))
+                elements = len(m.by_type("IfcElement"))
+                return (
+                    f"Loaded filtered IFC built from source model — {elements} element(s).\n"
+                    f"  Schema: {m.schema}\n"
+                    f"  Total entities: {count}\n"
+                    f"  Temp file: {tmp_path}\n"
+                    f"You can now use ifc_summary(), ifc_tree(), ifc_select(), ifc_save(), etc."
+                )
+            # Source model not in memory (session restart) or not IFC — fall through to normalizer export
 
-    # IFC source: try to serve the original file stored on the Speckle server.
-    # Skipped for derived (filter-published) models even when source is not in memory,
-    # so we don't accidentally serve the full original IFC for a filtered model.
-    if not is_derived and "ifc" in source and stream_id:
-        ifc_bytes = _download_original_ifc_blob(stream_id)
-        if ifc_bytes:
-            with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
-                f.write(ifc_bytes)
-                tmp_path = f.name
-            m = ifcopenshell.open(tmp_path)
-            with _model_lock:
+        # IFC source: try to serve the original file stored on the Speckle server.
+        # Skipped for derived (filter-published) models even when source is not in memory,
+        # so we don't accidentally serve the full original IFC for a filtered model.
+        original_blob_warning = None
+        if not is_derived and "ifc" in source and stream_id:
+            try:
+                ifc_bytes = _download_original_ifc_blob(stream_id)
+            except _OriginalBlobFetchError as exc:
+                # Still fall through to the slower re-export below (a working
+                # fallback beats a hard failure), but note the real cause in
+                # the eventual result instead of silently pretending this
+                # stream just has no original blob.
+                ifc_bytes = None
+                original_blob_warning = str(exc)
+            if ifc_bytes:
+                with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
+                    f.write(ifc_bytes)
+                    tmp_path = f.name
+                m = ifcopenshell.open(tmp_path)
                 _tmp_path = tmp_path
                 _model = m
                 _model_source = f"speckle:{model_id}:original"
-            count = len(list(m))
-            elements = len(m.by_type("IfcElement"))
-            return (
-                f"Loaded ORIGINAL IFC from Speckle server (stream {stream_id}).\n"
-                f"  Schema: {m.schema}\n"
-                f"  Total entities: {count}\n"
-                f"  IfcElement instances: {elements}\n"
-                f"  Temp file: {tmp_path}\n"
-                f"You can now use ifc_summary(), ifc_tree(), ifc_select(), etc."
-            )
-        # No blob found on Speckle — fall through to normalizer re-export
+                count = len(list(m))
+                elements = len(m.by_type("IfcElement"))
+                return (
+                    f"Loaded ORIGINAL IFC from Speckle server (stream {stream_id}).\n"
+                    f"  Schema: {m.schema}\n"
+                    f"  Total entities: {count}\n"
+                    f"  IfcElement instances: {elements}\n"
+                    f"  Temp file: {tmp_path}\n"
+                    f"You can now use ifc_summary(), ifc_tree(), ifc_select(), etc."
+                )
+            # No blob found on Speckle — fall through to normalizer re-export
 
-    # Start async export job
-    resp = requests.post(
-        f"{_NORMALIZER_URL}/models/{model_id}/export/ifc",
-        params={"coord_unit": coord_unit},
-        timeout=30,
-    )
-    if resp.status_code == 404:
-        return f"Model {model_id} not found. Run speckle_list_ingested() to see available models."
-    resp.raise_for_status()
-    job = resp.json()
-    job_id = job["job_id"]
-
-    # Poll for completion
-    for _ in range(60):   # up to 3 minutes
-        time.sleep(3)
-        sr = requests.get(
-            f"{_NORMALIZER_URL}/models/{model_id}/export/ifc/{job_id}/status",
-            timeout=15,
+        # Start async export job
+        resp = _requests_with_retry("POST", 
+            f"{_NORMALIZER_URL}/models/{model_id}/export/ifc",
+            params={"coord_unit": coord_unit},
+            timeout=30,
         )
-        sr.raise_for_status()
-        s = sr.json()
-        if s["status"] == "complete":
-            break
-        if s["status"] == "failed":
-            return f"IFC export failed: {s.get('error')}"
-    else:
-        return "IFC export timed out after 3 minutes."
+        if resp.status_code == 404:
+            return f"Model {model_id} not found. Run speckle_list_ingested() to see available models."
+        resp.raise_for_status()
+        job = resp.json()
+        job_id = job["job_id"]
 
-    # Download IFC bytes
-    dl = requests.get(
-        f"{_NORMALIZER_URL}/models/{model_id}/export/ifc/{job_id}/download",
-        timeout=120,
-    )
-    dl.raise_for_status()
+        # Poll for completion
+        for _ in range(60):   # up to 3 minutes
+            time.sleep(3)
+            sr = _requests_with_retry("GET", 
+                f"{_NORMALIZER_URL}/models/{model_id}/export/ifc/{job_id}/status",
+                timeout=15,
+            )
+            sr.raise_for_status()
+            s = sr.json()
+            if s["status"] == "complete":
+                break
+            if s["status"] == "failed":
+                return f"IFC export failed: {s.get('error')}"
+        else:
+            return "IFC export timed out after 3 minutes."
 
-    # Write to temp file (ifcopenshell.open requires a path)
-    with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
-        f.write(dl.content)
-        tmp_path = f.name
+        # Download IFC bytes
+        dl = _requests_with_retry("GET", 
+            f"{_NORMALIZER_URL}/models/{model_id}/export/ifc/{job_id}/download",
+            timeout=120,
+        )
+        dl.raise_for_status()
 
-    m = ifcopenshell.open(tmp_path)
-    with _model_lock:
+        # Write to temp file (ifcopenshell.open requires a path)
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False, dir=tempfile.gettempdir()) as f:
+            f.write(dl.content)
+            tmp_path = f.name
+
+        m = ifcopenshell.open(tmp_path)
         _tmp_path = tmp_path
         _model = m
         _model_source = f"speckle:{model_id}"
 
-    count = len(list(m))
-    elements = len(m.by_type("IfcElement"))
-    return (
-        f"Loaded model {model_id} into memory.\n"
-        f"  Schema: {m.schema}\n"
-        f"  Total entities: {count}\n"
-        f"  IfcElement instances: {elements}\n"
-        f"  Temp file: {tmp_path}\n"
-        f"You can now use ifc_summary(), ifc_tree(), ifc_select('IfcWall'), etc."
-    )
+        count = len(list(m))
+        elements = len(m.by_type("IfcElement"))
+        warning_note = (
+            f"  Note: fast-path original-IFC fetch failed ({original_blob_warning}); "
+            f"re-exported from the normalizer instead.\n"
+            if original_blob_warning else ""
+        )
+        return (
+            f"Loaded model {model_id} into memory.\n"
+            f"  Schema: {m.schema}\n"
+            f"  Total entities: {count}\n"
+            f"  IfcElement instances: {elements}\n"
+            f"  Temp file: {tmp_path}\n"
+            f"{warning_note}"
+            f"You can now use ifc_summary(), ifc_tree(), ifc_select('IfcWall'), etc."
+        )
+    finally:
+        _model_lock.release()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -912,7 +1301,7 @@ def speckle_element_detail(element_id: str) -> str:
     (volume, area, centroid) and all stored parameters grouped by property set.
     Use the element_id UUID from speckle_query_elements() results.
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
     if resp.status_code == 404:
         return f"Element {element_id} not found. Use speckle_query_elements() to find element IDs."
     resp.raise_for_status()
@@ -949,6 +1338,39 @@ def speckle_element_detail(element_id: str) -> str:
 
 
 @mcp.tool()
+def speckle_element_relationships(element_id: str) -> str:
+    """
+    Elements directly related to element_id via parent/room/space references
+    (e.g. a device's host wall, the room/space it's located in, or everything
+    hosted by/located in a given element) — resolved at ingest time from
+    Revit's parentApplicationId/roomApplicationId/spaceApplicationId fields.
+    Use the element_id UUID from speckle_query_elements() results.
+
+    Returns nothing for models ingested before this existed, IFC-sourced
+    models without equivalent references, or where the referenced elements
+    (e.g. Rooms/Spaces) weren't themselves ingested as elements.
+    """
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/elements/{element_id}/relationships", timeout=30)
+    if resp.status_code == 404:
+        return f"Element {element_id} not found. Use speckle_query_elements() to find element IDs."
+    resp.raise_for_status()
+    rels = resp.json()
+    if not rels:
+        return (
+            f"No relationships found for element {element_id}. This only reflects parent/room/space "
+            "references captured at ingest time — the model may not have that data."
+        )
+    lines = [f"{len(rels)} relationship(s) for element {element_id}:"]
+    for r in rels:
+        arrow = "->" if r.get("direction") == "outgoing" else "<-"
+        lines.append(
+            f"  [{r.get('relation_type', '?')}] {arrow} {r.get('name') or '(unnamed)'} "
+            f"[{r.get('ifc_class', '?')}/{r.get('category', '?')}]  speckle_id={r.get('speckle_id', '')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def speckle_diff_models(model_id_a: str, model_id_b: str) -> str:
     """
     Compare two normalized models. model_id_a = baseline (older), model_id_b = current (newer).
@@ -956,7 +1378,7 @@ def speckle_diff_models(model_id_a: str, model_id_b: str) -> str:
     and a sample of changed elements.
     Use speckle_list_ingested() to find model IDs.
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/diff/{model_id_a}/{model_id_b}", timeout=30)
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/diff/{model_id_a}/{model_id_b}", timeout=30)
     if resp.status_code == 404:
         return "One or both models not found. Use speckle_list_ingested() to verify model IDs."
     resp.raise_for_status()
@@ -1076,16 +1498,22 @@ def speckle_compare_categories(model_ids: str) -> str:
     if len(ids) > 6:
         return f"Maximum 6 models for comparison — got {len(ids)}. Trim the list."
 
+    # Fetched in parallel (mirrors speckle_find_element below) — sequential
+    # fetches meant comparing 6 models took ~6x one model's round-trip time
+    # for no reason, since each fetch is independent.
+    def _fetch_summary(mid: str):
+        return mid, _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{mid}/summary", timeout=30)
+
     summaries: dict = {}
     labels: dict = {}
-    for mid in ids:
-        resp = requests.get(f"{_NORMALIZER_URL}/models/{mid}/summary", timeout=30)
-        if resp.status_code == 404:
-            return f"Model {mid} not found. Use speckle_list_ingested() to verify."
-        resp.raise_for_status()
-        s = resp.json()
-        summaries[mid] = s
-        labels[mid] = s.get("branch_name") or mid[:8]
+    with ThreadPoolExecutor(max_workers=len(ids)) as pool:
+        for mid, resp in pool.map(_fetch_summary, ids):
+            if resp.status_code == 404:
+                return f"Model {mid} not found. Use speckle_list_ingested() to verify."
+            resp.raise_for_status()
+            s = resp.json()
+            summaries[mid] = s
+            labels[mid] = s.get("branch_name") or mid[:8]
 
     all_cats: set[str] = set()
     for s in summaries.values():
@@ -1136,13 +1564,13 @@ def speckle_find_element(query: str, model_id: str = "") -> str:
     if model_id:
         search_ids = [model_id]
     else:
-        resp = requests.get(f"{_NORMALIZER_URL}/models", timeout=30)
+        resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models", timeout=30)
         resp.raise_for_status()
         search_ids = [m["model_id"] for m in resp.json()]
 
     def _fetch_model(mid: str) -> list:
         try:
-            r = requests.get(
+            r = _requests_with_retry("GET", 
                 f"{_NORMALIZER_URL}/models/{mid}/elements",
                 params={"name": query, "limit": 25},
                 timeout=30,
@@ -1153,18 +1581,27 @@ def speckle_find_element(query: str, model_id: str = "") -> str:
             pass
         return []
 
+    searched_ids = search_ids[:10]
     results: list = []
     with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_fetch_model, mid): mid for mid in search_ids[:10]}
+        futures = {pool.submit(_fetch_model, mid): mid for mid in searched_ids}
         for fut in as_completed(futures):
             results.extend(fut.result())
             if len(results) >= 100:
                 break
 
+    # Report how many models were actually searched, not how many exist —
+    # when model_id isn't given this silently caps at 10, and reporting
+    # len(search_ids) here implied full coverage even when it skipped models.
+    coverage_note = (
+        f" (searched {len(searched_ids)} of {len(search_ids)} ingested models — "
+        "pass model_id to check a specific one not in the first 10)"
+        if len(search_ids) > len(searched_ids) else ""
+    )
     if not results:
-        return f"No elements matching '{query}' found across {len(search_ids)} model(s)."
+        return f"No elements matching '{query}' found across {len(searched_ids)} model(s){coverage_note}."
 
-    lines = [f"{len(results)} element(s) matching '{query}':"]
+    lines = [f"{len(results)} element(s) matching '{query}'{coverage_note}:"]
     for e in results[:30]:
         lines.append(
             f"  [{e.get('ifc_class', '?')}] {e.get('name', '(unnamed)')}"
@@ -1174,6 +1611,90 @@ def speckle_find_element(query: str, model_id: str = "") -> str:
         )
     if len(results) > 30:
         lines.append(f"  ... and {len(results) - 30} more (narrow the query or specify model_id)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_detect_anomalies(
+    model_id: str, group_by: str = "category", metric: str = "volume_m3", threshold: float = 3.5,
+) -> str:
+    """
+    Flag elements whose volume or area is a statistical outlier compared to
+    other elements in the same category/ifc_class/storey — catches modeling
+    mistakes (a wall accidentally 100x too thick, a slab with near-zero area
+    from a bad extrusion) that speckle_qa_check's completeness checks miss
+    entirely, since a value can be present and non-null while still being
+    wildly wrong for what it is.
+
+    group_by: 'category' (default), 'ifc_class', or 'storey' — elements are
+    only compared against peers in the same group (a column isn't judged
+    against a wall's typical volume).
+    metric: 'volume_m3' (default) or 'area_m2'.
+    threshold: modified z-score cutoff (default 3.5, the standard Iglewicz &
+    Hoaglin outlier rule-of-thumb) — lower = more sensitive, more results.
+
+    Uses median + median-absolute-deviation rather than mean/stdev, since a
+    single extreme value would otherwise skew the mean/stdev it's being
+    compared against — the whole point is finding that value.
+
+    Use speckle_list_ingested() to find model_id values.
+    → feeds: speckle_element_detail(element_id) to inspect a flagged element
+    """
+    if metric not in ("volume_m3", "area_m2"):
+        return "metric must be 'volume_m3' or 'area_m2'."
+    if group_by not in ("category", "ifc_class", "storey"):
+        return "group_by must be 'category', 'ifc_class', or 'storey'."
+
+    resp = _requests_with_retry(
+        "GET", f"{_NORMALIZER_URL}/models/{model_id}/elements/flat",
+        params={"limit": 999_999}, timeout=60,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    elements = resp.json().get("elements", [])
+    if not elements:
+        return "No elements found for this model."
+
+    groups: dict = {}
+    for e in elements:
+        val = e.get(metric)
+        if val is None:
+            continue
+        key = e.get(group_by) or "Unknown"
+        groups.setdefault(key, []).append(e)
+
+    anomalies = []
+    for key, els in groups.items():
+        if len(els) < 5:
+            continue  # too few peers for a meaningful baseline
+        vals = [float(e[metric]) for e in els]
+        median = statistics.median(vals)
+        mad = statistics.median(abs(v - median) for v in vals)
+        if mad == 0:
+            continue  # every value in this group is identical (or near it) — nothing to compare against
+        for e, v in zip(els, vals):
+            mz = 0.6745 * (v - median) / mad
+            if abs(mz) >= threshold:
+                anomalies.append((e, key, v, median, mz))
+
+    if not anomalies:
+        return (
+            f"No {metric} outliers found (threshold={threshold}) across "
+            f"{len(groups)} {group_by} group(s), {len(elements)} elements total."
+        )
+
+    anomalies.sort(key=lambda a: -abs(a[4]))
+    lines = [f"{len(anomalies)} {metric} outlier(s) found, grouped by {group_by} (threshold={threshold}):"]
+    for e, key, v, median, mz in anomalies[:40]:
+        direction = "HIGH" if mz > 0 else "LOW"
+        lines.append(
+            f"  [{direction}] {key}: {e.get('name') or '(unnamed)'}  "
+            f"{metric}={v:.3f} vs group median={median:.3f}  (z={mz:.1f})  "
+            f"element_id={e.get('element_id', '')}"
+        )
+    if len(anomalies) > 40:
+        lines.append(f"  ... and {len(anomalies) - 40} more")
     return "\n".join(lines)
 
 
@@ -1224,6 +1745,106 @@ def speckle_semantic_search(model_id: str, query: str, limit: int = 10) -> str:
             f"  score={e.get('score')}"
             f"  element_id={e.get('element_id', '')}"
         )
+    return "\n".join(lines)
+
+
+# Matches speckle_qa_check's own definition of "unclassified" (db/query.py's
+# get_model_qa) so this tool and the QA report always agree on which elements
+# actually need a classification suggestion.
+def _is_unclassified_category(category: str | None) -> bool:
+    c = (category or "").strip().lower()
+    return c in ("", "unknown", "generic models")
+
+
+@mcp.tool()
+def speckle_suggest_classification(model_id: str, element_id: str, candidates: int = 15) -> str:
+    """
+    Suggest a likely ifc_class/category for an unclassified element (category
+    is null/'Generic Models'/'Unknown' — the same definition speckle_qa_check
+    flags) by finding its nearest semantic-search neighbors among the model's
+    already well-classified elements and reporting the most common
+    classification among them. Closes the loop between speckle_qa_check /
+    get_qa_elements-equivalent (which only flag unclassified elements) and
+    speckle_set_overrides (which fixes them) — this is the "what should it
+    actually be?" step neither of those answers on its own.
+
+    This is a similarity-based suggestion, not a certainty — sanity-check
+    against the element's own name/geometry before applying it as an override.
+
+    Requires the model to have embeddings (built automatically at ingest —
+    see speckle_semantic_search for troubleshooting "no embeddings yet").
+    → after reviewing: speckle_set_overrides(model_id, ...) then
+      speckle_apply_overrides(model_id)
+    """
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
+    if resp.status_code == 404:
+        return f"Element {element_id} not found. Use speckle_query_elements() to find element IDs."
+    resp.raise_for_status()
+    d = resp.json()
+
+    if not _is_unclassified_category(d.get("category")):
+        return (
+            f"Element {element_id} is already classified as category={d.get('category')!r} "
+            f"ifc_class={d.get('ifc_class')!r} — nothing to suggest."
+        )
+
+    query_parts = [d.get("name") or "", d.get("storey") or ""]
+    for p in (d.get("parameters") or [])[:10]:
+        query_parts.append(f"{p.get('key', '')} {p.get('value', '')}")
+    query_text = " ".join(part for part in query_parts if part).strip()
+    if not query_text:
+        return f"Element {element_id} has no name/storey/parameters to base a suggestion on."
+
+    # Over-fetch since neighbors that are themselves unclassified get dropped below.
+    resp = _requests_with_retry(
+        "GET", f"{_NORMALIZER_URL}/models/{model_id}/elements/semantic-search",
+        params={"query": query_text, "limit": candidates * 3},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    matches = resp.json().get("elements", [])
+    if not matches:
+        return (
+            f"No embeddings found for model {model_id[:8]}... — re-ingest to build them "
+            "(see speckle_semantic_search)."
+        )
+
+    classified = [
+        m for m in matches
+        if m.get("element_id") != element_id and not _is_unclassified_category(m.get("category"))
+    ][:candidates]
+    if not classified:
+        return (
+            f"Found similar elements for '{query_text[:60]}...' but none are classified either — "
+            "not enough well-classified peers in this model to base a suggestion on."
+        )
+
+    cat_votes = Counter(m["category"] for m in classified if m.get("category"))
+    class_votes = Counter(m["ifc_class"] for m in classified if m.get("ifc_class"))
+    top_cat, cat_count = cat_votes.most_common(1)[0]
+    top_class, class_count = class_votes.most_common(1)[0] if class_votes else (None, 0)
+
+    lines = [
+        f"Suggested classification for element {element_id} (based on: '{query_text[:80]}'):",
+        f"  category:  {top_cat}  ({cat_count}/{len(classified)} similar classified elements agree)",
+    ]
+    if top_class:
+        lines.append(f"  ifc_class: {top_class}  ({class_count}/{len(classified)} similar classified elements agree)")
+    lines.append(f"\nTop {min(5, len(classified))} similar (already-classified) elements:")
+    for m in classified[:5]:
+        lines.append(
+            f"  score={m.get('score')}  [{m.get('ifc_class', '?')}/{m.get('category', '?')}] "
+            f"{m.get('name') or '(unnamed)'}  storey={m.get('storey') or '?'}"
+        )
+    app_id = d.get("application_id")
+    override_hint = f'"application_id":"{app_id}"' if app_id else f'"speckle_id":"{d.get("speckle_id", "")}"'
+    lines.append(
+        f'\nIf this looks right: speckle_set_overrides(model_id, \'[{{{override_hint},'
+        f'"ifc_class":"{top_class or ""}","category":"{top_cat}"}}]\') '
+        "then speckle_apply_overrides(model_id)."
+    )
     return "\n".join(lines)
 
 
@@ -1537,7 +2158,7 @@ def speckle_quantities(model_id: str, group_by: str = "ifc_class") -> str:
     if group_by not in allowed:
         return f"group_by must be one of: {', '.join(sorted(allowed))}"
 
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/quantities",
         params={"group_by": group_by},
         timeout=30,
@@ -1616,7 +2237,7 @@ def speckle_query_by_parameter(
     Use speckle_parameter_keys(model_id) to discover available keys.
     → feeds: speckle_element_detail(element_id)
     """
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/elements/by-parameter",
         params={"key": key, "value": value, "op": op, "limit": limit},
         timeout=30,
@@ -1624,7 +2245,7 @@ def speckle_query_by_parameter(
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     if resp.status_code == 422:
-        return f"Bad request: {resp.json().get('detail', resp.text)}"
+        return f"Bad request: {_error_detail(resp)}"
     resp.raise_for_status()
     elements = resp.json()
     if not elements:
@@ -1659,7 +2280,7 @@ def speckle_find_nearby(
     params = {"reference": reference, "radius_m": radius_m}
     if category:
         params["category"] = category
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/elements/nearby",
         params=params,
         timeout=30,
@@ -1667,7 +2288,7 @@ def speckle_find_nearby(
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     if resp.status_code == 400:
-        return f"Bad request: {resp.json().get('detail', resp.text)}"
+        return f"Bad request: {_error_detail(resp)}"
     resp.raise_for_status()
     data = resp.json()
     elements = data.get("elements", [])
@@ -1704,11 +2325,11 @@ def _run_clash_and_wait(model_id: str, rules: list, compare_model_id: str = ""):
     if compare_model_id:
         body["compare_model_id"] = compare_model_id
 
-    resp = requests.post(f"{_NORMALIZER_URL}/models/{model_id}/clash-check", json=body, timeout=30)
+    resp = _requests_with_retry("POST", f"{_NORMALIZER_URL}/models/{model_id}/clash-check", json=body, timeout=30)
     if resp.status_code == 404:
         return False, f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     if resp.status_code == 400:
-        return False, f"Bad request: {resp.json().get('detail', resp.text)}"
+        return False, f"Bad request: {_error_detail(resp)}"
     resp.raise_for_status()
     job_id = resp.json().get("job_id")
     if not job_id:
@@ -1716,7 +2337,7 @@ def _run_clash_and_wait(model_id: str, rules: list, compare_model_id: str = ""):
 
     for _ in range(150):  # 150 * 2s = 5 minutes
         time.sleep(2)
-        poll = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/clash-check/{job_id}/status", timeout=15)
+        poll = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}/clash-check/{job_id}/status", timeout=15)
         poll.raise_for_status()
         status = poll.json()
         if status["status"] == "complete":
@@ -1851,7 +2472,7 @@ def speckle_investigate_element(model_id: str, query: str, radius_m: float = 5.0
             resolved = matches[0]
 
     if resolved is None:
-        find_resp = requests.get(
+        find_resp = _requests_with_retry("GET", 
             f"{_NORMALIZER_URL}/models/{model_id}/elements",
             params={"name": query, "limit": 1}, timeout=30,
         )
@@ -1872,7 +2493,7 @@ def speckle_investigate_element(model_id: str, query: str, radius_m: float = 5.0
 
     lines = [f"Investigation: '{query}' → element_id={element_id}", ""]
 
-    detail_resp = requests.get(f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
+    detail_resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/elements/{element_id}", timeout=30)
     speckle_id = resolved.get("speckle_id")
     if detail_resp.status_code == 200:
         d = detail_resp.json()
@@ -1896,7 +2517,7 @@ def speckle_investigate_element(model_id: str, query: str, radius_m: float = 5.0
 
     lines.append("")
     lines.append(f"── Nearby (within {radius_m}m) ──")
-    nearby_resp = requests.get(
+    nearby_resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/elements/nearby",
         params={"reference": speckle_id or query, "radius_m": radius_m}, timeout=30,
     )
@@ -2202,7 +2823,7 @@ def speckle_list_overrides(model_id: str) -> str:
     List all per-element classification overrides stored for a model.
     → after reviewing, apply with: speckle_apply_overrides(model_id)
     """
-    resp = requests.get(f"{_NORMALIZER_URL}/models/{model_id}/overrides", timeout=30)
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}/overrides", timeout=30)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
@@ -2238,7 +2859,7 @@ def speckle_set_overrides(model_id: str, overrides_json: str) -> str:
     if not isinstance(items, list):
         return "overrides_json must be a JSON array."
 
-    resp = requests.post(
+    resp = _requests_with_retry("POST", 
         f"{_NORMALIZER_URL}/models/{model_id}/overrides",
         json=items,
         timeout=30,
@@ -2246,7 +2867,7 @@ def speckle_set_overrides(model_id: str, overrides_json: str) -> str:
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     if resp.status_code == 422:
-        return f"Validation error: {resp.json().get('detail', resp.text)}"
+        return f"Validation error: {_error_detail(resp)}"
     resp.raise_for_status()
     result = resp.json()
     return (
@@ -2263,7 +2884,7 @@ def speckle_apply_overrides(model_id: str) -> str:
     → use after: speckle_set_overrides(model_id, ...)
     → verify with: speckle_query_elements(model_id)
     """
-    resp = requests.post(
+    resp = _requests_with_retry("POST", 
         f"{_NORMALIZER_URL}/models/{model_id}/overrides/apply",
         timeout=30,
     )
@@ -2323,7 +2944,7 @@ def speckle_filter_publish(
         if storey:
             body["storey"] = storey
 
-    resp = requests.post(
+    resp = _requests_with_retry("POST", 
         f"{_NORMALIZER_URL}/models/{model_id}/filter-publish",
         json=body,
         timeout=30,
@@ -2340,7 +2961,7 @@ def speckle_filter_publish(
     t0 = time.time()
     for _ in range(60):
         time.sleep(5)
-        sr = requests.get(f"{_NORMALIZER_URL}/filter-publish/{job_id}/status", timeout=15)
+        sr = _requests_with_retry("GET", f"{_NORMALIZER_URL}/filter-publish/{job_id}/status", timeout=15)
         sr.raise_for_status()
         s = sr.json()
         if s["status"] == "complete":
@@ -2366,7 +2987,7 @@ def classification_reload() -> str:
     the normalizer service. Call this after editing the classification map config files
     to make the new mappings take effect immediately on the next ingest.
     """
-    resp = requests.post(f"{_NORMALIZER_URL}/classification/reload", timeout=15)
+    resp = _requests_with_retry("POST", f"{_NORMALIZER_URL}/classification/reload", timeout=15)
     resp.raise_for_status()
     return "Classification maps reloaded from disk. New mappings apply to all future ingests."
 
@@ -2443,7 +3064,7 @@ def speckle_export_csv(
     if ifc_class: params["ifc_class"] = ifc_class
     if storey:    params["storey"]    = storey
 
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/export/csv",
         params=params,
         timeout=120,
@@ -2455,6 +3076,9 @@ def speckle_export_csv(
 
     if not output_path:
         output_path = os.path.join(tempfile.gettempdir(), f"model_{model_id[:8]}.csv")
+    denied = _check_path_allowed(output_path)
+    if denied:
+        return denied
 
     row_count = 0
     with open(output_path, "wb") as fh:
@@ -2490,7 +3114,7 @@ def speckle_cost_estimate(model_id: str, rates_json: str, group_by: str = "categ
     if not isinstance(rates, list) or not rates:
         return "rates_json must be a non-empty JSON array."
 
-    resp = requests.get(
+    resp = _requests_with_retry("GET", 
         f"{_NORMALIZER_URL}/models/{model_id}/quantities",
         params={"group_by": group_by},
         timeout=30,
@@ -2514,7 +3138,6 @@ def speckle_cost_estimate(model_id: str, rates_json: str, group_by: str = "categ
                 return r
         return None
 
-    currency = rates[0].get("currency", "") if rates else ""
     cost_rows, unmatched = [], []
 
     for row in rows:
@@ -2526,10 +3149,16 @@ def speckle_cost_estimate(model_id: str, rates_json: str, group_by: str = "categ
         unit = rule.get("unit", "count")
         rate = float(rule.get("rate", 0))
         qty  = _qty(row, unit)
-        cost_rows.append((group, qty, unit, rate, qty * rate))
+        # Each matched rule can carry its own currency — used to be taken
+        # only from rates[0] and reused as the label for every row and the
+        # total, which silently summed e.g. EUR concrete rates and USD
+        # steel rates into one number labeled with whichever currency
+        # happened to be first in the list.
+        row_currency = rule.get("currency", "")
+        cost_rows.append((group, qty, unit, rate, qty * rate, row_currency))
 
     cost_rows.sort(key=lambda x: -x[4])
-    total_cost = sum(c[4] for c in cost_rows)
+    currencies_used = {c[5] for c in cost_rows}
 
     W = 36
     lines = [
@@ -2538,14 +3167,24 @@ def speckle_cost_estimate(model_id: str, rates_json: str, group_by: str = "categ
         f"  {'Group':<{W}} {'Quantity':>12}  {'Rate':>10}  {'Cost':>14}",
         "  " + "─" * (W + 42),
     ]
-    for group, qty, unit, rate, cost in cost_rows:
+    for group, qty, unit, rate, cost, row_currency in cost_rows:
         lines.append(
-            f"  {group:<{W}} {qty:>11.2f}{unit}  {rate:>10,.0f}  {cost:>14,.0f} {currency}"
+            f"  {group:<{W}} {qty:>11.2f}{unit}  {rate:>10,.0f}  {cost:>14,.0f} {row_currency}"
         )
-    lines += [
-        "  " + "─" * (W + 42),
-        f"  {'TOTAL':<{W}} {'':>12}  {'':>10}  {total_cost:>14,.0f} {currency}",
-    ]
+    lines.append("  " + "─" * (W + 42))
+    if len(currencies_used) <= 1:
+        total_cost = sum(c[4] for c in cost_rows)
+        total_currency = next(iter(currencies_used), "")
+        lines.append(f"  {'TOTAL':<{W}} {'':>12}  {'':>10}  {total_cost:>14,.0f} {total_currency}")
+    else:
+        # Rates mix currencies — a single summed total would silently add
+        # incompatible units together, so report a subtotal per currency
+        # instead of one (wrong) combined figure.
+        for cur in sorted(currencies_used, key=lambda c: c or ""):
+            subtotal = sum(c[4] for c in cost_rows if c[5] == cur)
+            label = f"TOTAL ({cur or 'no currency'})"
+            lines.append(f"  {label:<{W}} {'':>12}  {'':>10}  {subtotal:>14,.0f} {cur}")
+        lines.append("  (rates use different currencies — no combined total shown)")
     if unmatched:
         lines.append(f"\nNo rate matched for: {', '.join(unmatched[:10])}")
         lines.append("Add matching entries to rates_json to include these groups.")
@@ -2567,7 +3206,7 @@ def speckle_trend_analysis(model_id: str, limit: int = 10) -> str:
     Use speckle_list_ingested() to find model_id values.
     """
     # Resolve stream_id from model metadata
-    meta = requests.get(f"{_NORMALIZER_URL}/models/{model_id}", timeout=15)
+    meta = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}", timeout=15)
     if meta.status_code == 404:
         return f"Model {model_id!r} not found. Use speckle_list_ingested() to verify."
     meta.raise_for_status()
@@ -2576,7 +3215,7 @@ def speckle_trend_analysis(model_id: str, limit: int = 10) -> str:
         return "Could not determine stream_id for this model."
 
     # All ingested versions for this stream (oldest-first from DB)
-    trend = requests.get(f"{_NORMALIZER_URL}/models/trend/{stream_id}", timeout=30)
+    trend = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/trend/{stream_id}", timeout=30)
     trend.raise_for_status()
     versions = trend.json()
     if not versions:
@@ -2588,7 +3227,7 @@ def speckle_trend_analysis(model_id: str, limit: int = 10) -> str:
     # Fetch quantities per version in parallel
     def _fetch_qty(v):
         try:
-            r = requests.get(
+            r = _requests_with_retry("GET", 
                 f"{_NORMALIZER_URL}/models/{v['model_id']}/quantities",
                 params={"group_by": "ifc_class"},
                 timeout=20,
@@ -2649,8 +3288,6 @@ def ifc_write_pset(element_ids: str, pset_name: str, properties: str) -> str:
     Call ifc_save(path) afterwards to persist changes to disk.
     → verify results with: ifc_info(element_id)
     """
-    m = _require_model()
-
     try:
         props = json.loads(properties)
     except json.JSONDecodeError as e:
@@ -2658,45 +3295,57 @@ def ifc_write_pset(element_ids: str, pset_name: str, properties: str) -> str:
     if not isinstance(props, dict) or not props:
         return "properties must be a non-empty JSON object."
 
-    # Resolve target elements
-    if element_ids.strip().lower() == "all":
-        targets = list(m.by_type("IfcElement"))
-    else:
-        try:
-            ids = [int(i.strip()) for i in element_ids.split(",") if i.strip()]
-        except ValueError:
-            return "element_ids must be comma-separated integers or 'all'."
-        targets, missing = [], []
-        for eid in ids:
+    # Unlike ifc_save/ifc_reset/ifc_load/ifc_new (which all reassign the
+    # globals under _model_lock), this used to only take the lock briefly
+    # inside _require_model() and then mutate the returned ifcopenshell.file
+    # object afterwards, unlocked — leaving it racing against a concurrent
+    # ifc_write_pset/ifc_reset/ifc_load, or against any of the read-only
+    # tools iterating the same non-thread-safe object mid-write. Holding the
+    # lock (reentrant, so _require_model()'s own internal acquire is fine)
+    # for the whole read+mutate sequence makes it atomic with every other
+    # tool that touches _model.
+    with _model_lock:
+        m = _require_model()
+
+        # Resolve target elements
+        if element_ids.strip().lower() == "all":
+            targets = list(m.by_type("IfcElement"))
+        else:
             try:
-                targets.append(m.by_id(eid))
-            except Exception:
-                missing.append(eid)
-        if missing:
-            return f"Entity ID(s) not found: {missing}. Use ifc_select() to find valid IDs."
+                ids = [int(i.strip()) for i in element_ids.split(",") if i.strip()]
+            except ValueError:
+                return "element_ids must be comma-separated integers or 'all'."
+            targets, missing = [], []
+            for eid in ids:
+                try:
+                    targets.append(m.by_id(eid))
+                except Exception:
+                    missing.append(eid)
+            if missing:
+                return f"Entity ID(s) not found: {missing}. Use ifc_select() to find valid IDs."
 
-    if not targets:
-        return "No elements matched. Use ifc_select() to find valid element IDs."
+        if not targets:
+            return "No elements matched. Use ifc_select() to find valid element IDs."
 
-    # Build IfcPropertySingleValue list
-    import ifcopenshell.guid as guid
-    ifc_props = [
-        m.createIfcPropertySingleValue(Name=k, NominalValue=m.createIfcLabel(str(v)))
-        for k, v in props.items()
-    ]
+        # Build IfcPropertySingleValue list
+        import ifcopenshell.guid as guid
+        ifc_props = [
+            m.createIfcPropertySingleValue(Name=k, NominalValue=m.createIfcLabel(str(v)))
+            for k, v in props.items()
+        ]
 
-    pset = m.createIfcPropertySet(
-        GlobalId=guid.new(),
-        OwnerHistory=None,
-        Name=pset_name,
-        HasProperties=ifc_props,
-    )
-    m.createIfcRelDefinesByProperties(
-        GlobalId=guid.new(),
-        OwnerHistory=None,
-        RelatedObjects=targets,
-        RelatingPropertyDefinition=pset,
-    )
+        pset = m.createIfcPropertySet(
+            GlobalId=guid.new(),
+            OwnerHistory=None,
+            Name=pset_name,
+            HasProperties=ifc_props,
+        )
+        m.createIfcRelDefinesByProperties(
+            GlobalId=guid.new(),
+            OwnerHistory=None,
+            RelatedObjects=targets,
+            RelatingPropertyDefinition=pset,
+        )
 
     return (
         f"Wrote '{pset_name}' with {len(ifc_props)} properties "
@@ -2704,6 +3353,563 @@ def ifc_write_pset(element_ids: str, pset_name: str, properties: str) -> str:
         f"Properties: {', '.join(props.keys())}\n"
         f"Call ifc_save(path) to persist changes to disk."
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DOCUMENTS / CDE TOOLS  (Nextcloud-backed document workflow, routers/documents.py)
+# ═════════════════════════════════════════════════════════════════════════════
+# Unlike every tool above, these need a real dashboard login — routers/documents.py
+# gates every route behind a session cookie (dashboard_auth), not just network
+# access, and every write past upload/list additionally needs a per-project
+# author/reviewer/approver role (granted via bcf-server's /admin panel, same
+# bcf_users accounts BCF auth below uses). _dashboard_request logs in lazily
+# with MCP_DASHBOARD_EMAIL/MCP_DASHBOARD_PASSWORD (falling back to
+# BCF_ADMIN_EMAIL/BCF_ADMIN_PASSWORD, bcf-server's own optional bootstrap seed,
+# if the dedicated pair isn't set) and keeps the session cookie for reuse.
+
+_DASHBOARD_EMAIL = os.getenv("MCP_DASHBOARD_EMAIL") or os.getenv("BCF_ADMIN_EMAIL", "")
+_DASHBOARD_PASSWORD = os.getenv("MCP_DASHBOARD_PASSWORD") or os.getenv("BCF_ADMIN_PASSWORD", "")
+_dashboard_session = requests.Session()
+# requests.Session is documented as not safe for concurrent use from multiple
+# threads (shared cookie jar / connection pool state) — in streamable-http/SSE
+# remote mode, several clients' tool calls can run concurrently, all sharing
+# this one session (there is only ever one dashboard identity for this server;
+# every MCP client already acts as the same MCP_DASHBOARD_EMAIL account by
+# design — this lock is about thread-safety of the shared Session object
+# itself, not about separating different users' identities). Mirrors
+# _model_lock's role for the IFC-model globals above.
+_dashboard_lock = threading.RLock()
+
+
+def _dashboard_login() -> str | None:
+    """POST /auth/login, storing the session cookie in _dashboard_session.
+    Returns an error message on failure, None on success."""
+    if not _DASHBOARD_EMAIL or not _DASHBOARD_PASSWORD:
+        return (
+            "Documents tools need a dashboard login. Set MCP_DASHBOARD_EMAIL / "
+            "MCP_DASHBOARD_PASSWORD (or BCF_ADMIN_EMAIL / BCF_ADMIN_PASSWORD) to "
+            "an account with the project roles you need — grant them via "
+            "bcf-server's /admin panel (Document roles)."
+        )
+    resp = _dashboard_session.post(
+        f"{_NORMALIZER_URL}/auth/login",
+        json={"email": _DASHBOARD_EMAIL, "password": _DASHBOARD_PASSWORD},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        return f"Dashboard login failed: {detail}"
+    return None
+
+
+def _dashboard_request(method: str, path: str, **kwargs) -> "requests.Response":
+    """requests call against a Documents endpoint. Tries the request as-is
+    first — works unmodified against a server with DASHBOARD_AUTH_BYPASS on,
+    or an already-authenticated session — and only attempts a login (using
+    MCP_DASHBOARD_EMAIL/PASSWORD, see above) on an actual 401, then retries
+    once. Never pre-emptively demands credentials a given deployment might
+    not even require."""
+    kwargs.setdefault("timeout", 30)
+    with _dashboard_lock:
+        resp = _dashboard_session.request(method, f"{_NORMALIZER_URL}{path}", **kwargs)
+        if resp.status_code == 401:
+            err = _dashboard_login()
+            if err:
+                raise RuntimeError(err)
+            resp = _dashboard_session.request(method, f"{_NORMALIZER_URL}{path}", **kwargs)
+        return resp
+
+
+def _error_detail(resp: "requests.Response") -> str:
+    try:
+        return resp.json().get("detail", resp.text)
+    except ValueError:
+        return resp.text
+
+
+@mcp.tool()
+def speckle_list_documents(stream_id: str, status: str = "") -> str:
+    """
+    List CDE documents for a Speckle project (stream_id, not model_id — a
+    document is scoped to the whole project so it survives re-ingestion).
+
+    status: optional filter, one of WIP / Shared / Published / Archived.
+    → drill into one with: speckle_document_detail(stream_id, doc_id)
+    """
+    try:
+        params = {"status": status} if status else {}
+        resp = _dashboard_request("GET", f"/projects/{stream_id}/documents", params=params)
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code != 200:
+        return f"Could not list documents: {_error_detail(resp)}"
+    docs = resp.json()
+    if not docs:
+        return f"No documents found for project {stream_id}" + (f" with status={status}" if status else "") + "."
+    lines = [f"{len(docs)} document(s) for project {stream_id}:"]
+    for d in docs:
+        gates = "".join([
+            "R" if d.get("reviewed") else "-",
+            "A" if d.get("approved") else "-",
+            "V" if d.get("verified") else "-",
+        ])
+        lines.append(
+            f"  [{d.get('status')}] {d.get('filename')}  rev={d.get('revision')}  "
+            f"gates={gates}  doc_id={d.get('doc_id')}"
+        )
+    lines.append("\n(gates: R=reviewed A=approved V=verified)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_document_detail(stream_id: str, doc_id: str) -> str:
+    """
+    Full detail for one document: status, revision, approval gates, and its
+    full audit event history (uploaded/moved/reviewed/approved/...).
+    """
+    try:
+        resp = _dashboard_request("GET", f"/projects/{stream_id}/documents/{doc_id}")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code == 404:
+        return f"Document {doc_id} not found in project {stream_id}."
+    if resp.status_code != 200:
+        return f"Could not load document: {_error_detail(resp)}"
+    d = resp.json()
+    lines = [
+        f"{d.get('filename')}  ({d.get('doc_type')})",
+        f"status={d.get('status')}  revision={d.get('revision')}",
+        f"reviewed={d.get('reviewed')}  approved={d.get('approved')}  verified={d.get('verified')}",
+        f"linked_bcf_topic={d.get('linked_bcf_topic') or '-'}  linked_element={d.get('linked_element') or '-'}",
+        "",
+        "Event history:",
+    ]
+    for e in d.get("events", []):
+        lines.append(
+            f"  {e.get('occurred_at', '')}  {e.get('event_type')}"
+            + (f"  {e.get('from_value')} → {e.get('to_value')}" if e.get("to_value") else "")
+            + f"  by {e.get('actor', '?')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_upload_document(stream_id: str, file_path: str, doc_type: str = "document", model_id: str = "") -> str:
+    """
+    Upload a local file as a new CDE document — always lands in WIP; must go
+    through review → approval → verification (speckle_set_document_review /
+    _approval / _verification) before reaching Published/Archived.
+
+    doc_type: "document" (default) or "drawing" — "drawing" requires model_id.
+    """
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}"
+    denied = _check_path_allowed(file_path)
+    if denied:
+        return denied
+    data = {"doc_type": doc_type}
+    if model_id:
+        data["model_id"] = model_id
+    try:
+        with open(file_path, "rb") as fh:
+            resp = _dashboard_request(
+                "POST", f"/projects/{stream_id}/documents/upload",
+                data=data, files={"file": (os.path.basename(file_path), fh)},
+                timeout=120,
+            )
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code not in (200, 201):
+        return f"Upload failed: {_error_detail(resp)}"
+    d = resp.json()
+    return f"Uploaded '{d.get('filename')}' as doc_id={d.get('doc_id')} (status=WIP)."
+
+
+@mcp.tool()
+def speckle_move_document(stream_id: str, doc_id: str, status: str) -> str:
+    """
+    Move a document between CDE stages: WIP -> Shared -> Published -> Archived.
+    Each forward move is gated: Shared needs reviewed=true, Published needs
+    approved=true, Archived needs verified=true (set those first via
+    speckle_set_document_review/_approval/_verification) — any other move
+    (backward, or skipping a gate) requires an approver-role account.
+    """
+    try:
+        resp = _dashboard_request("POST", f"/projects/{stream_id}/documents/{doc_id}/move", json={"status": status})
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code == 409:
+        return f"Move blocked: {_error_detail(resp)}"
+    if resp.status_code not in (200, 201):
+        return f"Move failed: {_error_detail(resp)}"
+    d = resp.json()
+    return f"Document {doc_id} is now {d.get('status')}."
+
+
+def _set_document_gate(stream_id: str, doc_id: str, gate: str, value: bool) -> str:
+    method = "POST" if value else "DELETE"
+    try:
+        resp = _dashboard_request(method, f"/projects/{stream_id}/documents/{doc_id}/{gate}")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code == 404:
+        return f"Document {doc_id} not found in project {stream_id}."
+    if resp.status_code == 403:
+        return f"Not allowed: {_error_detail(resp)}"
+    if resp.status_code not in (200, 201):
+        return f"Failed: {_error_detail(resp)}"
+    d = resp.json()
+    # gate is the URL path segment ("review"/"approve"/"verify"); the
+    # response JSON's fields are the past-tense forms ("reviewed"/
+    # "approved"/"verified"). Only "review" happened to map correctly
+    # under naive string reuse — d.get("approve")/d.get("verify") are keys
+    # that don't exist in the payload, so this always reported None for
+    # those two gates even when the backend call succeeded.
+    field = {"review": "reviewed", "approve": "approved", "verify": "verified"}[gate]
+    return f"Document {doc_id}: {field}={d.get(field)}"
+
+
+@mcp.tool()
+def speckle_set_document_review(stream_id: str, doc_id: str, reviewed: bool = True) -> str:
+    """Set/clear the 'reviewed' gate (ISO 19650 review, needed for WIP->Shared).
+    Requires a reviewer or approver role. → then: speckle_move_document(..., "Shared")"""
+    return _set_document_gate(stream_id, doc_id, "review", reviewed)
+
+
+@mcp.tool()
+def speckle_set_document_approval(stream_id: str, doc_id: str, approved: bool = True) -> str:
+    """Set/clear the 'approved' gate (ISO 19650 authorisation, needed for
+    Shared->Published). Requires an approver role. → then: speckle_move_document(..., "Published")"""
+    return _set_document_gate(stream_id, doc_id, "approve", approved)
+
+
+@mcp.tool()
+def speckle_set_document_verification(stream_id: str, doc_id: str, verified: bool = True) -> str:
+    """Set/clear the 'verified' gate (ISO 19650 verification, needed for
+    Published->Archived). Requires an approver role. → then: speckle_move_document(..., "Archived")"""
+    return _set_document_gate(stream_id, doc_id, "verify", verified)
+
+
+@mcp.tool()
+def speckle_link_document_topic(stream_id: str, doc_id: str, topic_guid: str = "") -> str:
+    """Link (or, with topic_guid="", unlink) a document to a BCF topic —
+    e.g. attach a markup PDF to the clash it documents. → find topic_guid via speckle_list_topics(model_id)"""
+    try:
+        if topic_guid:
+            resp = _dashboard_request("POST", f"/projects/{stream_id}/documents/{doc_id}/link-topic", json={"topic_guid": topic_guid})
+        else:
+            resp = _dashboard_request("DELETE", f"/projects/{stream_id}/documents/{doc_id}/link-topic")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code not in (200, 201):
+        return f"Failed: {_error_detail(resp)}"
+    return f"Document {doc_id} linked_bcf_topic = {topic_guid or '(unlinked)'}"
+
+
+@mcp.tool()
+def speckle_link_document_element(stream_id: str, doc_id: str, speckle_id: str = "") -> str:
+    """Link (or, with speckle_id="", unlink) a document to a specific model
+    element — e.g. attach a datasheet to the exact wall it specifies."""
+    try:
+        if speckle_id:
+            resp = _dashboard_request("POST", f"/projects/{stream_id}/documents/{doc_id}/link-element", json={"speckle_id": speckle_id})
+        else:
+            resp = _dashboard_request("DELETE", f"/projects/{stream_id}/documents/{doc_id}/link-element")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code not in (200, 201):
+        return f"Failed: {_error_detail(resp)}"
+    return f"Document {doc_id} linked_element = {speckle_id or '(unlinked)'}"
+
+
+@mcp.tool()
+def speckle_delete_document(stream_id: str, doc_id: str) -> str:
+    """Soft-delete a document (removed from Nextcloud + the board, but its
+    audit history survives as a tombstone — recoverable by an admin, not
+    permanently destroyed)."""
+    try:
+        resp = _dashboard_request("DELETE", f"/projects/{stream_id}/documents/{doc_id}")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code not in (200, 204):
+        return f"Delete failed: {_error_detail(resp)}"
+    return f"Document {doc_id} deleted (soft-delete; audit history retained)."
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BCF TOOLS  (bcf-server — coordination issues, bcf/topics.py + comments.py)
+# ═════════════════════════════════════════════════════════════════════════════
+# A separate service/container from bim-normalizer, its own Bearer-token auth
+# (BCF_API_KEY — the same shared credential the dashboard's own BCF panel
+# sends). Topics are scoped by model_id (an ingested commit), matching every
+# speckle_* tool's own convention — NOT stream_id like the Documents tools
+# above, since BCF topics predate the Documents feature and were never
+# migrated to stream-level scoping.
+
+_BCF_SERVER_URL = os.getenv("BCF_SERVER_URL", "http://localhost:8004").rstrip("/")
+_BCF_API_KEY = os.getenv("BCF_API_KEY", "")
+_BCF_VERSION = "2.1"  # matches the dashboard's own bcfClient.js
+
+
+def _bcf_headers() -> dict:
+    return {"Authorization": f"Bearer {_BCF_API_KEY}"}
+
+
+def _bcf_url(model_id: str, suffix: str = "") -> str:
+    return f"{_BCF_SERVER_URL}/bcf/{_BCF_VERSION}/projects/{model_id}{suffix}"
+
+
+@mcp.tool()
+def speckle_list_topics(model_id: str) -> str:
+    """
+    List BCF coordination topics (issues) for an ingested model.
+    → drill into one with: speckle_topic_detail(model_id, topic_guid)
+    → discuss one with: speckle_list_comments(model_id, topic_guid) / speckle_add_comment(...)
+    """
+    resp = _requests_with_retry("GET", _bcf_url(model_id, "/topics"), headers=_bcf_headers(), timeout=30)
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    if resp.status_code != 200:
+        return f"Could not list topics: {_error_detail(resp)}"
+    topics = resp.json()
+    if not topics:
+        return f"No BCF topics for model {model_id[:8]}..."
+    lines = [f"{len(topics)} topic(s) for model {model_id[:8]}...:"]
+    for t in topics:
+        lines.append(
+            f"  [{t.get('topic_status') or '?'}] {t.get('title')}"
+            f"  priority={t.get('priority') or '-'}  assigned_to={t.get('assigned_to') or '-'}"
+            f"  guid={t.get('guid')}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_topic_detail(model_id: str, topic_guid: str) -> str:
+    """Full detail for one BCF topic: status, priority, stage, labels, dates, assignee."""
+    resp = _requests_with_retry("GET", _bcf_url(model_id, f"/topics/{topic_guid}"), headers=_bcf_headers(), timeout=30)
+    if resp.status_code == 404:
+        return f"Topic {topic_guid} not found in model {model_id}."
+    if resp.status_code != 200:
+        return f"Could not load topic: {_error_detail(resp)}"
+    t = resp.json()
+    return (
+        f"{t.get('title')}\n"
+        f"status={t.get('topic_status')}  type={t.get('topic_type') or '-'}  priority={t.get('priority') or '-'}  stage={t.get('stage') or '-'}\n"
+        f"labels={t.get('labels') or []}\n"
+        f"assigned_to={t.get('assigned_to') or '-'}  due_date={t.get('due_date') or '-'}\n"
+        f"created={t.get('creation_date')} by {t.get('creation_author')}\n"
+        f"description: {t.get('description') or '(none)'}"
+    )
+
+
+@mcp.tool()
+def speckle_create_topic(
+    model_id: str, title: str, description: str = "", topic_type: str = "",
+    topic_status: str = "", priority: str = "", assigned_to: str = "",
+    due_date: str = "", creation_author: str = "AI Assistant (MCP)",
+) -> str:
+    """
+    Create a new BCF coordination topic (issue) on a model — e.g. to log a
+    clash or QA finding found via speckle_clash_check/speckle_qa_check as a
+    trackable issue instead of just reporting it in chat.
+    """
+    body = {"title": title, "creation_author": creation_author}
+    for k, v in {
+        "description": description, "topic_type": topic_type, "topic_status": topic_status,
+        "priority": priority, "assigned_to": assigned_to, "due_date": due_date,
+    }.items():
+        if v:
+            body[k] = v
+    resp = _requests_with_retry("POST", _bcf_url(model_id, "/topics"), headers=_bcf_headers(), json=body, timeout=30)
+    if resp.status_code != 201:
+        return f"Could not create topic: {_error_detail(resp)}"
+    t = resp.json()
+    return f"Created topic '{t.get('title')}' guid={t.get('guid')}"
+
+
+@mcp.tool()
+def speckle_update_topic(
+    model_id: str, topic_guid: str, title: str = "", description: str = "",
+    topic_type: str = "", topic_status: str = "", priority: str = "",
+    assigned_to: str = "", due_date: str = "", modified_author: str = "AI Assistant (MCP)",
+) -> str:
+    """
+    Update a BCF topic — only the fields you pass are changed (e.g. call
+    with just topic_status="Closed" to close an issue without touching
+    anything else).
+    """
+    body = {"modified_author": modified_author}
+    for k, v in {
+        "title": title, "description": description, "topic_type": topic_type,
+        "topic_status": topic_status, "priority": priority,
+        "assigned_to": assigned_to, "due_date": due_date,
+    }.items():
+        if v:
+            body[k] = v
+    if len(body) == 1:
+        return "No fields provided to update."
+    resp = _requests_with_retry("PUT", _bcf_url(model_id, f"/topics/{topic_guid}"), headers=_bcf_headers(), json=body, timeout=30)
+    if resp.status_code == 404:
+        return f"Topic {topic_guid} not found in model {model_id}."
+    if resp.status_code != 200:
+        return f"Could not update topic: {_error_detail(resp)}"
+    t = resp.json()
+    return f"Updated topic '{t.get('title')}': status={t.get('topic_status')}  priority={t.get('priority')}"
+
+
+@mcp.tool()
+def speckle_list_comments(model_id: str, topic_guid: str) -> str:
+    """List all comments on a BCF topic, oldest first."""
+    resp = _requests_with_retry("GET", _bcf_url(model_id, f"/topics/{topic_guid}/comments"), headers=_bcf_headers(), timeout=30)
+    if resp.status_code == 404:
+        return f"Topic {topic_guid} not found in model {model_id}."
+    if resp.status_code != 200:
+        return f"Could not list comments: {_error_detail(resp)}"
+    comments = resp.json()
+    if not comments:
+        return "No comments on this topic yet."
+    lines = [f"{len(comments)} comment(s):"]
+    for c in comments:
+        lines.append(f"  [{c.get('date', '')}] {c.get('author')}: {c.get('comment')}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_add_comment(model_id: str, topic_guid: str, comment: str, author: str = "AI Assistant (MCP)") -> str:
+    """Add a comment to a BCF topic."""
+    resp = _requests_with_retry("POST", 
+        _bcf_url(model_id, f"/topics/{topic_guid}/comments"), headers=_bcf_headers(),
+        json={"comment": comment, "author": author}, timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Topic {topic_guid} not found in model {model_id}."
+    if resp.status_code != 201:
+        return f"Could not add comment: {_error_detail(resp)}"
+    return f"Comment added by {author}."
+
+
+@mcp.tool()
+def speckle_list_viewpoints(model_id: str, topic_guid: str) -> str:
+    """List saved viewpoints (camera position + visibility/coloring state)
+    on a BCF topic — metadata only, not the snapshot image itself."""
+    resp = _requests_with_retry("GET", _bcf_url(model_id, f"/topics/{topic_guid}/viewpoints"), headers=_bcf_headers(), timeout=30)
+    if resp.status_code == 404:
+        return f"Topic {topic_guid} not found in model {model_id}."
+    if resp.status_code != 200:
+        return f"Could not list viewpoints: {_error_detail(resp)}"
+    vps = resp.json()
+    if not vps:
+        return "No viewpoints on this topic yet."
+    return f"{len(vps)} viewpoint(s): " + ", ".join(v.get("guid", "?") for v in vps)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# IDS COMPLIANCE TOOLS  (routers/ids_check.py — buildingSMART Information
+# Delivery Specification checking, the same peer feature to clash detection
+# that speckle_clash_check/speckle_investigate_clashes above cover)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def speckle_list_ids_specs(model_id: str) -> str:
+    """List previously uploaded IDS (.ids) specifications for a model.
+    → run one with: speckle_ids_check(model_id, spec_id)"""
+    resp = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}/ids-specs", timeout=30)
+    resp.raise_for_status()
+    specs = resp.json()
+    if not specs:
+        return f"No IDS specs uploaded for model {model_id[:8]}... — use speckle_upload_ids_spec() first."
+    lines = [f"{len(specs)} IDS spec(s) for model {model_id[:8]}...:"]
+    for s in specs:
+        lines.append(f"  {s.get('filename')}  spec_id={s.get('spec_id')}  uploaded={s.get('uploaded_at')}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_upload_ids_spec(model_id: str, file_path: str) -> str:
+    """Upload a local .ids (IDS XML) file as a new specification for a model.
+    Rejects malformed IDS XML. → then: speckle_ids_check(model_id, spec_id)"""
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}"
+    denied = _check_path_allowed(file_path)
+    if denied:
+        return denied
+    with open(file_path, "rb") as fh:
+        resp = _requests_with_retry("POST",
+            f"{_NORMALIZER_URL}/models/{model_id}/ids-specs",
+            files={"file": (os.path.basename(file_path), fh)}, timeout=30,
+        )
+    if resp.status_code == 400:
+        return f"Invalid IDS file: {_error_detail(resp)}"
+    if resp.status_code == 404:
+        return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
+    resp.raise_for_status()
+    s = resp.json()
+    return f"Uploaded '{s.get('filename')}' as spec_id={s.get('spec_id')}"
+
+
+@mcp.tool()
+def speckle_delete_ids_spec(model_id: str, spec_id: str) -> str:
+    """Delete an uploaded IDS specification."""
+    resp = _requests_with_retry("DELETE", f"{_NORMALIZER_URL}/models/{model_id}/ids-specs/{spec_id}", timeout=30)
+    if resp.status_code not in (200, 204):
+        return f"Delete failed: {_error_detail(resp)}"
+    return f"IDS spec {spec_id} deleted."
+
+
+@mcp.tool()
+def speckle_ids_check(model_id: str, spec_id: str) -> str:
+    """
+    Run an IDS compliance check (export the model to IFC, validate against
+    the given spec) and wait for the result (up to 5 minutes). Prefers the
+    model's true original IFC file over bim-normalizer's own reconstruction
+    when one is attached, same as speckle_clash_check.
+    → find spec_id via: speckle_list_ids_specs(model_id)
+    """
+    resp = _requests_with_retry("POST", f"{_NORMALIZER_URL}/models/{model_id}/ids-check", json={"spec_id": spec_id}, timeout=30)
+    if resp.status_code == 404:
+        return f"Spec {spec_id} not found for model {model_id}. Use speckle_list_ids_specs() to verify."
+    resp.raise_for_status()
+    job_id = resp.json().get("job_id")
+    if not job_id:
+        return f"Unexpected response: {resp.json()}"
+
+    for _ in range(150):  # 150 * 2s = 5 minutes
+        time.sleep(2)
+        poll = _requests_with_retry("GET", f"{_NORMALIZER_URL}/models/{model_id}/ids-check/{job_id}/status", timeout=15)
+        poll.raise_for_status()
+        status = poll.json()
+        if status["status"] == "complete":
+            break
+        if status["status"] == "failed":
+            return f"IDS check failed: {status.get('error')}"
+    else:
+        return f"Timed out after 5 minutes waiting for IDS check job {job_id}."
+
+    report = status.get("result") or {}
+    specs = report.get("specifications", [])
+    overall = "PASS" if report.get("status") else "FAIL"
+    lines = [
+        f"IDS check complete — {overall}  "
+        f"({report.get('total_specifications_pass', 0)}/{report.get('total_specifications', 0)} specifications passed, "
+        f"checked against {status.get('ifc_source', '?')})",
+    ]
+    for spec in specs:
+        icon = "✓" if spec.get("status") else "✗"
+        lines.append(
+            f"  {icon} {spec.get('name', 'Unnamed')}  "
+            f"({spec.get('total_checks_pass', 0)}/{spec.get('total_checks', 0)} checks passed)"
+        )
+        for req in spec.get("requirements", []):
+            if not req.get("status"):
+                lines.append(
+                    f"      ✗ {req.get('description') or req.get('label', '?')}: "
+                    f"{req.get('total_pass', 0)} passed / {req.get('total_fail', 0)} failed"
+                )
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

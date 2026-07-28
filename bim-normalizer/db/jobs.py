@@ -85,6 +85,37 @@ def get_job(conn, job_id: str) -> dict | None:
     return _row_to_job(row) if row else None
 
 
+def fail_stale_running_jobs(conn) -> int:
+    """Mark every job still 'running'/'pending' as 'failed'. Call once at
+    startup, before anything else touches bim_jobs — a 'running' row can only
+    mean a job actually in flight in *this* process (job state lives in the
+    DB precisely so restarts don't strand polling clients, but the async task
+    doing the work does not survive the restart). Left alone, such a row
+    permanently zombies: find_running_job() has no liveness check, so every
+    later request for the same stream_id/commit_id (or export/check target)
+    just gets handed the dead job's id back and polls it forever, with no
+    error and no timeout — this is exactly what happened to a forced
+    re-ingest that sat at "running" with zero CPU/DB activity for 20+ minutes
+    after a mid-job redeploy."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bim_jobs SET status = 'failed', error = %s, updated_at = NOW()
+                WHERE status IN ('running', 'pending')
+                """,
+                ("Backend restarted while this job was in flight",),
+            )
+            failed = cur.rowcount
+        conn.commit()
+        if failed:
+            logger.warning("Marked %d stale running/pending job(s) as failed on startup", failed)
+        return failed
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def find_running_job(conn, job_type: str, **payload_filters) -> str | None:
     """Return the job_id of a running/pending job of this type whose payload
     matches all given filters, or None. Used to dedupe duplicate requests for

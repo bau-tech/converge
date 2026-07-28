@@ -88,3 +88,12 @@ class UserResponse(BaseModel):
     email: str
     name: str
     created_at: str
+
+
+class DocumentRoleCreate(BaseModel):
+    user_guid: str
+    # '*' in stream_ids means "all projects" (db/roles.py's sentinel) —
+    # the admin UI sends ["*"] when the "All projects" checkbox is used
+    # instead of picking specific projects from the multi-select.
+    stream_ids: list[str]
+    roles: list[str]

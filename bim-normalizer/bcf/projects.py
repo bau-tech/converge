@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from bcf.auth import get_bearer_token
+from bcf.auth import get_current_bcf_user
 from bcf.db import fetch_all, fetch_one
-from bcf.oauth import current_user
 from bcf.versions import is_bcf_v3
 
 router = APIRouter(tags=["bcf-projects"])
@@ -56,8 +55,8 @@ def default_extension_values(kind: str) -> list[str]:
 
 
 @router.get("/current-user")
-def get_current_user(access_token: str = Depends(get_bearer_token)):
-    return current_user(access_token)
+def get_current_user(user: dict = Depends(get_current_bcf_user)):
+    return user
 
 
 @router.get("/projects")

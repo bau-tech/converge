@@ -5,7 +5,7 @@ All functions take an open psycopg2 connection and return plain dicts/lists.
 
 import logging
 
-from ifc.classify import classify_material_category, classify_section_family
+from ifc.classify import classify_material_category, classify_section_family, normalize_profile_label
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ _MATERIAL_KEYS = [
 _PROFILE_KEYS = [
     "Type Name", "Family", "Structural Framing Type", "Profile Name",
     "profile", "profileName",
-    "PROFILE", "NAME", "MAIN_PART.NAME", "PROFILE_TYPE",
+    "PROFILE", "NAME", "MAIN_PART.NAME",
 ]
 _GRADE_KEYS = [
     "Steel Grade", "Grade Short", "Grade", "grade", "grade_short",
@@ -168,6 +168,43 @@ def _param_distribution(cur, model_id: str, keys: list[str],
 
 _QTY_ALLOWED_FIELDS = {"category", "ifc_class", "storey"}
 
+# Per-element parameter-derived volume/area (m3/m2), used as a fallback when
+# bim_geometry has no tessellated mesh (IFC-sourced elements exposing only
+# Qto_*BaseQuantities). IFC commonly reports BOTH a Net and a Gross variant
+# under the same canonical_key ('volume'/'area') — Net excludes voids/openings
+# and is the standard quantity-takeoff basis, so DISTINCT ON deterministically
+# prefers a Net-labeled row over a Gross-labeled one whenever an element has
+# both (a bare MAX() here would silently pick whichever is numerically larger,
+# i.e. Gross, and non-deterministically among equal values).
+_VOL_AREA_FALLBACK_CTE = """
+        pv AS (
+            SELECT DISTINCT ON (p.element_id) p.element_id, p.value_si
+            FROM bim_parameters p
+            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+            WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
+            ORDER BY p.element_id, (p.key ILIKE '%%net%%') DESC, (p.key ILIKE '%%gross%%') ASC, p.key ASC
+        ),
+        pa AS (
+            SELECT DISTINCT ON (p.element_id) p.element_id, p.value_si
+            FROM bim_parameters p
+            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+            WHERE p.canonical_key = 'area'   AND p.unit_si = 'm2' AND p.value_si IS NOT NULL
+            ORDER BY p.element_id, (p.key ILIKE '%%net%%') DESC, (p.key ILIKE '%%gross%%') ASC, p.key ASC
+        )
+"""
+
+# Same as above, volume-only — for aggregations that don't need area (e.g.
+# the concrete-volume-by-material rollup, which has no area equivalent).
+_VOL_ONLY_FALLBACK_CTE = """
+        pv AS (
+            SELECT DISTINCT ON (p.element_id) p.element_id, p.value_si
+            FROM bim_parameters p
+            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+            WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
+            ORDER BY p.element_id, (p.key ILIKE '%%net%%') DESC, (p.key ILIKE '%%gross%%') ASC, p.key ASC
+        )
+"""
+
 
 def _qty_by_field(cur, model_id: str, field: str) -> dict:
     """
@@ -180,20 +217,7 @@ def _qty_by_field(cur, model_id: str, field: str) -> dict:
     if field not in _QTY_ALLOWED_FIELDS:
         raise ValueError(f"field must be one of {_QTY_ALLOWED_FIELDS!r}, got {field!r}")
     cur.execute(f"""
-        WITH pv AS (
-            SELECT p.element_id, MAX(p.value_si) AS value_si
-            FROM bim_parameters p
-            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
-            WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
-            GROUP BY p.element_id
-        ),
-        pa AS (
-            SELECT p.element_id, MAX(p.value_si) AS value_si
-            FROM bim_parameters p
-            JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
-            WHERE p.canonical_key = 'area'   AND p.unit_si = 'm2' AND p.value_si IS NOT NULL
-            GROUP BY p.element_id
-        )
+        WITH {_VOL_AREA_FALLBACK_CTE}
         SELECT
             COALESCE(e.{field}, 'Unknown')                    AS grp,
             COUNT(*)                                          AS cnt,
@@ -245,21 +269,8 @@ def get_model_summary(conn, model_id: str) -> dict:
         # Totals — volume and area COALESCE bim_geometry (mesh) with bim_parameters
         # (IFC Qto canonical values) so IFC files without tessellated geometry still
         # report correct quantities from their Qto_*BaseQuantities property sets.
-        cur.execute("""
-            WITH pv AS (
-                SELECT p.element_id, MAX(p.value_si) AS value_si
-                FROM bim_parameters p
-                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
-                WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
-                GROUP BY p.element_id
-            ),
-            pa AS (
-                SELECT p.element_id, MAX(p.value_si) AS value_si
-                FROM bim_parameters p
-                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
-                WHERE p.canonical_key = 'area' AND p.unit_si = 'm2' AND p.value_si IS NOT NULL
-                GROUP BY p.element_id
-            )
+        cur.execute(f"""
+            WITH {_VOL_AREA_FALLBACK_CTE}
             SELECT
                 COUNT(*)                                              AS total,
                 COALESCE(SUM(COALESCE(g.volume_m3, pv.value_si)), 0) AS vol,
@@ -283,14 +294,8 @@ def get_model_summary(conn, model_id: str) -> dict:
         # Both rely on canonical_key='material_category' derived at ingest time.
         # Joined via LEFT JOIN so elements without material_category are excluded
         # rather than duplicated.
-        cur.execute("""
-            WITH pv AS (
-                SELECT p.element_id, MAX(p.value_si) AS value_si
-                FROM bim_parameters p
-                JOIN bim_elements e ON e.element_id = p.element_id AND e.model_id = %s
-                WHERE p.canonical_key = 'volume' AND p.unit_si = 'm3' AND p.value_si IS NOT NULL
-                GROUP BY p.element_id
-            )
+        cur.execute(f"""
+            WITH {_VOL_ONLY_FALLBACK_CTE}
             SELECT
                 COALESCE(SUM(CASE WHEN mat.value = 'concrete'
                     THEN COALESCE(g.volume_m3, pv.value_si) END), 0),
@@ -316,8 +321,18 @@ def get_model_summary(conn, model_id: str) -> dict:
         # "Steel Profiles" chart — scope profile names to steel elements only,
         # so concrete/timber/etc. type names don't pollute the chart.
         steel_ids  = _steel_element_ids(cur, model_id)
-        by_profile = _param_distribution(cur, model_id, _PROFILE_KEYS, canonical="profile",
-                                          element_ids=steel_ids)
+        by_profile_raw = _param_distribution(cur, model_id, _PROFILE_KEYS, canonical="profile",
+                                              element_ids=steel_ids)
+        # Merge formatting variants of the same physical profile ("HEA 400"
+        # vs "HEA400") — these can differ across sources, or even within the
+        # same source, depending on whether a real Type Name/Section
+        # parameter was captured verbatim or extract_profile_from_name's own
+        # name-parsing fallback produced the value (see ifc/classify.py).
+        # Without this, the two would count as separate chart bars.
+        by_profile: dict[str, int] = {}
+        for raw_name, cnt in by_profile_raw.items():
+            label = normalize_profile_label(raw_name) or raw_name
+            by_profile[label] = by_profile.get(label, 0) + cnt
 
         # "Section Classes" chart — group steel profiles by cross-section
         # family (HEA200 → "I / H Beams", RHS100x50x5 → "RHS/SHS", ...).
@@ -422,8 +437,14 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
                 param_map[eid] = {}
                 alias_map[eid] = {}
             param_map[eid][key] = value
-            # Prefer canonical_key; fall back to raw key classification
-            alias = canon if canon in ("material", "profile", "grade", "material_category") else classified_raw.get(key)
+            # Prefer canonical_key (covers every canonical concept, not just
+            # material/profile/grade — e.g. fire_rating, load_bearing, phase,
+            # assembly_mark — so any of them surface below as a clean,
+            # English-labeled top-level field instead of only being reachable
+            # via "params.<raw source key>", which is whatever language/name
+            # the source application happened to use); fall back to raw key
+            # classification only for material/profile/grade's legacy aliases.
+            alias = canon or classified_raw.get(key)
             if alias and alias not in alias_map[eid]:
                 alias_map[eid][alias] = value
 
@@ -456,6 +477,16 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
             "grade":        a.get("grade"),
             "material_category": material_category,
             "profile_type": profile_type,
+            # Every other canonical concept this element has (fire_rating,
+            # load_bearing, thermal_transmittance, phase, assembly_mark,
+            # weight, area, volume, length, reference_level, family_type,
+            # omniclass, ...) — surfaced generically so new canonicals show
+            # up here automatically instead of needing another hardcoded
+            # field added every time db/insert.py/mapping_canonical.json
+            # gains one. material/profile/grade/material_category stay
+            # explicit above since other code already depends on those
+            # specific field names.
+            **{k: v for k, v in a.items() if k not in ("material", "profile", "grade", "material_category")},
             # All raw BIM parameters — used by the pivot table for dynamic grouping
             "params":       param_map.get(eid, {}),
         })
@@ -797,6 +828,26 @@ def get_element_details(conn, model_id: str, reference: str) -> dict | None:
     return element
 
 
+def get_models_with_incomplete_embeddings(conn) -> list[str]:
+    """model_ids where at least one element has no bim_element_embeddings
+    row yet. Embeddings generate as a background task after ingest itself
+    already reports complete (see pipeline.normalize.generate_embeddings_for_
+    model) — a backend restart while that task is still running kills it
+    with nothing to resume it, since it isn't tracked in bim_jobs the way
+    ingest itself is. Used at startup to pick those back up (main.py) rather
+    than leaving a model permanently stuck partway through indexing."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT m.model_id::text
+            FROM bim_models m
+            JOIN bim_elements e ON e.model_id = m.model_id
+            LEFT JOIN bim_element_embeddings emb ON emb.element_id = e.element_id
+            GROUP BY m.model_id
+            HAVING COUNT(e.element_id) > COUNT(emb.element_id)
+        """)
+        return [r[0] for r in cur.fetchall()]
+
+
 def get_elements_with_params_for_embedding(conn, element_ids: list[str]) -> dict[str, dict]:
     """
     Batched element + parameter fetch for building semantic-search embed text
@@ -908,6 +959,103 @@ def get_parameter_completeness(conn, model_id: str, category: str = None,
 
 
 # ---------------------------------------------------------------------------
+# Model diff — shared by routers/analytics.py's /diff/{a}/{b} endpoint and
+# chat/agent.py's get_model_changes tool, which previously each ran their own
+# independent copy of this same added/removed/changed SQL.
+# ---------------------------------------------------------------------------
+
+def get_model_diff(conn, model_id_a: str, model_id_b: str) -> dict:
+    """
+    Diff two model versions by application_id (added/removed) and hash
+    (changed). model_id_b is treated as the newer/current version,
+    model_id_a as the older/baseline — added = in b not in a, removed = in a
+    not in b, category_changes/current_total/other_total follow the same
+    b=current/a=other convention.
+
+    Returns:
+        added:   [{speckle_id, ifc_class, category, name}]
+        removed: [{speckle_id, ifc_class, category, name}]
+        changed: [{speckle_id_a, speckle_id_b, category, name}] — category/name
+                 from the *baseline* (a) side, same application_id, different hash
+        category_changes: [{category, current_count, other_count, delta}],
+                 nonzero deltas only, sorted by |delta| descending
+        current_total, other_total: total element counts for b, a
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT b.speckle_id, b.ifc_class, b.category, b.name
+            FROM bim_elements b
+            WHERE b.model_id = %s
+              AND b.application_id IS NOT NULL AND b.application_id <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM bim_elements a
+                  WHERE a.model_id = %s AND a.application_id = b.application_id
+              )
+        """, (model_id_b, model_id_a))
+        added = [dict(zip(["speckle_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
+
+        cur.execute("""
+            SELECT a.speckle_id, a.ifc_class, a.category, a.name
+            FROM bim_elements a
+            WHERE a.model_id = %s
+              AND a.application_id IS NOT NULL AND a.application_id <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM bim_elements b
+                  WHERE b.model_id = %s AND b.application_id = a.application_id
+              )
+        """, (model_id_a, model_id_b))
+        removed = [dict(zip(["speckle_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
+
+        cur.execute("""
+            SELECT a.speckle_id AS speckle_id_a, b.speckle_id AS speckle_id_b,
+                   a.category, a.name
+            FROM bim_elements a
+            JOIN bim_elements b ON a.application_id = b.application_id
+            WHERE a.model_id = %s AND b.model_id = %s
+              AND a.hash IS NOT NULL AND b.hash IS NOT NULL AND a.hash <> b.hash
+              AND a.application_id IS NOT NULL AND a.application_id <> ''
+        """, (model_id_a, model_id_b))
+        changed = [dict(zip(["speckle_id_a", "speckle_id_b", "category", "name"], r)) for r in cur.fetchall()]
+
+        cur.execute("""
+            SELECT COALESCE(a.category, b.category) AS category,
+                   COALESCE(b.cnt, 0) AS current_count,
+                   COALESCE(a.cnt, 0) AS other_count,
+                   COALESCE(b.cnt, 0) - COALESCE(a.cnt, 0) AS delta
+            FROM
+                (SELECT category, COUNT(*) cnt FROM bim_elements WHERE model_id = %s GROUP BY category) a
+            FULL OUTER JOIN
+                (SELECT category, COUNT(*) cnt FROM bim_elements WHERE model_id = %s GROUP BY category) b
+            ON a.category = b.category
+        """, (model_id_a, model_id_b))
+        category_changes = [
+            {"category": r[0] or "Unknown", "current_count": r[1], "other_count": r[2], "delta": r[3]}
+            for r in cur.fetchall() if r[3] != 0
+        ]
+        category_changes.sort(key=lambda c: -abs(c["delta"]))
+
+        cur.execute("""
+            SELECT
+                SUM(CASE WHEN model_id = %s THEN 1 ELSE 0 END) AS current_total,
+                SUM(CASE WHEN model_id = %s THEN 1 ELSE 0 END) AS other_total
+            FROM bim_elements
+            WHERE model_id IN (%s, %s)
+        """, (model_id_b, model_id_a, model_id_a, model_id_b))
+        totals_row = cur.fetchone()
+        current_total = int(totals_row[0] or 0)
+        other_total = int(totals_row[1] or 0)
+
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "category_changes": category_changes,
+        "current_total": current_total,
+        "other_total": other_total,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Version history / trend
 # ---------------------------------------------------------------------------
 
@@ -923,8 +1071,11 @@ def get_model_trend(conn, stream_id: str) -> list[dict]:
     """
     Version history for a stream.
     Returns [{model_id, commit_id, branch_name, ingested_at, source, message,
-              total_elements, by_category: {cat: count}}]
-    ordered oldest -> newest.
+              total_elements, total_volume_m3, total_area_m2,
+              by_category: {cat: count}, volume_by_category: {cat: volume_m3}}]
+    ordered oldest -> newest. Volume/area let callers answer construction-monitoring
+    questions like "is concrete volume growing as planned version over version?",
+    not just element-count trend.
     """
     from collections import OrderedDict
 
@@ -932,9 +1083,12 @@ def get_model_trend(conn, stream_id: str) -> list[dict]:
         cur.execute("""
             SELECT m.model_id::text, m.commit_id, m.branch_name,
                    m.ingested_at, m.source, m.message,
-                   e.category, COUNT(*) AS cnt
+                   e.category, COUNT(*) AS cnt,
+                   COALESCE(SUM(g.volume_m3), 0) AS volume_m3,
+                   COALESCE(SUM(g.area_m2), 0) AS area_m2
             FROM bim_models m
             JOIN bim_elements e ON e.model_id = m.model_id
+            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
             WHERE m.stream_id = %s
             GROUP BY m.model_id, m.commit_id, m.branch_name,
                      m.ingested_at, m.source, m.message, e.category
@@ -943,7 +1097,7 @@ def get_model_trend(conn, stream_id: str) -> list[dict]:
         rows = cur.fetchall()
 
     versions: dict = OrderedDict()
-    for model_id, commit_id, branch, ingested_at, source, message, cat, cnt in rows:
+    for model_id, commit_id, branch, ingested_at, source, message, cat, cnt, vol, area in rows:
         if model_id not in versions:
             versions[model_id] = {
                 "model_id":       model_id,
@@ -953,11 +1107,18 @@ def get_model_trend(conn, stream_id: str) -> list[dict]:
                 "source":         source or "",
                 "message":        message or "",
                 "total_elements": 0,
+                "total_volume_m3": 0.0,
+                "total_area_m2": 0.0,
                 "by_category":    {},
+                "volume_by_category": {},
             }
         v = versions[model_id]
-        v["by_category"][cat or "Unknown"] = int(cnt)
+        cat_label = cat or "Unknown"
+        v["by_category"][cat_label] = int(cnt)
+        v["volume_by_category"][cat_label] = round(float(vol), 4)
         v["total_elements"] += int(cnt)
+        v["total_volume_m3"] = round(v["total_volume_m3"] + float(vol), 4)
+        v["total_area_m2"] = round(v["total_area_m2"] + float(area), 4)
 
     return list(versions.values())
 
@@ -1032,6 +1193,43 @@ def find_nearby_elements(conn, model_id: str, origin, radius_m: float,
             }
             for r in cur.fetchall()
         ]
+
+
+# ---------------------------------------------------------------------------
+# Element relationships — see db/insert.py's build_relationships() for how
+# bim_relationships gets populated (a post-ingest pass resolving Revit's
+# parent/room/space reference parameters into real element-to-element links).
+# ---------------------------------------------------------------------------
+
+def get_element_relationships(conn, element_id: str) -> list[dict]:
+    """
+    Elements directly related to element_id, in both directions:
+    'outgoing' — element_id's own reference points at the other element
+                 (e.g. a door's parent wall), and
+    'incoming' — the other element's reference points at element_id
+                 (e.g. every element hosted by this wall).
+    Each row also carries relation_type ('parent'/'room'/'space').
+
+    Only reflects what build_relationships() derived from parent/room/space
+    references at ingest time — models ingested before that existed, or
+    sources without those reference fields, will return [].
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT r.related_id::text, r.relation_type, 'outgoing' AS direction,
+                   e.speckle_id, e.name, e.category, e.ifc_class
+            FROM bim_relationships r
+            JOIN bim_elements e ON e.element_id = r.related_id
+            WHERE r.element_id = %s
+            UNION ALL
+            SELECT r.element_id::text, r.relation_type, 'incoming' AS direction,
+                   e.speckle_id, e.name, e.category, e.ifc_class
+            FROM bim_relationships r
+            JOIN bim_elements e ON e.element_id = r.element_id
+            WHERE r.related_id = %s
+        """, (element_id, element_id))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

@@ -1,43 +1,51 @@
+<p align="center">
+  <img src="public/converge-logo-transparent.png" alt="Converge logo" width="160">
+</p>
+
 # Converge
 
-A React dashboard for BIM analysis, coordination, and validation connected to a self-hosted [Speckle](https://speckle.systems/) server. It ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper, normalises them to an IFC-aligned PostgreSQL schema, and exposes analytics, 3D visualisation, model comparison, BCF issue collaboration, clash detection, IDS (Information Delivery Specification) checking, and an MCP server that lets Claude query and reason over your BIM data.
+A React dashboard for BIM analysis, coordination, and validation connected to a self-hosted [Speckle](https://speckle.systems/) server. It ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper, normalises them to an IFC-aligned PostgreSQL schema, and exposes analytics, 3D visualisation, model comparison, BCF issue collaboration, clash detection, IDS (Information Delivery Specification) checking, document management backed by a dedicated Nextcloud instance (WIP → Shared → Published → Archived, with an app-enforced reviewed → approved → verified gate), and an MCP server that lets Claude query and reason over your BIM data.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Browser                                                │
-│  React + Vite   ──► @speckle/viewer (3D)               │
-│                 ──► ECharts (charts)                    │
-│                 ──► @xyflow/react (IDS graph editor)    │
-└───────┬──────────────────────┬───────────────────────────┘
-        │ REST                 │ BCF-API (REST)
-┌───────▼──────────────┐ ┌─────▼───────────────┐
-│  bim-normalizer :8002│ │  bcf-server :8004    │  FastAPI + Python 3.11
-│  PostgreSQL schema    │ │  BCF 2.1 / 3.0 API   │  Docker containers,
-│  IFC export (IFC4X3)  │ │  topics/comments/    │  shared Postgres
-│  Clash check (ifcclash)│ │  viewpoints, OAuth   │
-│  IDS check (ifctester) │ │  shim for BIMcollab  │
-└───────┬──────────────┘ └──────────┬───────────┘
-        │ specklepy + GraphQL       │ shared bim_models/elements
-┌───────▼───────────────────────────▼───────────┐
-│  Speckle server          PostgreSQL            │
-│  streams / commits / blobs   :5432             │
-└─────────────────────────────────────────────────┘
+Browser — React + Vite
+  • @speckle/viewer          3D model viewer
+  • ECharts                  charts
+  • @xyflow/react            IDS graph editor
+  • native 4D planner        WBS/Gantt authoring + CPM + build-up playback
+      │
+      ├─ REST ──────────► bim-normalizer :8002   (FastAPI, Python 3.11)
+      │                     PostgreSQL schema · IFC export (IFC4X3)
+      │                     Clash check (ifcclash) · IDS check (ifctester)
+      │                     Documents (Nextcloud) — reviewed → approved →
+      │                       verified gate · Auth (dashboard login)
+      │                       │
+      │                       ├─ specklepy + GraphQL ─► Speckle server
+      │                       │                          (streams/commits/blobs)
+      │                       └─ WebDAV/OCS ────────────► Nextcloud :8005
+      │                                                    (headless; groupfolders
+      │                                                    per project — WIP/Shared/
+      │                                                    Published/Archived; never
+      │                                                    exposed to end users)
+      │
+      └─ BCF-API (REST) ──► bcf-server :8004   (FastAPI, Python 3.11)
+                               BCF 2.1 / 3.0 API · topics/comments/viewpoints
+                               OAuth shim for BIMcollab
+                               │
+                               └─ shared bim_models/elements ─► PostgreSQL :5432
+                                                                  (same instance
+                                                                  as bim-normalizer)
 
-┌──────────────────────────────────────────────────────────┐
-│  Claude Code / Claude.ai                                 │
-│  MCP client                                              │
-└──────────────┬───────────────────────────────────────────┘
-               │ stdio (local)  or  HTTPS/streamable-HTTP (remote)
-  ┌────────────▼────────────┐
-  │  speckle_mcp.py  :8003  │   FastMCP — 50+ tools + 2 resources
-  │  (speckle-ifc server)   │   ifcopenshell in-memory IFC session
-  └────────────┬────────────┘
-               │ REST
-          bim-normalizer :8002
+Claude Code / Claude.ai — MCP client
+  │ stdio (local)  or  HTTPS/streamable-HTTP (remote)
+  ▼
+speckle_mcp.py :8003  (speckle-ifc server)
+  FastMCP — 72 tools + 2 resources · ifcopenshell in-memory IFC session
+  │
+  └─ REST ─► bim-normalizer :8002
 ```
 
 ---
@@ -65,13 +73,13 @@ Both the Speckle connectors **v3** instance/definition split (geometry on `obj.d
 - **Docker + Docker Compose** — bim-normalizer, bcf-server, and MCP server
 - **PostgreSQL 14+** — can be an external instance; see `.env` for connection vars
 - **Speckle account** with a personal access token
-- A running [Speckle server](https://speckle.systems/) (self-hosted or speckle.xyz)
+- A running [Speckle server](https://speckle.systems/) (self-hosted or app.speckle.systems)
 
 ---
 
 ## Quick start
 
-### 1. Frontend
+### 1. Frontend dev server (optional — for `npm run dev` against an already-running backend)
 
 ```bash
 npm install
@@ -79,75 +87,67 @@ cp .env.example .env        # fill in VITE_* variables
 npm run dev                 # http://localhost:5173
 ```
 
-### 2. bim-normalizer
+### 2. Full stack (bim-normalizer + bcf-server + postgres + nextcloud + dashboard)
+
+Everything is orchestrated by the single [docker-compose.yml](docker-compose.yml) at the repo root — there is no separate compose file per service.
 
 ```bash
-cd bim-normalizer
-cp .env.example .env        # fill in SPECKLE_TOKEN, PG_*, MCP_API_KEY, BCF_API_KEY
-docker compose up -d        # starts normalizer on :8002
+cp .env.example .env        # fill in SPECKLE_TOKEN, PG_*, MCP_API_KEY, BCF_API_KEY, etc.
+docker compose up -d        # starts postgres, nextcloud, bim-normalizer (:8002),
+                             # bcf-server (:8004), speckle-mcp (:8003), dashboard (:8080)
 ```
 
-### 3. bcf-server
+### 3. MCP server (local, Claude Code)
 
-Runs from the same `bim-normalizer/` build context as a separate process (`python bcf_server.py`, port `8004`), sharing the Postgres instance. See [docker-compose.yml](docker-compose.yml) for the full three-service wiring (normalizer + bcf-server + dashboard).
-
-### 4. MCP server (local, Claude Code)
-
-The `.mcp.json` in the project root is picked up automatically by Claude Code. Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — it is loaded by the MCP server at startup via `python-dotenv`.
+The `.mcp.json` in the project root is picked up automatically by Claude Code and runs `speckle_mcp.py` directly on your machine over stdio (separate from the `speckle-mcp` Docker service above, which serves the same tools over streamable-HTTP for remote access). Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — it's loaded by this local process at startup via `python-dotenv`. See `bim-normalizer/.env.example` for the variables this file needs (the containerized services above get their config entirely from the root `.env`, not this file).
 
 ---
 
 ## Environment variables
 
-### Frontend (`/.env`)
+### Root `.env` — the single source of truth for the whole stack
+
+`docker-compose.yml` reads this file and passes each value into whichever container(s) need it (frontend build args, bim-normalizer, bcf-server, speckle-mcp, or the `postgres`/`nextcloud` services directly) — see the `environment:`/`args:` blocks in [docker-compose.yml](docker-compose.yml) for the exact wiring. There is no per-service `.env` for any of these containers.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_SPECKLE_SERVER` | Yes | Speckle server URL, e.g. `https://speckle.example.com` |
-| `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile |
-| `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL, e.g. `http://localhost:8002` |
-| `PUBLIC_BASE_URL` | No | Publicly reachable base URL ending in `/normalizer`, used by nginx for the webhook auto-sync feature. Leave blank to disable auto-sync |
-| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries (default `3600`). A project someone actually opens is scanned immediately via the frontend's on-load `POST /auto-sync/scan` instead of waiting for this interval |
-| `MCP_API_KEY` | No | Shared secret for remote streamable-HTTP MCP access; empty disables auth (local stdio only) |
+| `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | Yes | Postgres connection, shared by bim-normalizer, bcf-server, and Nextcloud's own DB. `PG_HOST`/`PG_PORT` only matter for tools connecting from outside the compose network — containers always talk to `postgres:5432` directly |
+| `VITE_SPECKLE_SERVER` | Yes | Speckle server URL, e.g. `https://speckle.example.com` (also becomes `SPECKLE_SERVER_URL` for bim-normalizer/bcf-server) |
+| `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile (also becomes `SPECKLE_TOKEN`) |
+| `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL as seen by the frontend, e.g. `http://localhost:8002` |
+| `VITE_EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers for the frontend's server-switcher dropdown (baked in at build time) and bcf-server's admin panel project lookup. Comma-separated, each entry `Name\|URL\|token`. Note: bim-normalizer's own `GET /servers` route reads a differently-named var (`EXTRA_SPECKLE_SERVERS`, no `VITE_` prefix) that docker-compose never sets, so that particular lookup's extra-server list is always empty — the dropdown and bcf-server are unaffected, they read this var directly |
+| `PUBLIC_BASE_URL` | No | Publicly reachable base URL ending in `/normalizer`, used for the webhook auto-sync feature. Leave blank to disable |
+| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries. `docker-compose.yml` sets a default of `900` if unset in `.env`; bim-normalizer's own Python-level fallback (3600) only applies outside the documented `docker compose up` flow |
+| `DOCUMENT_SYNC_SCAN_INTERVAL_S` | No | Same kind of safety net as above, but for documents that reached Nextcloud some other way than the dashboard's own upload/move/revise/delete calls. Default `3600` |
+| `LOG_LEVEL` | No | `debug` / `info` / `warning` — passed to both bim-normalizer and bcf-server. Default `debug` |
+| `MCP_API_KEY` | No | Shared secret for remote streamable-HTTP MCP access; empty disables auth (local stdio MCP integration is unaffected — see below) |
 | `MCP_ALLOWED_HOSTS` | No | Comma-separated Host-header allow-list (DNS-rebinding protection) for the remote MCP server |
+| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login the MCP server uses for its Documents/CDE tools when `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set — passed through to the `speckle-mcp` container |
 | `BCF_API_KEY` | Yes (for BCF) | Shared Bearer credential between bcf-server and the dashboard's BCF panel. Required — an empty value sends `Authorization: Bearer ` and bcf-server rejects it |
-| `VITE_OPENAI_API_KEY` | No | OpenAI key for the AI chat agent |
-| `VITE_OLLAMA_BASE_URL` | No | Local Ollama endpoint (e.g. `http://localhost:11434`) |
-| `VITE_OLLAMA_MODEL` | No | Ollama model name (e.g. `qwen2.5:1.5b`) |
-| `VITE_LMSTUDIO_BASE_URL` | No | LM Studio endpoint |
-| `VITE_LMSTUDIO_MODEL` | No | LM Studio model name |
-| `VITE_MISTRAL_API_KEY` | No | Mistral AI key |
-
-### bim-normalizer (`/bim-normalizer/.env`)
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SPECKLE_SERVER_URL` | Yes | Speckle server URL |
-| `SPECKLE_TOKEN` | Yes | Personal access token |
-| `PUBLIC_BASE_URL` | No | Publicly reachable base URL (through your reverse proxy) for the webhook auto-sync feature. Leave blank to disable |
-| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries (new-stream registration, missed commits, missed deletions). Default `3600` |
-| `PG_HOST` | Yes | PostgreSQL host — service refuses to start if unset |
-| `PG_PORT` | No | PostgreSQL port (default `5432`) |
-| `PG_USER` | Yes | PostgreSQL user — service refuses to start if unset |
-| `PG_PASS` | Yes | PostgreSQL password — service refuses to start if unset |
-| `PG_NAME` | Yes | PostgreSQL database name — service refuses to start if unset |
-| `PORT` | No | Normalizer listen port (default `8002`) |
-| `MCP_API_KEY` | No | API key for remote MCP streamable-HTTP/SSE access; empty = no auth |
-| `MCP_ALLOWED_HOSTS` | No | Comma-separated Host-header allow-list for the remote MCP server |
-| `LOG_LEVEL` | No | `debug` / `info` / `warning` (default `info`) |
-| `OPENAI_API_KEY` | No | OpenAI key used by the server-side chat agent |
-| `MISTRAL_API_KEY` | No | Mistral AI key used by the server-side chat agent |
-| `EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers exposed by `GET /servers`. Comma-separated, each entry `Name\|URL\|token` |
-
-### bcf-server (shares the bim-normalizer `.env`)
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | Yes | Same Postgres instance as bim-normalizer |
-| `PORT` | No | BCF server listen port (default `8004`) |
-| `BCF_API_KEY` | Yes | Shared Bearer credential checked on every BCF request; also gates the `/admin` panel |
-| `BCF_OIDC_SECRET` | No | Signs the `id_token` issued by the OAuth2/OIDC login flow (`bcf/oauth.py`) for clients like BIMcollab ZOOM that require a real-looking Authorization Code + PKCE flow. Falls back to `BCF_API_KEY`, then a hardcoded dev value, if unset |
+| `BCF_OIDC_SECRET` | No | Signs the `id_token` issued by the OAuth2/OIDC login flow (`bcf/oauth.py`) for clients like BIMcollab ZOOM. Falls back to `BCF_API_KEY`, then a hardcoded dev value, if unset |
 | `BCF_ADMIN_EMAIL` / `BCF_ADMIN_PASSWORD` | No | Idempotent startup seed for one `bcf_users` account, for convenience only — the `/admin` panel is always reachable via `BCF_API_KEY` regardless, so leaving these unset can't lock you out |
+| `DASHBOARD_SESSION_SECRET` | No | Signs the dashboard's own login session cookie. Falls back to `BCF_OIDC_SECRET`, then `BCF_API_KEY`, if left blank — set explicitly in production |
+| `DASHBOARD_AUTH_BYPASS` | No | **DEV/TESTING ONLY.** Skips the dashboard login screen and all ISO 19650 role checks. Leave unset/false always — never set in a deployed environment. Logs a startup warning whenever enabled |
+| `NEXTCLOUD_ADMIN_USER` / `NEXTCLOUD_ADMIN_PASSWORD` | Yes | Nextcloud's headless auto-install admin account; also used by bim-normalizer for OCS user/group provisioning |
+| `NEXTCLOUD_DB_USER` / `NEXTCLOUD_DB_PASS` | Yes | Nextcloud's own Postgres role (seeded by `postgres-init/01-nextcloud-db.sh` on a fresh volume) |
+| `NEXTCLOUD_APP_PASSWORD` | No | WebDAV service account password for bim-normalizer's document uploads/moves/deletes (generate via Nextcloud Settings > Security > "Create new app password"). Falls back to the admin password above if unset |
+| `NEXTCLOUD_PORT` | No | Admin/debug port only — never proxied by this dashboard's nginx. Default `8005` |
+| `NEXTCLOUD_URL` / `NEXTCLOUD_USER` | No | Only override if bim-normalizer should talk to a Nextcloud instance other than the bundled container, or use a dedicated WebDAV account instead of the admin one |
+| `VITE_OPENAI_API_KEY` | No | OpenAI key for the AI chat agent (also becomes `OPENAI_API_KEY` server-side) |
+| `VITE_OLLAMA_BASE_URL` / `VITE_OLLAMA_MODEL` | No | Local Ollama endpoint and model name |
+| `VITE_LMSTUDIO_BASE_URL` / `VITE_LMSTUDIO_MODEL` | No | LM Studio endpoint and model name |
+| `VITE_MISTRAL_API_KEY` | No | Mistral AI key (also becomes `MISTRAL_API_KEY` server-side) |
+
+### `bim-normalizer/.env` — local Claude Code MCP integration only
+
+Unrelated to the container stack above. `.mcp.json` runs `speckle_mcp.py` directly on your machine via stdio, and `python-dotenv` loads this file for whichever variables `.mcp.json`'s own `env` block doesn't already set, plus the BCF/Documents tool credentials below:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SPECKLE_SERVER_URL` | No | Speckle server URL — usually already set in `.mcp.json`'s `env` block, which takes precedence |
+| `SPECKLE_TOKEN` | Yes | Personal access token; this is the actual reason this file exists |
+| `BCF_API_KEY` | No | Only needed to use the BCF/Documents MCP tools locally — shared Bearer credential with bcf-server |
+| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login for Documents/CDE MCP tools, used if `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set |
 
 ---
 
@@ -190,132 +190,39 @@ bim_models          stream_id, commit_id, branch_name, source, author, ingested_
         ├── bim_relationships       element_id → related_id, relation_type
         └── bim_element_embeddings  embed_text, embedding (FLOAT[]) — semantic search, search/embeddings.py
 
+bim_model_status     stream_id-scoped model/document status tracking (db/model_status.py)
+
+bim_tasks            4D schedule tasks — name, dates, IFC/MSPDI-imported or manually created (db/schedule.py)
+  ├── bim_task_elements      task_id ↔ element_id links, for viewer sync
+  └── bim_task_dependencies  task_id → predecessor_id (schedule sequencing)
+
 bcf_*                projects, topics, comments, viewpoints (BCF-API 2.1/3.0 schema, bcf/db_schema.py)
 
 bim_jobs             job_id, job_type, status, payload, result, error (async job state — ingest/export/
-                     filter-publish/IDS-check/clash-check — DB-backed so a backend restart doesn't
-                     strand a polling client with an unrecoverable 404, db/jobs.py)
+                     filter-publish/IDS-check/clash-check/document-backfill — DB-backed so a backend
+                     restart doesn't strand a polling client with an unrecoverable 404, db/jobs.py)
+
+bim_documents         stream_id-scoped (survives re-ingestion, unlike model_id), Nextcloud-backed
+                     document metadata — status (WIP/Shared/Published/Archived), doc_type
+                     (document/drawing), a reviewed/approved/verified triad (each with its own
+                     *_by/*_at attribution), revision, linked_bcf_topic, linked_element
+                     (db/documents.py, nextcloud/)
+  └── bim_document_events  append-only audit trail — created/moved/reviewed/approved/verified/revised/deleted/linked
+
+bim_document_roles   stream_id-scoped author/reviewer/approver RBAC backing the /my-roles endpoint
+
+bim_dashboard_layouts        per-project drag-and-drop widget layout (GET/PUT /dashboard-layout)
+bim_classification_overrides manual property overrides (POST /models/{id}/overrides)
+bim_ids_specs                stored IDS specifications (POST /models/{id}/ids-specs)
+auto_sync_servers            watched Speckle servers for webhook-driven auto-sync (GET/POST /auto-sync/servers)
+stream_webhooks               registered Speckle webhook rows (speckle/webhooks.py)
 ```
 
 ### REST API reference
 
-#### Ingest & sync
+bim-normalizer exposes ~70 routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export, IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (the ISO 19650 reviewed → approved → verified gate), dashboard layout/sharing, and debug utilities.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/ingest` | Start async ingest job. Body: `{stream_id, commit_id, force?}` |
-| `GET` | `/ingest/status/{job_id}` | Poll job status |
-| `GET` | `/auto-sync/servers` | List servers watched for webhook-driven auto-sync |
-| `POST` | `/auto-sync/servers` | Add/update a watched server. Enabling immediately triggers one scan rather than waiting for the periodic background pass |
-| `POST` | `/auto-sync/scan` | Fire an on-demand scan of every enabled server. Called by the frontend once on app load so a brand-new project's webhook registers immediately |
-| `POST` | `/webhooks/speckle/{webhook_row_id}` | Webhook receiver — Speckle calls this on `commit_create` (triggers ingest) as well as `stream_delete` / `commit_delete` / `branch_delete` (purges the matching local models and, for a deleted stream, their BCF topics too — Speckle is treated as the single source of truth) |
-
-#### Models
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/models` | List all ingested models |
-| `GET` | `/models/{id}` | Model metadata + element count |
-| `DELETE` | `/models/{id}` | Delete model and all associated data |
-| `GET` | `/models/trend/{stream_id}` | Element/category counts across all versions of a stream |
-
-#### Elements
-
-| Method | Path | Query params | Description |
-|--------|------|-------------|-------------|
-| `GET` | `/models/{id}/elements` | `category`, `ifc_class`, `storey`, `name`, `speckle_id`, `limit`, `offset` | Filtered element list |
-| `GET` | `/models/{id}/elements/flat` | same + `limit`, `offset` | Elements enriched with geometry + material/profile/grade |
-| `GET` | `/models/{id}/elements/by-parameter` | parameter key/value filters | Elements matching arbitrary parameter values |
-| `GET` | `/models/{id}/elements/nearby` | `speckle_id`, `radius_m` | Elements within a radius of a given element's centroid |
-| `GET` | `/models/{id}/elements/semantic-search` | `query`, `limit` | Rank elements by meaning (cosine similarity over local embeddings) instead of exact text match — `[]` if the model predates this feature or the embed step failed at ingest |
-| `GET` | `/elements/{element_id}` | — | Single element with all parameters and geometry |
-| `GET` | `/models/{id}/parameters/keys` | — | Distinct parameter keys present on a model |
-| `GET` | `/models/{id}/parameters/completeness` | — | Per-parameter fill-rate across elements |
-
-#### Analytics
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/models/{id}/summary` | Count + volume + area by category, ifc_class, storey; material/profile/grade distributions |
-| `GET` | `/models/{id}/qa` | Quality report: missing names, storeys, geometry, materials, duplicates; 0–1 score |
-| `GET` | `/models/{id}/qa/elements` | Elements behind a specific QA issue |
-| `GET` | `/diff/{model_a}/{model_b}` | Added / removed / changed elements + per-category deltas |
-| `GET` | `/models/{id}/export/csv` | Export elements/parameters as CSV |
-
-#### Filters & overrides
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/models/{id}/overrides` | List manual property overrides for a model |
-| `POST` | `/models/{id}/overrides` | Create an override |
-| `DELETE` | `/models/{id}/overrides/{override_id}` | Remove an override |
-| `POST` | `/models/{id}/overrides/apply` | Apply pending overrides to stored elements |
-| `POST` | `/models/{id}/filter-publish` | Start async job publishing a filtered element subset back to Speckle |
-| `GET` | `/filter-publish/{job_id}/status` | Poll filter-publish job |
-| `POST` | `/classification/reload` | Hot-reload `config/mapping_canonical.json` classification rules |
-
-#### 4D Timeline & Schedule
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/models/{id}/timeline/params` | Discover date/sequence parameters for animation |
-| `GET` | `/models/{id}/timeline/data` | Elements grouped by parameter value |
-| `GET` | `/models/{id}/schedule` | Return full task tree with linked element `speckle_id`s for viewer sync |
-| `POST` | `/models/{id}/schedule/import` | Import a schedule file (`multipart/form-data`). Accepts `.ifc` (IfcWorkSchedule) or `.xml` (Primavera P6 XML) |
-
-#### IFC Export & Quantities
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/models/{id}/export/ifc` | Start async IFC4X3 export. Returns `{job_id}` |
-| `GET` | `/models/{id}/export/ifc/{job_id}/status` | Poll export job |
-| `GET` | `/models/{id}/export/ifc/{job_id}/download` | Download `.ifc` file |
-| `POST` | `/streams/{stream_id}/original-ifc` | Register the original uploaded `.ifc` blob so export can serve it directly instead of re-exporting |
-| `GET` | `/models/{id}/quantities` | Quantity takeoff from DB — element count + volume (m³) + area (m²). `group_by` = `ifc_class` (default) \| `category` \| `storey` |
-
-If the source is IFC, the original blob uploaded to the Speckle server is served directly — no re-export.
-
-#### IDS checking
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/models/{id}/ids-specs` | Store an IDS specification (XML, built via the graph editor or hand-authored) |
-| `GET` | `/models/{id}/ids-specs` | List stored IDS specs for a model |
-| `GET` | `/models/{id}/ids-specs/{spec_id}` | Fetch one spec |
-| `DELETE` | `/models/{id}/ids-specs/{spec_id}` | Delete a spec |
-| `POST` | `/models/{id}/ids-check` | Run an IDS spec against the model via `ifctester`. Returns `{job_id}` |
-| `GET` | `/models/{id}/ids-check/{job_id}/status` | Poll check job; results map failures to element `speckle_id`s for viewer highlight and optional BCF topic creation |
-
-#### Clash detection
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/models/{id}/clash-check` | Run BVH mesh-level clash detection via `ifcclash` (same engine as BlenderBIM/Bonsai). Body includes `rules[]` and an optional `compare_model_id` — when set, every rule's `selector_a` is checked against *this* model and `selector_b` against `compare_model_id` instead of the model against itself (cross-discipline clashes, e.g. structure vs architecture). Returns `{job_id}` |
-| `GET` | `/models/{id}/clash-check/{job_id}/status` | Poll clash job; results map clashing pairs to element `speckle_id`s for viewer highlight and optional BCF topic creation. For a cross-model check, `ifc_source` is null and `compare` holds `{model_b_id, ifc_source_a, ifc_source_b}` instead |
-
-#### AI Chat
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/servers` | List configured AI provider endpoints |
-| `POST` | `/chat` | Agentic chat with BIM context. Body: `{model_id, message, history, ai_provider, ...}`. Returns `{text, elementIds, toolsUsed}` |
-| `POST` | `/chat/stream` | Same as `/chat`, streamed (SSE) |
-
-#### Dashboard layout & sharing
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` / `PUT` | `/dashboard-layout/{project_id}` | Persist the drag-and-drop widget layout per project |
-| `POST` / `GET` | `/share` | Create / list shareable dashboard snapshots |
-| `GET` / `DELETE` | `/share/{share_id}` | Fetch or revoke a share link |
-
-#### Utility & Debug
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health check — returns `{"status": "ok"}` |
-| `GET` | `/debug/inspect/{stream_id}/{commit_id}` | Geometry coverage analysis without storing |
-| `POST` | `/debug/classify-inspect` | Show classification signals for first N elements |
+**Full method/path/description tables: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#rest-api-reference-bim-normalizer).**
 
 ### Docker
 
@@ -330,11 +237,7 @@ docker compose logs -f bim-normalizer
 docker compose up -d --build bim-normalizer
 ```
 
-The `speckle-network` Docker network must exist before starting:
-
-```bash
-docker network create speckle-network
-```
+`docker-compose.yml` declares its own bridge network (`speckle-net`) and Compose creates it automatically on `up` — no manual `docker network create` step needed.
 
 ---
 
@@ -372,7 +275,12 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that lets Cl
 ### Tool groups
 
 #### IFC session tools
-Work on an in-memory `ifcopenshell` model loaded with `ifc_load` or `speckle_load`.
+Work on an in-memory `ifcopenshell` model loaded with `ifc_load`. The code's own docstrings and
+error messages also point to a `speckle_load(model_id)` bridge tool (export a normalizer-ingested
+model as IFC and load it into this session) — but that function (`speckle_mcp.py:740`) has no
+`@mcp.tool()` decorator, so it is **not actually registered/callable** (confirmed absent from the
+live tool listing). Likely a bug: currently there's no way to load a normalizer-ingested model into
+an IFC session via MCP, only a local `.ifc` file via `ifc_load`.
 
 | Tool | Description |
 |------|-------------|
@@ -407,7 +315,6 @@ Work on an in-memory `ifcopenshell` model loaded with `ifc_load` or `speckle_loa
 | `speckle_get_materials(model_id)` | Material definitions used in a model |
 | `speckle_get_profiles(model_id)` | Structural profile definitions used in a model |
 | `speckle_ingest(stream_id, commit_id)` | Ingest a Speckle commit (waits for completion) |
-| `speckle_load(model_id)` | Export as IFC and load into memory session |
 | `speckle_export_csv(model_id, ...)` | Export elements/parameters as CSV |
 
 #### Filters & overrides tools
@@ -458,6 +365,29 @@ you just need the raw result rather than a synthesized report.
 | `speckle_clash_check(model_id, rules_json, compare_model_id?)` | Run BVH mesh-level clash detection (ifcclash) and wait for the result (blocking, up to 5 min). `rules_json`: JSON array of `{name?, selector_a, selector_b?, mode?, tolerance?, clearance?}` |
 | `speckle_schedule(model_id)` | Full 4D task schedule tree — name, WBS code, status, dates, critical-path flag, linked element count |
 
+#### Documents & BCF tools
+Mirror the Documents and BCF REST APIs above, for use from Claude without going through the
+dashboard UI. Document tools need a real dashboard login (`MCP_DASHBOARD_EMAIL`/`_PASSWORD`, or
+the `BCF_ADMIN_EMAIL`/`_PASSWORD` fallback) since they're role-gated; BCF topic tools work with
+just `BCF_API_KEY`.
+
+| Tool | Description |
+|------|-------------|
+| `speckle_list_documents(stream_id, status?)` | List documents for a project |
+| `speckle_document_detail(stream_id, doc_id)` | Metadata + audit event history |
+| `speckle_upload_document(stream_id, ...)` | Upload a document — lands in `01_WIP` |
+| `speckle_move_document(stream_id, doc_id, status)` | Move between WIP/Shared/Published/Archived (app-enforced gate) |
+| `speckle_set_document_review(stream_id, doc_id)` / `speckle_set_document_approval(...)` / `speckle_set_document_verification(...)` | Set the reviewed / approved / verified stage |
+| `speckle_link_document_topic(stream_id, doc_id, topic_id)` / `speckle_link_document_element(...)` | Link a document to a BCF topic or model element |
+| `speckle_delete_document(stream_id, doc_id)` | Soft-delete (audit trail survives) |
+| `speckle_list_topics(stream_id)` | List BCF topics for a project |
+| `speckle_topic_detail(stream_id, topic_id)` | Full topic detail |
+| `speckle_create_topic(stream_id, ...)` / `speckle_update_topic(...)` | Create/update a BCF topic |
+| `speckle_list_comments(stream_id, topic_id)` / `speckle_add_comment(...)` | List/add topic comments |
+| `speckle_list_viewpoints(stream_id, topic_id)` | List topic viewpoints |
+| `speckle_list_ids_specs(model_id)` / `speckle_upload_ids_spec(...)` / `speckle_delete_ids_spec(...)` | List/store/delete IDS specifications |
+| `speckle_ids_check(model_id, spec_id)` | Run an IDS spec against the model via `ifctester` |
+
 #### Cache maintenance
 Read-heavy tools (`speckle_get_summary`, `speckle_qa_check`, `speckle_qa_elements`,
 `speckle_semantic_search`, `speckle_parameter_keys`, `speckle_get_materials`,
@@ -481,7 +411,8 @@ for how to verify the clash/schedule tools, cache, and resources end-to-end. Unl
 search round, this one only touches `speckle_mcp.py` — no `bim-normalizer` rebuild needed.
 
 #### 5D / Quantity tools (IFC session)
-Work on the model loaded with `ifc_load` or `speckle_load`.
+Work on the model loaded with `ifc_load` (see the `speckle_load` bug note above — there is
+currently no MCP path to load a normalizer-ingested model here).
 
 | Tool | Description |
 |------|-------------|
@@ -509,7 +440,7 @@ See [`bim-normalizer/npm-mcp-setup.md`](bim-normalizer/npm-mcp-setup.md) for the
   "mcpServers": {
     "speckle-ifc": {
       "type": "http",
-      "url": "https://mcp.speckle.example.com/mcp",
+      "url": "https://mcp-speckle.example.com/mcp",
       "headers": { "X-Api-Key": "<your MCP_API_KEY>" }
     }
   }
@@ -552,6 +483,8 @@ npm run lint      # ESLint
 | `BcfTopicPanel` / `BcfLogoIcon` | BCF topic list/detail view — create, comment, and resolve issues |
 | `BcfKanbanBoard` | Drag-and-drop Kanban board for BCF topic status |
 | `BcfStatsWidget` | Topic counts by status/priority |
+| `DocumentsPanel` | Nextcloud-backed document workflow: drag-and-drop WIP/Shared/Published/Archived board with an app-enforced reviewed → approved → verified gate |
+| `DocumentPreview` (`document-preview/{IfcCanvas,DxfCanvas,DocxCanvas,XlsxCanvas}`) | In-browser document preview — PDF (native iframe), IFC (`web-ifc` WASM + Three.js), DXF (`dxf-viewer`, WebGL/Three.js), DOCX (`docx-preview`, renders to HTML/CSS), XLSX/legacy XLS (SheetJS `xlsx`, `sheet_to_html` per sheet). `.dwg` is converted to DXF server-side (`bim-normalizer/dwg_convert.py` + LibreDWG's `dwg2dxf`) and rendered by the same DXF viewer. No preview path for legacy binary `.doc` |
 | `ChatWidget` | AI assistant chat (OpenAI / Ollama / LM Studio / Mistral) |
 | `MarkdownWidget` | Editable markdown notes panel |
 | `MetricsConfig` | Configuration panel for AdaptiveMetrics thresholds |
@@ -566,6 +499,12 @@ npm run lint      # ESLint
 | `VideoWidget` | Embedded video panel for walkthroughs/recordings |
 | `IfcLogoIcon` | IFC logo SVG (used as export button) |
 | `ErrorBoundary` | React error boundary for graceful per-widget failure isolation |
+| `LoginScreen` / `AuthContext` | Dashboard login screen and auth state, gating the ISO 19650 author/reviewer/approver role checks (bypassable only via `DASHBOARD_AUTH_BYPASS`, dev-only) |
+| `SpeckleModelsList` | Browsable list of Speckle projects/models for selection |
+| `CombineModelsPicker` / `FederatedBar` / `FederatedClashPanel` | Federated (multi-model) view: combine several models in the viewer and run cross-model clash checks across them |
+| `ViewpointMarkupEditor` | Annotate/markup a 3D viewpoint before attaching it to a BCF topic |
+| `PanoramaThumbnail` | Thumbnail preview for 360°/panorama images |
+| `SchedulePanel` | Native 4D planner: right-docked drawer with Gantt (`ScheduleGanttView`) and build-up playback (`SchedulePlaybackView`) tabs |
 
 ### Dashboard data flow
 
@@ -600,138 +539,9 @@ docker compose up -d --build
 
 ## Project structure
 
-```
-converge/
-├── src/
-│   ├── App.jsx                        Main application, data loading, routing
-│   ├── main.jsx                       React entry point
-│   ├── index.css                      Global styles
-│   ├── components/
-│   │   ├── SpeckleViewer.jsx
-│   │   ├── AdaptiveCharts.jsx
-│   │   ├── EChart.jsx                 ECharts/core wrapper component
-│   │   ├── AdaptiveMetrics.jsx
-│   │   ├── ElementTable.jsx
-│   │   ├── ElementPanel.jsx
-│   │   ├── PivotTableWidget.jsx
-│   │   ├── QuantityWidget.jsx         5D quantity takeoff visualisation
-│   │   ├── ScheduleWidget.jsx         Gantt-style schedule viewer
-│   │   ├── ValidationWidget.jsx
-│   │   ├── FilterWidget.jsx
-│   │   ├── ActiveFilters.jsx
-│   │   ├── ClashCheckPanel.jsx        ifcclash results + viewer highlight
-│   │   ├── ClashLogoIcon.jsx
-│   │   ├── IdsCheckPanel.jsx          ifctester IDS validation results
-│   │   ├── IdsGraphEditor.jsx         Visual IDS spec authoring (xyflow)
-│   │   ├── idsGraphNodeTypes.jsx
-│   │   ├── IdsLogoIcon.jsx
-│   │   ├── BcfTopicPanel.jsx          BCF topic list/detail
-│   │   ├── BcfKanbanBoard.jsx         BCF topic Kanban board
-│   │   ├── BcfStatsWidget.jsx
-│   │   ├── BcfLogoIcon.jsx
-│   │   ├── ChatWidget.jsx
-│   │   ├── MarkdownWidget.jsx         Editable markdown notes panel
-│   │   ├── MetricsConfig.jsx          Threshold config for AdaptiveMetrics
-│   │   ├── DiffBar.jsx
-│   │   ├── TimelinePlayer.jsx
-│   │   ├── DashboardGrid.jsx          Drag-and-drop resizable widget grid
-│   │   ├── WidgetFAB.jsx
-│   │   ├── ViewerToolbar.jsx          3D viewer action toolbar
-│   │   ├── ChartBuilder.jsx
-│   │   ├── chartSettingsUI.jsx
-│   │   ├── StandaloneChartWidget.jsx
-│   │   ├── BreadcrumbSelector.jsx
-│   │   ├── CompareVersionToggle.jsx
-│   │   ├── IngestProgress.jsx
-│   │   ├── PublishSelectionButton.jsx
-│   │   ├── VideoWidget.jsx
-│   │   ├── IfcLogoIcon.jsx            IFC logo SVG (used as export button)
-│   │   ├── ErrorBoundary.jsx          Per-widget React error boundary
-│   │   └── ...
-│   ├── lib/
-│   │   ├── echarts.js                 Central ECharts registration (tree-shaken chart types)
-│   │   └── echartsTheme.js            Shared dark/light theme builders for chart options
-│   └── utils/
-│       ├── speckleContextBuilder.js   Builds AI context from model data
-│       ├── propertyScanner.js         Scans object trees for property keys
-│       ├── filterRules.js             Rule evaluation shared by FilterWidget/viewer/filter-publish
-│       ├── bcfClient.js               BCF-API REST client used by all BCF/clash/IDS panels
-│       ├── bcfSync.js                 Syncs BCF topic state with viewer selection/highlight
-│       ├── bcfWorkflow.js             BCF status transition rules
-│       ├── idsTemplates.js            Built-in IDS specification templates
-│       ├── idsGraphToXml.js           IDS graph editor → IDS 1.0 XML (clean-room, no AGPL deps)
-│       ├── idsXmlToGraph.js           IDS 1.0 XML → graph editor nodes
-│       └── useDrawerWidth.js          Hook for resizable side-drawer width
-│
-├── bim-normalizer/
-│   ├── main.py                        FastAPI app: lifespan, middleware, /health, router wiring
-│   ├── job_registry.py                UUID validation + Content-Disposition header helpers shared by routers (job state itself lives in db/jobs.py, not here)
-│   ├── speckle_mcp.py                 MCP server (50+ tools + 2 resources)
-│   ├── bcf_server.py                  BCF-API 2.1/3.0 server (separate process/container)
-│   ├── clash_check.py                 Clash detection via ifcclash
-│   ├── ids_check.py                   IDS validation via ifctester
-│   ├── Dockerfile                     Python 3.11 image (shared by normalizer/MCP/BCF)
-│   ├── docker-compose.yml             normalizer + speckle-mcp services (standalone dev compose)
-│   ├── requirements.txt
-│   ├── .env                           secrets (not committed)
-│   ├── npm-mcp-setup.md               NPM reverse proxy setup guide
-│   ├── testing-semantic-search.md     How to verify semantic search + agentic QA/element tools
-│   ├── testing-clash-schedule-resources.md  How to verify clash/schedule tools, caching, resources
-│   ├── routers/                       One APIRouter module per REST API reference section below
-│   │   ├── dashboard.py, sync.py, chat.py, ingest.py, models.py, elements.py   Share links/layout, Speckle server config, AI chat, ingest, models, elements
-│   │   ├── analytics.py, timeline.py, debug.py, overrides.py                  Diff/summary/QA/CSV, 4D timeline/schedule, debug inspectors, classification overrides
-│   │   └── filter_publish.py, ifc_export.py, ids_check.py, clash_check.py     Filter-publish, IFC export/quantities, IDS checking, clash detection
-│   ├── bcf/
-│   │   ├── projects.py, topics.py, comments.py, viewpoints.py   Core BCF-API routers
-│   │   ├── auth.py, auth_discovery.py                            Bearer auth + discovery
-│   │   ├── foundation.py                                         OpenCDE Foundation API (/foundation/{version}/auth)
-│   │   ├── oauth.py                                              Real OAuth2/OIDC login against bcf_users, for BIMcollab ZOOM/Solibri
-│   │   ├── users.py, password.py                                 bcf_users CRUD + bcrypt hashing
-│   │   ├── admin.py                                              Standalone admin page (/admin) — users, sessions, models, extensions, request log
-│   │   ├── request_log.py                                        In-memory ring buffer of recent HTTP requests, surfaced in admin.py
-│   │   ├── bridge.py                                             Speckle stream_id ↔ model_id resolution
-│   │   ├── bcfxml.py                                             .bcfzip import/export
-│   │   ├── db.py, db_schema.py                                   BCF Postgres schema + queries
-│   │   ├── schemas.py                                            Pydantic models
-│   │   └── versions.py                                           BCF version constants + is_bcf_v3() request-path detection
-│   ├── chat/
-│   │   └── agent.py                   Agentic chat backend (LLM + DB tools)
-│   ├── pipeline/
-│   │   └── normalize.py               Ingest pipeline orchestrator (incl. best-effort embedding step)
-│   ├── search/
-│   │   └── embeddings.py              Local CPU embedding model (fastembed) + cosine similarity for semantic search
-│   ├── speckle/
-│   │   ├── fetch.py                   Speckle commit fetch + element flattening
-│   │   ├── client.py                  SpecklePy client wrapper
-│   │   ├── publish.py                 Filter-publish back to Speckle
-│   │   └── webhooks.py                Backend-driven auto-sync webhook registration
-│   ├── ifc/
-│   │   ├── classify.py                speckle_type + properties → IFC class/category
-│   │   ├── geometry.py                Mesh extraction, bbox, centroid, volume
-│   │   ├── spatial.py                 Storey detection, applicationId extraction
-│   │   ├── export.py                  IFC4X3 file generation
-│   │   └── schema.py                  IFC schema helpers
-│   ├── db/
-│   │   ├── models.py                  PostgreSQL schema (CREATE TABLE statements)
-│   │   ├── connection.py              Connection pool
-│   │   ├── insert.py                  Upsert helpers
-│   │   ├── query.py                   Summary, QA, flat element queries
-│   │   ├── jobs.py                    DB-backed async job tracking (bim_jobs table)
-│   │   ├── purge.py                   Deletes local models (+ cascaded data) mirroring a Speckle-side deletion
-│   │   ├── timeline.py                4D parameter discovery
-│   │   └── schedule.py                4D schedule: IFC work schedule + P6 XML import
-│   └── config/
-│       └── settings.py                Environment variable loading
-│
-├── docker-compose.yml                 Full stack: postgres, bim-normalizer, speckle-mcp, bcf-server, dashboard
-├── Dockerfile                         Frontend build (Vite) + nginx serve
-├── nginx.conf.template                Proxies /normalizer/ and /bcf/ to backend containers
-├── .mcp.json                          MCP server registration (Claude Code)
-├── package.json
-├── vite.config.js
-├── tailwind.config.js
-└── README.md
-```
+Top-level layout — `src/` (React frontend), `bim-normalizer/` (FastAPI backend: ingest, REST API, MCP server, bcf-server, Nextcloud client), plus `public/`, `nextcloud-hooks/`, `postgres-init/`, and the root Docker/Vite config files.
+
+**Full annotated file tree: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#project-structure).**
 
 ---
 

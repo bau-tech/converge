@@ -45,7 +45,18 @@ const CHART_OBJECT_KEYS = new Set([
 // Internal / non-display root keys
 const EXCLUDE_ROOT_KEYS = new Set([
     'elements', 'success', 'project_id', 'version_id', 'model_name', 'summary',
+    // model_id/normalizer_model_id are load-bearing functional state elsewhere
+    // (gate toolbar buttons, feed BCF/IDS/Clash panels) — excluded here only
+    // from the metrics/config panel display, not from the underlying data.
+    'model_id', 'normalizer_model_id',
 ])
+
+// Internal / non-display summary keys — same idea as EXCLUDE_ROOT_KEYS but
+// for data.summary's own scalar passthrough fields (author, ingested_at,
+// etc.), which are metadata rather than meaningful dashboard metrics.
+// author still feeds the AI chat's modelContext elsewhere, so it's excluded
+// only from this display, not removed from data.summary itself.
+const EXCLUDE_SUMMARY_KEYS = new Set(['author', 'ingested_at'])
 
 // Display order priority (lower index = shown first)
 const DISPLAY_PRIORITY = [
@@ -100,6 +111,7 @@ export function discoverMetrics(data) {
     // Summary scalars and auto-count from by_* objects
     if (data.summary) {
         for (const [key, value] of Object.entries(data.summary)) {
+            if (EXCLUDE_SUMMARY_KEYS.has(key)) continue
             if (CHART_OBJECT_KEYS.has(key)) {
                 // Generate count metric for selected by_* keys
                 const countKey = COUNT_METRIC_MAP[key]

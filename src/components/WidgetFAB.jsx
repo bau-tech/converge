@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Activity, Table, Layout, ShieldCheck, CalendarClock, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video, Filter } from 'lucide-react'
+import { Plus, Activity, Table, Layout, ShieldCheck, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video, Filter } from 'lucide-react'
 import { BcfLogoIcon } from './BcfLogoIcon'
 
 // Same neutral icon/hover treatment as every other panel's list items
@@ -11,7 +11,6 @@ const WIDGET_TYPES = [
     { type: 'pivot',      icon: Layout,        label: 'Pivot' },
     { type: 'filter',     icon: Filter,        label: 'Filter Builder' },
     { type: 'validation', icon: ShieldCheck,   label: 'Validation' },
-    { type: 'schedule',   icon: CalendarClock, label: '4D Schedule' },
     { type: 'quantities', icon: Boxes,         label: '5D Quantities' },
     { type: 'chart',      icon: Activity,      label: 'Custom Chart' },
     { type: 'text',       icon: FileText,      label: 'Notes' },
@@ -32,7 +31,13 @@ export function WidgetFAB({
     const hasCharts = availableCharts.length > 0
 
     return (
-        <div className="fixed bottom-6 left-6 z-[100000] flex flex-col items-start gap-3">
+        // z-[250]: above the viewer toolbar/header (header 150, toolbar's real
+        // global z-[240] — see SpeckleViewer.jsx's portal wrapper) so it floats
+        // over the dashboard as intended, but below the mobile bottom
+        // sheets (z-[300] in App.jsx) — at the old z-[100000] this poked
+        // through the model-picker/actions sheets on mobile since nothing
+        // else in that range ever needed to sit between them.
+        <div className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] left-6 z-[250] flex flex-col items-start gap-3">
             <AnimatePresence>
                 {open && (
                     <motion.div

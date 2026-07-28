@@ -4,6 +4,7 @@ import { X, Play, Loader2, Send, AlertTriangle, Plus, Trash2 } from 'lucide-reac
 import { createTopic, createViewpoint } from '../utils/bcfClient'
 import { useDrawerWidth } from '../utils/useDrawerWidth'
 import { ClashLogoIcon } from './ClashLogoIcon'
+import { useAuth } from '../contexts/AuthContext'
 
 const MODES = [
     { value: 'collision', label: 'Collision (overlapping solids)' },
@@ -42,6 +43,7 @@ function newRule() {
 // against that same export in one job, so results come back grouped by rule.
 export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, ifcClasses = [], onClose, serverUrl, serverToken }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
+    const { user } = useAuth()
     const [width, startResize] = useDrawerWidth()
 
     const [rules, setRules] = useState(() => [newRule()])
@@ -54,6 +56,12 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
     const [pushing, setPushing] = useState(false)
     const [pushedMsg, setPushedMsg] = useState(null)
     const pollRef = useRef(null)
+
+    // Unlike IdsCheckPanel's identical polling loop, this one had no unmount
+    // cleanup — closing the panel (or the parent hiding it) before a check
+    // finished left the setTimeout chain polling indefinitely and calling
+    // setResult/setChecking on an unmounted component.
+    useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
 
     // Other already-ingested models this model can be cross-checked against
     // (clash-check operates on bim_models rows, so the candidate model must
@@ -164,7 +172,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
         if (!projectId || selected.size === 0 || !result) return
         setPushing(true)
         setPushedMsg(null)
-        const authorName = localStorage.getItem('bcfAuthorName') || 'Clash Check'
+        const authorName = user?.name || 'Clash Check'
         const created = []
         let snapshotCount = 0
         for (const key of selected) {

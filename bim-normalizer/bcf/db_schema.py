@@ -164,14 +164,28 @@ ON CONFLICT DO NOTHING;
 # serialize as the literal string "None" — backfill once per project,
 # oldest-first, so every row has a value. Safe to re-run: only touches rows
 # still NULL.
+#
+# Numbers from each project's own existing MAX("index") (0 if the project
+# has none yet) rather than from 1 — plain ROW_NUMBER() starting at 1 would
+# collide with indices already assigned by create_topic/import_bcfzip to
+# that same model_id, producing duplicate server_assigned_id values for
+# BCF 3.0 clients.
 BACKFILL_INDEX_SQL = """
-WITH numbered AS (
-    SELECT guid, ROW_NUMBER() OVER (PARTITION BY model_id ORDER BY creation_date) AS rn
+WITH existing_max AS (
+    SELECT model_id, COALESCE(MAX("index"), 0) AS max_index
     FROM bcf_topics
-    WHERE "index" IS NULL
+    WHERE "index" IS NOT NULL
+    GROUP BY model_id
+),
+numbered AS (
+    SELECT t.guid, t.model_id,
+           ROW_NUMBER() OVER (PARTITION BY t.model_id ORDER BY t.creation_date) AS rn
+    FROM bcf_topics t
+    WHERE t."index" IS NULL
 )
-UPDATE bcf_topics t SET "index" = numbered.rn
+UPDATE bcf_topics t SET "index" = COALESCE(em.max_index, 0) + numbered.rn
 FROM numbered
+LEFT JOIN existing_max em ON em.model_id = numbered.model_id
 WHERE t.guid = numbered.guid;
 """
 

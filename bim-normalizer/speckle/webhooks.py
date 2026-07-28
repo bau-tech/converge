@@ -307,7 +307,9 @@ def scan_server(server_url: str, token: str) -> int:
         # one GraphQL call per stream — and runs for every watched stream,
         # not just ones registered this pass.
         reconciled = 0
-        from pipeline.normalize import ingest_commit
+        import uuid
+        from pipeline.normalize import ingest_commit, generate_embeddings_for_model
+        from db.jobs import create_job, update_job, find_running_job
         for stream_id in stream_ids:
             try:
                 latest_commit_id = get_latest_commit_id(server_url, token, stream_id)
@@ -322,7 +324,61 @@ def scan_server(server_url: str, token: str) -> int:
                 ingested_commit_id = row[0] if row else None
                 if ingested_commit_id == latest_commit_id:
                     continue
-                ingest_commit(stream_id=stream_id, commit_id=latest_commit_id, token=token, server_url=server_url)
+
+                # This calls ingest_commit() directly rather than through
+                # routers/ingest.py's POST /ingest, so without this guard it
+                # never went through that endpoint's dedup either — a manual
+                # ingest of the same commit (someone opening the project
+                # while this scan is mid-cycle) could run fully concurrently
+                # with this one. Confirmed in production: two long-running
+                # ingest_commit() calls racing on bim_models' (stream_id,
+                # commit_id) unique constraint left the commit fully
+                # unpersisted despite both reporting success — a large model
+                # takes minutes to ingest, which is plenty of overlap window
+                # for this scan (runs on every project load, not just on a
+                # timer) to catch mid-flight. Same
+                # pg_advisory_xact_lock + find_running_job pattern as
+                # routers/ingest.py, and the same bim_jobs row it writes is
+                # what that endpoint's own find_running_job() checks — so a
+                # manual request arriving during this reconciliation attempt
+                # now sees it as in-progress and joins it instead of racing it.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                        (f"ingest:{stream_id}:{latest_commit_id}",),
+                    )
+                if find_running_job(conn, "ingest", stream_id=stream_id, commit_id=latest_commit_id):
+                    continue  # a manual ingest already has this one — don't duplicate it
+                job_id = str(uuid.uuid4())
+                create_job(conn, job_id, "ingest", payload={"stream_id": stream_id, "commit_id": latest_commit_id})
+
+                try:
+                    ingest_result = ingest_commit(
+                        stream_id=stream_id, commit_id=latest_commit_id, token=token, server_url=server_url,
+                    )
+                except Exception as exc:
+                    update_job(conn, job_id, status="failed", error=str(exc))
+                    raise
+                update_job(conn, job_id, status="complete", result={
+                    "model_id": ingest_result["model_id"],
+                    "element_count": ingest_result["element_count"],
+                    "skipped_count": ingest_result.get("skipped_count"),
+                    "skip_geo_count": ingest_result.get("skip_geo_count"),
+                    "skip_param_count": ingest_result.get("skip_param_count"),
+                })
+
+                # Same reasoning as routers/ingest.py: embeddings are slow
+                # CPU-bound inference and shouldn't hold this reconciliation
+                # pass up — this whole function already runs off the main
+                # event loop (scan_all_enabled_servers wraps it in
+                # asyncio.to_thread), so a synchronous call here doesn't
+                # block request handling, just this one background thread.
+                try:
+                    generate_embeddings_for_model(ingest_result["model_id"])
+                except Exception as exc:
+                    logger.warning("Background embedding generation failed for model %s: %s",
+                                    ingest_result["model_id"], exc)
+
                 reconciled += 1
                 logger.info(
                     "Reconciled stream %s on %s: ingested missed commit %s",

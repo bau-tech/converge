@@ -14,9 +14,8 @@ API's api_base_url; the routes below are what actually need to exist behind it.
 
 from fastapi import APIRouter, Depends, Request
 
-from bcf.auth import require_bcf_auth, get_bearer_token
+from bcf.auth import get_current_bcf_user
 from bcf.auth_discovery import auth_response
-from bcf.oauth import current_user
 from bcf.versions import FOUNDATION_VERSION, FOUNDATION_LEGACY_VERSION
 
 router = APIRouter(tags=["bcf-foundation"])
@@ -32,17 +31,11 @@ def get_foundation_auth_legacy(request: Request):
     return auth_response(str(request.base_url).rstrip("/"))
 
 
-@router.get(
-    f"/foundation/{FOUNDATION_VERSION}/current-user",
-    dependencies=[Depends(require_bcf_auth)],
-)
-def get_foundation_current_user(access_token: str = Depends(get_bearer_token)):
-    return current_user(access_token)
+@router.get(f"/foundation/{FOUNDATION_VERSION}/current-user")
+def get_foundation_current_user(user: dict = Depends(get_current_bcf_user)):
+    return user
 
 
-@router.get(
-    f"/foundation/{FOUNDATION_LEGACY_VERSION}/current-user",
-    dependencies=[Depends(require_bcf_auth)],
-)
-def get_foundation_current_user_legacy(access_token: str = Depends(get_bearer_token)):
-    return current_user(access_token)
+@router.get(f"/foundation/{FOUNDATION_LEGACY_VERSION}/current-user")
+def get_foundation_current_user_legacy(user: dict = Depends(get_current_bcf_user)):
+    return user

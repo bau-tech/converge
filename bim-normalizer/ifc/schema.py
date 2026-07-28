@@ -1,7 +1,10 @@
 """
 IFC schema constants, known Pset names, and unit conversion helpers.
 """
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 # Known Pset names by IFC class (non-exhaustive, extend as needed)
 PSET_BY_IFC_CLASS: dict[str, list[str]] = {
@@ -28,39 +31,46 @@ IFC_ENTITIES = {
     "IfcBuildingElementProxy", "IfcPropertySingleValue",
 }
 
-# Unit conversion factors → always normalise to SI base units
-MM_TO_M   = 0.001
-CM_TO_M   = 0.01
-IN_TO_M   = 0.0254
-FT_TO_M   = 0.3048
+# Length-unit conversion factors → SI (metres). Recognizes both IFC/Speckle
+# abbreviations and full English unit words, so identically-meant units
+# labeled differently by different connectors convert identically. This is
+# the single source of truth for unit conversion in the normalizer — reused
+# by db/insert.py's parameter SI-normalization and by ifc/geometry.py's mesh
+# volume/area computation, instead of each maintaining its own (previously
+# divergent, abbreviation-only) table.
+LENGTH_TO_M = {
+    "mm": 0.001, "millimeter": 0.001, "millimeters": 0.001, "millimetre": 0.001, "millimetres": 0.001,
+    "cm": 0.01, "centimeter": 0.01, "centimeters": 0.01, "centimetre": 0.01, "centimetres": 0.01,
+    "m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
+    "km": 1000.0, "kilometer": 1000.0, "kilometers": 1000.0,
+    "in": 0.0254, "inch": 0.0254, "inches": 0.0254,
+    "ft": 0.3048, "foot": 0.3048, "feet": 0.3048,
+    "yd": 0.9144, "yard": 0.9144, "yards": 0.9144,
+}
 
-MM3_TO_M3 = 1e-9
-CM3_TO_M3 = 1e-6
-IN3_TO_M3 = 1.6387064e-5
-FT3_TO_M3 = 0.0283168
-
-MM2_TO_M2 = 1e-6
-CM2_TO_M2 = 1e-4
-IN2_TO_M2 = 6.4516e-4
-FT2_TO_M2 = 0.092903
+MASS_TO_KG = {
+    "kg": 1.0, "kilogram": 1.0, "kilograms": 1.0,
+    "g": 0.001, "gram": 0.001, "grams": 0.001,
+    "t": 1000.0, "tonne": 1000.0, "tonnes": 1000.0, "ton": 1000.0, "tons": 1000.0,
+    "lb": 0.45359237, "lbs": 0.45359237, "pound": 0.45359237, "pounds": 0.45359237,
+}
 
 
 def length_to_m(value: float, units: str) -> float:
-    u = (units or "mm").lower()
-    factors = {"mm": MM_TO_M, "cm": CM_TO_M, "m": 1.0, "in": IN_TO_M, "ft": FT_TO_M}
-    return value * factors.get(u, MM_TO_M)
+    u = (units or "mm").strip().lower()
+    factor = LENGTH_TO_M.get(u)
+    if factor is None:
+        logger.warning("length_to_m: unrecognized unit %r, assuming mm", units)
+        factor = LENGTH_TO_M["mm"]
+    return value * factor
 
 
 def volume_to_m3(value: float, units: str) -> float:
-    u = (units or "mm").lower()
-    factors = {"mm": MM3_TO_M3, "cm": CM3_TO_M3, "m": 1.0, "in": IN3_TO_M3, "ft": FT3_TO_M3}
-    return value * factors.get(u, MM3_TO_M3)
+    return value * length_to_m(1.0, units) ** 3
 
 
 def area_to_m2(value: float, units: str) -> float:
-    u = (units or "mm").lower()
-    factors = {"mm": MM2_TO_M2, "cm": CM2_TO_M2, "m": 1.0, "in": IN2_TO_M2, "ft": FT2_TO_M2}
-    return value * factors.get(u, MM2_TO_M2)
+    return value * length_to_m(1.0, units) ** 2
 
 
 def sanitize_float(v):

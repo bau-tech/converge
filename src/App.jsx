@@ -9,7 +9,7 @@ import {
     X,
     Search,
     Loader2,
-    Clock,
+    CalendarClock,
     Share2,
     Save,
     Check,
@@ -20,13 +20,16 @@ import {
     ExternalLink,
     ChevronDown,
     MoreHorizontal,
+    FileText,
+    LogOut,
+    Play,
 } from 'lucide-react'
 import { ClashLogoIcon } from './components/ClashLogoIcon'
 import { CompareVersionToggle } from './components/CompareVersionToggle'
 import SpeckleViewer from './components/SpeckleViewer'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import ElementPanel from './components/ElementPanel'
-import { AdaptiveCharts, DynamicChart, discoverChartFields, CHART_CONFIG } from './components/AdaptiveCharts'
+import { AdaptiveCharts, DynamicChart, discoverChartFields, CHART_CONFIG, COMBINED_MODEL_KEY } from './components/AdaptiveCharts'
 import { AdaptiveMetrics } from './components/AdaptiveMetrics'
 import { ElementTable } from './components/ElementTable'
 import { ActiveFilters } from './components/ActiveFilters'
@@ -36,12 +39,12 @@ import { ChatWidget } from './components/ChatWidget'
 import PivotTableWidget from './components/PivotTableWidget'
 import ValidationWidget from './components/ValidationWidget'
 import FilterWidget from './components/FilterWidget'
-import ScheduleWidget from './components/ScheduleWidget'
 import QuantityWidget from './components/QuantityWidget'
 import { VideoWidget } from './components/VideoWidget'
 import { StandaloneChartWidget } from './components/StandaloneChartWidget'
 import { IfcLogoIcon } from './components/IfcLogoIcon'
 import { BreadcrumbSelector } from './components/BreadcrumbSelector'
+import { SemanticSearchStatus } from './components/SemanticSearchStatus'
 import { WidgetFAB } from './components/WidgetFAB'
 import { BcfTopicPanel } from './components/BcfTopicPanel'
 import { BcfKanbanBoard } from './components/BcfKanbanBoard'
@@ -50,18 +53,41 @@ import { BcfLogoIcon } from './components/BcfLogoIcon'
 import { IdsLogoIcon } from './components/IdsLogoIcon'
 import { IdsCheckPanel } from './components/IdsCheckPanel'
 import { ClashCheckPanel } from './components/ClashCheckPanel'
+import { CombineModelsPicker, nextCombineColor } from './components/CombineModelsPicker'
+import { FederatedClashPanel } from './components/FederatedClashPanel'
+import { DocumentsPanel } from './components/DocumentsPanel'
+import { SchedulePanel } from './components/SchedulePanel'
+import { SchedulePlaybackView } from './components/SchedulePlaybackView'
 import PublishSelectionButton from './components/PublishSelectionButton'
 import { IngestProgress } from './components/IngestProgress'
 import { flattenObject, getNestedValue } from './utils/propertyScanner'
 import { generateSummaryFromElements } from './utils/propertyScanner'
 import { listTopics, listViewpoints } from './utils/bcfClient'
 import { pullFromSpeckle, pushToSpeckle } from './utils/bcfSync'
+import { useAuth } from './contexts/AuthContext'
+import { LoginScreen } from './components/LoginScreen'
+import { LandingPage } from './components/LandingPage'
 
 const CONFIG = {
     normalizerUrl: import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002',
     speckleServer: import.meta.env.VITE_SPECKLE_SERVER || 'https://speckle.example.com',
-    speckleToken: import.meta.env.VITE_SPECKLE_TOKEN || ''
+    speckleToken: import.meta.env.VITE_SPECKLE_TOKEN || '',
+    // 'full' | 'readonly' — see .env.example. Decides what an anonymous
+    // /shareXXX visitor gets once the auth gate (App(), below) would
+    // otherwise have sent them to the sign-in screen before Dashboard's own
+    // share-resolution effect ever got a chance to run.
+    shareLinkMode: import.meta.env.VITE_SHARE_LINK_MODE || 'full',
 }
+
+// Detected at module load — same timing as _urlSeed below — so App()'s auth
+// gate can decide whether to let an anonymous visitor through *before* it
+// commits to rendering LandingPage. Only checks for *presence* of a share id
+// (cheap regex, no fetch); the actual payload fetch still happens in
+// Dashboard's existing share-resolution effect once it mounts.
+const _shareId = (() => {
+    const pathMatch = window.location.pathname.match(/^\/(share[A-Za-z0-9_-]+)$/)
+    return pathMatch ? pathMatch[1] : new URLSearchParams(window.location.search).get('share')
+})()
 
 // Parse share-link URL param once at module load so useState initialisers can read it
 const _urlSeed = (() => {
@@ -131,17 +157,76 @@ function adaptNormalizerElement(el) {
         grade_short:  el.grade     || '',
         profile_type: el.profile_type || '',
         material_category: el.material_category || '',
-        // Fields not yet in normalizer — set neutral defaults
+        // phase/workset are now provided by the normalizer (canonical_key
+        // resolution added to db/query.py's get_elements_flat) — falling
+        // back to the spread value instead of hard-nulling it, the same
+        // pattern material_category/profile_type already use above. The
+        // rest genuinely aren't supplied under these exact field names yet.
         weight_kg:    null,
         length_mm:    null,
         discipline:   null,
         family:       null,
         type:         null,
-        phase:        null,
-        workset:      null,
+        phase:        el.phase   || null,
+        workset:      el.workset || null,
         status:       null,
         validation_issues: [],
     }
+}
+
+// Layers viewer selection → Filter Builder → chart-click filters, applied on
+// top of a given base element pool. Factored out of the chartSummary/
+// contextElements memos below so both the dashboard-wide default (single
+// model, or the merged federated set while combined) and a single chart's
+// per-model override (see chartModelFilters) can share the same narrowing
+// logic instead of duplicating it.
+function narrowElementPool(baseElements, { viewerSelectedIds, viewerFilteredIds, chartFilters }) {
+    if (!baseElements) return null
+    if (viewerSelectedIds?.length > 0) {
+        const sel = baseElements.filter(el => viewerSelectedIds.includes(el.id))
+        if (sel.length > 0) return sel
+    }
+    let pool = viewerFilteredIds?.length > 0
+        ? baseElements.filter(el => viewerFilteredIds.includes(el.id))
+        : baseElements
+    if (Object.keys(chartFilters).length > 0) {
+        const filtered = pool.filter(el =>
+            Object.entries(chartFilters).every(([field, value]) => {
+                const elVal = el[field]
+                return elVal != null && String(elVal) === String(value)
+            })
+        )
+        if (filtered.length > 0) pool = filtered
+    }
+    return pool
+}
+
+// Same narrowing as narrowElementPool, but returns a chart summary object
+// (field -> value -> count) instead of the raw element list, falling back to
+// a precomputed backend summary when nothing narrows the pool (fast path —
+// avoids recomputing from scratch on every render when no filter is active).
+function summaryForPool(baseElements, { viewerSelectedIds, viewerFilteredIds, chartFilters, fallbackSummary }) {
+    if (viewerSelectedIds?.length > 0 && baseElements) {
+        const selectedElements = baseElements.filter(el => viewerSelectedIds.includes(el.id))
+        if (selectedElements.length > 0) return generateSummaryFromElements(selectedElements)
+    }
+    if (baseElements && (viewerFilteredIds?.length > 0 || Object.keys(chartFilters).length > 0)) {
+        let pool = viewerFilteredIds?.length > 0
+            ? baseElements.filter(el => viewerFilteredIds.includes(el.id))
+            : baseElements
+        if (Object.keys(chartFilters).length > 0) {
+            const filtered = pool.filter(el =>
+                Object.entries(chartFilters).every(([field, value]) => {
+                    const elVal = el[field]
+                    return elVal != null && String(elVal) === String(value)
+                })
+            )
+            if (filtered.length > 0) pool = filtered
+        }
+        if (pool.length > 0) return generateSummaryFromElements(pool)
+    }
+    if (fallbackSummary !== undefined) return fallbackSummary
+    return baseElements ? generateSummaryFromElements(baseElements) : null
 }
 
 function adaptNormalizerSummary(norm) {
@@ -197,7 +282,17 @@ function adaptNormalizerSummary(norm) {
 }
 
 
-function App() {
+// Only ever mounted once AuthGate below has confirmed a logged-in user, or
+// for an anonymous /shareXXX visit (see App()'s gate) — and remounted fresh
+// (via the gate's `key`) on every login/logout, so none of this component's
+// data-fetching effects can leak a prior user's state into a new session.
+//
+// readOnly: true only for an anonymous visitor under VITE_SHARE_LINK_MODE=readonly
+// (see App()). Locks layout editing, project/model switching, and hides
+// chat/share-admin — on top of `anonymous` below, which independently hides
+// BCF/Documents for *any* logged-out visit (both share-link modes), since
+// those already 401 server-side regardless of this flag.
+function Dashboard({ readOnly = false }) {
     const [darkMode, setDarkMode] = useState(_urlSeed?.ui?.darkMode ?? true)
 
     // Mirror the theme onto <html> so content portaled to document.body
@@ -235,7 +330,23 @@ function App() {
     const [loadingModels, setLoadingModels] = useState(false)
     const [exportingIfc, setExportingIfc] = useState(false)
     const [reIngesting, setReIngesting] = useState(false)
-    const [showTimeline, setShowTimeline] = useState(_urlSeed?.ui?.showTimeline ?? false)
+    const [schedulePanelOpen, setSchedulePanelOpen] = useState(_urlSeed?.ui?.showTimeline ?? false)
+    const [playbackBarOpen, setPlaybackBarOpen] = useState(false)
+    const [timelinePlaybackIds, setTimelinePlaybackIds] = useState(null)
+    const [timelineSyncEnabled, setTimelineSyncEnabled] = useState(false)
+    // Whether the bottom playback bar is both open and actually producing a
+    // build-up state — the meaning every existing consumer below (share-link
+    // payload, viewer prop deps) already expects from this name.
+    const showTimeline = playbackBarOpen && Boolean(timelinePlaybackIds)
+
+    // Reports the 4D playback bar's build-up state into the shared
+    // timelinePlaybackIds/timelineSyncEnabled state above so SpeckleViewer
+    // can isolate/color it — a ref-backed callback in SchedulePlaybackView
+    // means this identity churning every render is harmless.
+    const handleSchedulePlaybackChange = useCallback((pastIds, currentIds, syncCharts) => {
+        setTimelinePlaybackIds(pastIds || currentIds ? { pastIds: pastIds || [], currentIds: currentIds || [] } : null)
+        setTimelineSyncEnabled(!!syncCharts)
+    }, [])
     const [loadError, setLoadError] = useState(null)    // User-visible error message
 
     // Multi-server support
@@ -268,6 +379,13 @@ function App() {
     }, [customServers])
 
     const fullDataAbortRef = useRef(null) // Cancel in-flight background unified fetch on model switch
+    // In-flight-request cache for resolveBranch() below, keyed by server+project+model.
+    // loadVersions and loadModelData both need the same branch/commits data and fire
+    // in the same render pass when a model is selected — this dedupes that into one
+    // GraphQL round trip instead of two near-identical ones. Entries are removed as
+    // soon as the shared promise settles, so it only ever covers that brief overlap
+    // rather than risking stale data on a later, genuinely new load.
+    const branchResolveCacheRef = useRef(new Map())
     const searchInputRef = useRef(null)
     const pendingSelectionRef = useRef(_urlSeed ? {
         projectId: _urlSeed.projectId,
@@ -285,6 +403,17 @@ function App() {
 
     // BCF topics — owned/fetched by BcfTopicPanel, mirrored here so SpeckleViewer can render pins
     const [bcfTopics, setBcfTopics] = useState([])
+
+    // Elements with a linked document (bim_documents.linked_element) — { speckle_id, centroid, doc_count }[],
+    // used to render the "has a document" pin overlay in SpeckleViewer.
+    const [documentPins, setDocumentPins] = useState([])
+    // Bumped every time refreshDocumentPins runs, regardless of source
+    // (model load, ElementPanel link/unlink, DocumentsPanel delete) — lets
+    // ElementPanel's own Documents section (which may be mounted but
+    // hidden behind DocumentsPanel's full-screen overlay, so it has no
+    // other way to hear about changes made there) refetch its list too,
+    // instead of only reacting to the element it's currently showing.
+    const [documentLinksVersion, setDocumentLinksVersion] = useState(0)
 
     // Parameter keys available for pivot grouping (populated after model ingestion)
     const [paramKeys, setParamKeys] = useState([])
@@ -316,69 +445,11 @@ function App() {
     const [viewerSelectedIds, setViewerSelectedIds] = useState(null) // State for Viewer -> Table sync
     const [viewerSelectedElement, setViewerSelectedElement] = useState(null) // Element clicked in 3D viewer → drives chart cross-highlight
 
-    // Active element subset: viewer selection → Filter Builder → chart filters → all elements.
-    // Used by StandaloneChartWidget to keep discovered/numeric fields in sync.
-    const contextElements = useMemo(() => {
-        if (!fullData?.elements) return null
-        if (viewerSelectedIds?.length > 0) {
-            const sel = fullData.elements.filter(el => viewerSelectedIds.includes(el.id))
-            if (sel.length > 0) return sel
-        }
-        let pool = viewerFilteredIds?.length > 0
-            ? fullData.elements.filter(el => viewerFilteredIds.includes(el.id))
-            : fullData.elements
-        if (Object.keys(chartFilters).length > 0) {
-            const filtered = pool.filter(el =>
-                Object.entries(chartFilters).every(([field, value]) => {
-                    const elVal = el[field]
-                    return elVal != null && String(elVal) === String(value)
-                })
-            )
-            if (filtered.length > 0) pool = filtered
-        }
-        return pool
-    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData])
-
-    // Dynamic Chart Summary Selection
-    const chartSummary = useMemo(() => {
-        // 1. Viewer selection narrows to selected elements only
-        if (viewerSelectedIds && viewerSelectedIds.length > 0 && fullData?.elements) {
-            const selectedElements = fullData.elements.filter(el => viewerSelectedIds.includes(el.id))
-            if (selectedElements.length > 0) {
-                return generateSummaryFromElements(selectedElements)
-            }
-        }
-
-        // 2. Filter Builder's result (viewerFilteredIds) and chart-click cross-filters
-        //    both narrow the same element pool — apply Filter Builder's isolation
-        //    first, then let chart-click filters refine within it, so charts react
-        //    to the Filter Builder the same way they already react to each other.
-        if (fullData?.elements && (viewerFilteredIds?.length > 0 || Object.keys(chartFilters).length > 0)) {
-            let pool = viewerFilteredIds?.length > 0
-                ? fullData.elements.filter(el => viewerFilteredIds.includes(el.id))
-                : fullData.elements
-
-            if (Object.keys(chartFilters).length > 0) {
-                const filtered = pool.filter(el =>
-                    Object.entries(chartFilters).every(([field, value]) => {
-                        const elVal = el[field]
-                        return elVal != null && String(elVal) === String(value)
-                    })
-                )
-                // If the filter matches nothing within the current pool, fall back to
-                // the pool itself (avoids a blank dashboard on mis-click)
-                if (filtered.length > 0) pool = filtered
-            }
-
-            if (pool.length > 0) {
-                return generateSummaryFromElements(pool)
-            }
-        }
-
-        // 3. Full project summary from backend
-        return data?.summary
-    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData, data?.summary])
-
+    // contextElements/chartSummary (dashboard-wide default chart data pool) are
+    // declared further down, right after combineMode/federatedElementData —
+    // they need to read those to default to the merged federated set while
+    // combined, and combineMode is itself declared late (see the comment at
+    // its declaration for why).
 
     // Extra widgets (Dynamic)
     const [extraWidgets, setExtraWidgets] = useState(() => {
@@ -450,7 +521,7 @@ function App() {
                                                 ? 'BCF Issue Stats'
                                                 : 'New Panel',
             content: type === 'text' ? '## New Note\n\nClick edit to add content.' : undefined,
-            noPadding: type === 'table' || type === 'text' || type === 'pivot' || type === 'schedule' || type === 'video',
+            noPadding: type === 'table' || type === 'text' || type === 'pivot' || type === 'video',
         }
         setExtraWidgets(prev => [...prev, newWidget])
     }
@@ -534,7 +605,7 @@ function App() {
         })
         if (payload.ui?.darkMode     !== undefined) setDarkMode(payload.ui.darkMode)
         if (payload.ui?.showViewer   !== undefined) setShowViewer(payload.ui.showViewer)
-        if (payload.ui?.showTimeline !== undefined) setShowTimeline(payload.ui.showTimeline)
+        if (payload.ui?.showTimeline !== undefined) setPlaybackBarOpen(payload.ui.showTimeline)
         if (ls['dashboard-extra-widgets'])        setExtraWidgets(JSON.parse(typeof ls['dashboard-extra-widgets'] === 'string' ? ls['dashboard-extra-widgets'] : JSON.stringify(ls['dashboard-extra-widgets'])))
         if (ls['dashboard-visible-chart-panels']) setVisibleChartPanels(typeof ls['dashboard-visible-chart-panels'] === 'string' ? JSON.parse(ls['dashboard-visible-chart-panels']) : ls['dashboard-visible-chart-panels'])
         setLayoutKey(k => k + 1)
@@ -809,7 +880,7 @@ function App() {
                         branches {
                             items {
                                 name description
-                                commits { totalCount items { id message createdAt } }
+                                commits(limit: 1) { totalCount items { id message createdAt } }
                             }
                         }
                     }
@@ -1292,22 +1363,61 @@ function App() {
         if (bcfProjectId) syncBcfWithSpeckle(bcfProjectId)
     }
 
+    // Document-pin positions for the current model — refetched on model load and
+    // whenever ElementPanel links/unlinks a document (see onDocumentLinksChanged).
+    const refreshDocumentPins = useCallback(async () => {
+        const streamId = data?.project_id
+        const modelId = data?.normalizer_model_id
+        if (!streamId || !modelId) { setDocumentPins([]); return }
+        try {
+            const base = CONFIG.normalizerUrl.replace(/\/$/, '')
+            const res = await fetch(`${base}/projects/${streamId}/documents/linked-positions?model_id=${modelId}`)
+            setDocumentPins(res.ok ? await res.json() : [])
+        } catch (e) {
+            console.warn('[documentPins] fetch failed:', e)
+            setDocumentPins([])
+        } finally {
+            setDocumentLinksVersion(v => v + 1)
+        }
+    }, [data?.project_id, data?.normalizer_model_id])
+
+    useEffect(() => { refreshDocumentPins() }, [refreshDocumentPins])
+
+    // Resolves a branch's id + recent commits once, sharing the in-flight request
+    // between whichever of loadVersions/loadModelData asks first — see
+    // branchResolveCacheRef above for why this exists.
+    const resolveBranch = (projectId, modelName) => {
+        const key = `${activeServer.url}:${projectId}:${modelName}`
+        const cache = branchResolveCacheRef.current
+        const cached = cache.get(key)
+        if (cached) return cached
+
+        const promise = gqlFetch(
+            `query GetBranch($projectId: String!, $branchName: String!) {
+                stream(id: $projectId) {
+                    branch(name: $branchName) {
+                        id
+                        commits(limit: 25) {
+                            items { id message createdAt sourceApplication }
+                        }
+                    }
+                }
+            }`,
+            { projectId, branchName: modelName }
+        ).then(gqlData => {
+            const branch = gqlData.stream.branch
+            return { branchId: branch.id, commits: branch.commits?.items || [] }
+        })
+        promise.finally(() => cache.delete(key))
+        cache.set(key, promise)
+        return promise
+    }
+
     const loadVersions = async (projectId, modelName) => {
         setLoadingVersions(true)
         try {
-            const gqlData = await gqlFetch(
-                `query GetVersions($projectId: String!, $branchName: String!) {
-                    stream(id: $projectId) {
-                        branch(name: $branchName) {
-                            commits(limit: 25) {
-                                items { id message createdAt sourceApplication }
-                            }
-                        }
-                    }
-                }`,
-                { projectId, branchName: modelName }
-            )
-            setVersions(gqlData.stream.branch.commits.items)
+            const { commits } = await resolveBranch(projectId, modelName)
+            setVersions(commits)
         } catch (error) {
             console.error('Error loading versions:', error)
             setVersions([])
@@ -1319,8 +1429,13 @@ function App() {
     // ---------------------------------------------------------------------------
     // Normalizer-based data load — ingest → summary → flat elements
     // ---------------------------------------------------------------------------
-    const loadModelDataFromNormalizer = async (streamId, commitId, projectId, branchId, modelName, abortSignal) => {
-        // Phase 1: Ingest — returns immediately if already done, or a job_id for polling
+    // Ingests one commit into bim-normalizer (idempotent — returns immediately
+    // if already ingested) and returns its normalizer model_id, polling if the
+    // backend reports the ingest as still running in the background. Shared by
+    // the single-model load path below and the federated "combine models" path
+    // (see loadCombinedModels) — onPending lets the single-model caller drive
+    // its ingestPhase UI without coupling that state into this helper.
+    const ingestModelToNormalizer = async (streamId, commitId, abortSignal, onPending) => {
         const ingestRes = await fetch(`${CONFIG.normalizerUrl}/ingest`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1340,10 +1455,14 @@ function App() {
 
         let ingestData = await ingestRes.json()
         let normModelId = ingestData.model_id
+        // Only set on the "already ingested" fast path (see routers/ingest.py) —
+        // lets loadModelDataFromNormalizer skip a separate GET /summary round trip
+        // for the common case of reopening an already-ingested model/version.
+        let summary = ingestData.summary ?? null
 
         // Large/first-time model: ingest runs in background — poll until complete
         if (ingestData.status === 'pending') {
-            setIngestPhase('ingesting')
+            onPending?.()
             const jobId = ingestData.job_id
             while (true) {
                 await new Promise(r => setTimeout(r, 4000))
@@ -1359,14 +1478,35 @@ function App() {
                 // still running — keep polling
             }
         }
+        return { modelId: normModelId, summary }
+    }
 
-        setIngestPhase('parsing')
-        const summaryRes = await fetch(
-            `${CONFIG.normalizerUrl}/models/${normModelId}/summary`,
+    // Flat per-element rows for an already-ingested model, adapted to the
+    // dashboard's element shape. Shared by the single-model and federated paths.
+    const fetchFlatElements = async (normModelId, abortSignal) => {
+        const res = await fetch(
+            `${CONFIG.normalizerUrl}/models/${normModelId}/elements/flat?limit=50000`,
             { signal: abortSignal }
         )
-        if (!summaryRes.ok) throw new Error(`Normalizer summary failed: ${summaryRes.status}`)
-        const normSummary = await summaryRes.json()
+        if (!res.ok) throw new Error(`Normalizer elements failed: ${res.status}`)
+        const flatData = await res.json()
+        return (flatData.elements || []).map(adaptNormalizerElement)
+    }
+
+    const loadModelDataFromNormalizer = async (streamId, commitId, projectId, branchId, modelName, abortSignal) => {
+        const { modelId: normModelId, summary: inlineSummary } =
+            await ingestModelToNormalizer(streamId, commitId, abortSignal, () => setIngestPhase('ingesting'))
+
+        setIngestPhase('parsing')
+        let normSummary = inlineSummary
+        if (!normSummary) {
+            const summaryRes = await fetch(
+                `${CONFIG.normalizerUrl}/models/${normModelId}/summary`,
+                { signal: abortSignal }
+            )
+            if (!summaryRes.ok) throw new Error(`Normalizer summary failed: ${summaryRes.status}`)
+            normSummary = await summaryRes.json()
+        }
 
         setData({
             success: true,
@@ -1388,18 +1528,8 @@ function App() {
             .then(keys => setParamKeys(Array.isArray(keys) ? keys : []))
             .catch(() => setParamKeys([]))
 
-        fetch(
-            `${CONFIG.normalizerUrl}/models/${normModelId}/elements/flat?limit=50000`,
-            { signal: abortSignal }
-        )
-            .then(res => {
-                if (!res.ok) throw new Error(`Normalizer elements failed: ${res.status}`)
-                return res.json()
-            })
-            .then(flatData => {
-                const elements = (flatData.elements || []).map(adaptNormalizerElement)
-                setFullData({ success: true, elements })
-            })
+        fetchFlatElements(normModelId, abortSignal)
+            .then(elements => setFullData({ success: true, elements }))
             .catch(err => {
                 if (err.name !== 'AbortError') console.warn('Normalizer elements load failed:', err)
             })
@@ -1423,24 +1553,11 @@ function App() {
         setIngestPhase('connecting')
 
         try {
-            // Resolve branch ID and latest commit via GraphQL variables (no interpolation)
-            const gqlData = await gqlFetch(
-                `query GetBranch($projectId: String!, $branchName: String!) {
-                    stream(id: $projectId) {
-                        branch(name: $branchName) {
-                            id
-                            commits(limit: 1) {
-                                items { id message createdAt sourceApplication }
-                            }
-                        }
-                    }
-                }`,
-                { projectId, branchName: modelName }
-            )
-
-            const branch = gqlData.stream.branch
-            const branchId = branch.id
-            const versionId = specificVersionId || branch.commits?.items[0]?.id
+            // Resolve branch ID + latest commit — shared via resolveBranch() with
+            // loadVersions, which fires in the same render pass and needs the same
+            // data, instead of both issuing separate GraphQL queries to Speckle.
+            const { branchId, commits } = await resolveBranch(projectId, modelName)
+            const versionId = specificVersionId || commits?.[0]?.id
 
             if (!branchId) {
                 throw new Error('Branch not found or has no commits')
@@ -1650,6 +1767,146 @@ function App() {
         setTableOwnFilterIds(null)
     }
 
+    // ---------------------------------------------------------------------------
+    // Federated ("combine models") mode — lets the user load several discipline
+    // branches (ARC/STR/FM, etc.) of the current project into one viewer at
+    // once for coordination + N-way clash checking. Layered on top of the
+    // single-model state above exactly like compareVersionId/diffResult are;
+    // none of the single-model state (selectedModel/data/fullData) is touched.
+    // Declared here (before viewerPanelContent below) since that memo's
+    // callback closes over combineMode/federatedModelsArray/etc. — declaring
+    // them later in the component body would reference them before their
+    // own initialization on first render (useMemo's factory runs synchronously).
+    // ---------------------------------------------------------------------------
+    const [combineMode, setCombineMode] = useState(false)
+    const [combinedModels, setCombinedModels] = useState(new Map())   // branchName -> {branchName, versionId, color, normalizerModelId}
+    const [combiningLoading, setCombiningLoading] = useState(false)
+    const [federatedElementData, setFederatedElementData] = useState(null)  // { elements: [...] } each tagged with _modelKey
+    const [showFederatedClash, setShowFederatedClash] = useState(false)
+    const combineAbortRef = useRef(null)
+    // Per-chart override: panelId -> branchName, so an individual chart can show
+    // just one combined model's data instead of the merged default. Absent/
+    // undefined entry (or COMBINED_MODEL_KEY) means "use the merged set".
+    const [chartModelFilters, setChartModelFilters] = useState({})
+
+    const toggleCombinedModel = useCallback((branch) => {
+        setCombinedModels(prev => {
+            const next = new Map(prev)
+            if (next.has(branch.name)) {
+                next.delete(branch.name)
+            } else {
+                const latestCommit = branch.commits?.items?.[0]
+                next.set(branch.name, {
+                    branchName: branch.name,
+                    versionId: latestCommit?.id || null,
+                    color: nextCombineColor(next.size),
+                    normalizerModelId: null,
+                })
+            }
+            return next
+        })
+    }, [])
+
+    const loadCombinedModels = useCallback(async () => {
+        if (!selectedProject?.id || combinedModels.size < 2) return
+        combineAbortRef.current?.abort()
+        const abortCtrl = new AbortController()
+        combineAbortRef.current = abortCtrl
+        setCombiningLoading(true)
+        try {
+            const entries = [...combinedModels.values()]
+            const resolved = await Promise.all(entries.map(async (entry) => {
+                const { modelId: normModelId } = await ingestModelToNormalizer(selectedProject.id, entry.versionId, abortCtrl.signal)
+                const elements = await fetchFlatElements(normModelId, abortCtrl.signal)
+                return { ...entry, normalizerModelId: normModelId, elements }
+            }))
+            if (abortCtrl.signal.aborted) return
+
+            const next = new Map()
+            const merged = []
+            for (const r of resolved) {
+                next.set(r.branchName, { branchName: r.branchName, versionId: r.versionId, color: r.color, normalizerModelId: r.normalizerModelId })
+                for (const el of r.elements) merged.push({ ...el, _modelKey: r.branchName })
+            }
+            setCombinedModels(next)
+            setFederatedElementData({ elements: merged })
+            setChartModelFilters({})  // branch set may have changed — drop any stale per-chart overrides
+            setCombineMode(true)
+        } catch (err) {
+            if (err.name !== 'AbortError') {
+                console.error('Combined model load failed:', err)
+                setLoadError(`Failed to load combined models: ${err.message}`)
+            }
+        } finally {
+            setCombiningLoading(false)
+        }
+    // ingestModelToNormalizer/fetchFlatElements close over activeServer/CONFIG
+    // from this same render — listing activeServer here ensures this callback
+    // is rebuilt (not served stale from a previous render) whenever the
+    // active Speckle server/token changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedProject?.id, combinedModels, activeServer])
+
+    const exitCombineMode = useCallback(() => {
+        combineAbortRef.current?.abort()
+        setCombineMode(false)
+        setShowFederatedClash(false)
+        setFederatedElementData(null)
+        setChartModelFilters({})
+    }, [])
+
+    // Stable array reference for SpeckleViewer's federatedModels prop — only
+    // changes when the combined set's contents actually change, not on every
+    // unrelated App.jsx re-render (avoids re-running the viewer's federated
+    // load effect needlessly).
+    const federatedModelsArray = useMemo(() => [...combinedModels.values()], [combinedModels])
+
+    // Dashboard-wide default chart data pool: the single primary model normally,
+    // but the merged federated set while combined — so charts actually reflect
+    // what's federated into the viewer instead of always showing whichever
+    // single model happened to be open before combining. Per-chart overrides
+    // (see chartModelFilters + panelChartData below) narrow further to one
+    // specific branch's elements.
+    const combinedBaseElements = combineMode ? federatedElementData?.elements : null
+
+    // Active element subset: viewer selection → Filter Builder → chart filters → all elements.
+    // Used by StandaloneChartWidget to keep discovered/numeric fields in sync.
+    const contextElements = useMemo(() => {
+        const base = combinedBaseElements || fullData?.elements
+        return narrowElementPool(base, { viewerSelectedIds, viewerFilteredIds, chartFilters })
+    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData, combinedBaseElements])
+
+    // Dynamic Chart Summary Selection
+    const chartSummary = useMemo(() => {
+        if (combinedBaseElements) {
+            // No backend-precomputed summary exists for an ad-hoc merged set —
+            // always derive it from the elements themselves.
+            return summaryForPool(combinedBaseElements, { viewerSelectedIds, viewerFilteredIds, chartFilters })
+        }
+        return summaryForPool(fullData?.elements, { viewerSelectedIds, viewerFilteredIds, chartFilters, fallbackSummary: data?.summary })
+    }, [viewerSelectedIds, viewerFilteredIds, chartFilters, fullData, data?.summary, combinedBaseElements])
+
+    // Per-panel override lookup — returns the {summary, elements} pair a given
+    // chart panel should render with. Only recomputes from scratch when that
+    // panel actually has an explicit single-model override selected; otherwise
+    // it just reuses the dashboard-wide chartSummary/contextElements above so
+    // per-panel overrides don't cost anything for charts left on "combined".
+    const panelChartData = useCallback((panelId) => {
+        const overrideKey = chartModelFilters[panelId]
+        if (!combineMode || !overrideKey || overrideKey === COMBINED_MODEL_KEY || !federatedElementData?.elements) {
+            return { summary: chartSummary, elements: contextElements }
+        }
+        const base = federatedElementData.elements.filter(el => el._modelKey === overrideKey)
+        return {
+            summary: summaryForPool(base, { viewerSelectedIds, viewerFilteredIds, chartFilters }),
+            elements: narrowElementPool(base, { viewerSelectedIds, viewerFilteredIds, chartFilters }),
+        }
+    }, [combineMode, chartModelFilters, federatedElementData, chartSummary, contextElements, viewerSelectedIds, viewerFilteredIds, chartFilters])
+
+    const handleChangeChartModelFilter = useCallback((panelId, key) => {
+        setChartModelFilters(prev => ({ ...prev, [panelId]: key === COMBINED_MODEL_KEY ? undefined : key }))
+    }, [])
+
     // ── Viewer panel — memoized independently so chart/filter state changes
     //    don't trigger SpeckleViewer re-initialization via WebGL
     const viewerPanelContent = useMemo(() => (
@@ -1671,23 +1928,39 @@ function App() {
                         setViewerSelectedElement(element)
                     }}
                     onSelectionChange={handleViewerSelection}
-                    filteredElementIds={showTimeline ? null : effectiveFilterIds}
+                    filteredElementIds={timelinePlaybackIds ? null : effectiveFilterIds}
                     diffResult={diffResult}
                     compareVersionId={compareVersionId}
                     onExitCompare={deactivateCompare}
-                    showTimeline={showTimeline}
-                    normalizerModelId={data?.normalizer_model_id}
-                    onCloseTimeline={() => setShowTimeline(false)}
+                    timelinePlaybackIds={timelinePlaybackIds}
+                    timelineSyncEnabled={timelineSyncEnabled}
                     onTimelineSync={handleTimelineSync}
                     bcfTopics={bcfTopics}
+                    documentPins={documentPins}
                     darkMode={darkMode}
+                    federatedMode={combineMode}
+                    federatedModels={federatedModelsArray}
+                    federatedFullData={federatedElementData}
+                    onExitFederated={exitCombineMode}
                 />
+                {playbackBarOpen && data?.normalizer_model_id && (
+                    <div className="absolute bottom-3 left-3 right-3 z-20">
+                        <SchedulePlaybackView
+                            normalizerModelId={data.normalizer_model_id}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            onPlaybackChange={handleSchedulePlaybackChange}
+                            onClose={() => setPlaybackBarOpen(false)}
+                        />
+                    </div>
+                )}
             </div>
         </GridPanel>
     // eslint-disable-next-line react-hooks/exhaustive-deps
     ), [activeServer.id, selectedProject?.id, data?.version_id, data?.normalizer_model_id,
         fullData, effectiveFilterIds, diffResult, compareVersionId,
-        bcfTopics, showTimeline, handleViewerSelection, handleTimelineSync, deactivateCompare, darkMode])
+        bcfTopics, documentPins, timelinePlaybackIds, timelineSyncEnabled, handleViewerSelection, handleTimelineSync, deactivateCompare, darkMode,
+        combineMode, federatedModelsArray, federatedElementData, exitCombineMode,
+        playbackBarOpen, handleSchedulePlaybackChange])
 
     // ── Canvas panels ─────────────────────────────────────────────────────
     const panels = useMemo(() => {
@@ -1715,7 +1988,8 @@ function App() {
                 orientation: 'h', clickable: false,
                 field: chartKey.replace(/^by_/, '')
             }
-            const chartData = chartSummary?.[chartKey]
+            const panelData = panelChartData(panel.id)
+            const chartData = panelData.summary?.[chartKey]
             if (!chartData || Object.keys(chartData).length === 0) return null
             // displayOptions.type / orientation come from DashboardGrid's chart-type buttons
             const effectiveCfg = displayOptions
@@ -1767,6 +2041,9 @@ function App() {
                     isColorSource={colorSourceKey === chartKey}
                     onToggleColorSource={handleToggleColorSource}
                     hasTypeToggle
+                    federatedModels={combineMode ? federatedModelsArray : []}
+                    modelFilterKey={chartModelFilters[panel.id] || COMBINED_MODEL_KEY}
+                    onChangeModelFilter={key => handleChangeChartModelFilter(panel.id, key)}
                 />
             )
         }
@@ -1776,13 +2053,14 @@ function App() {
 
         // Chart widget: standalone single chart with its own header — no GridPanel wrapper
         if (w.type === 'chart') {
+            const panelData = panelChartData(w.id)
             return (
                 <StandaloneChartWidget
                     widget={w}
                     onUpdateWidget={updates => handleUpdateWidget(w.id, updates)}
-                    chartSummary={chartSummary}
+                    chartSummary={panelData.summary}
                     fullData={fullData}
-                    contextElements={contextElements}
+                    contextElements={panelData.elements}
                     displayOptions={displayOptions}
                     fullDataReady={!!fullData}
                     highlightedField={highlightedField}
@@ -1794,6 +2072,9 @@ function App() {
                     darkMode={darkMode}
                     isColorSource={colorSourceKey === w.id}
                     onToggleColorSource={handleToggleColorSource}
+                    federatedModels={combineMode ? federatedModelsArray : []}
+                    modelFilterKey={chartModelFilters[w.id] || COMBINED_MODEL_KEY}
+                    onChangeModelFilter={key => handleChangeChartModelFilter(w.id, key)}
                 />
             )
         }
@@ -1804,7 +2085,6 @@ function App() {
             if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
             if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
             if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
-            if (w.type === 'schedule') return <ScheduleWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} onFilterElements={ids => setViewerFilteredIds(ids)} viewerSelectedIds={effectiveFilterIds?.length > 0 ? effectiveFilterIds : viewerSelectedIds} />
             if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
             if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />
@@ -1817,18 +2097,21 @@ function App() {
             </GridPanel>
         )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [viewerPanelContent, chartSummary, contextElements, highlightedField, highlightedValue, viewerSelectedElement,
+    }, [viewerPanelContent, panelChartData, highlightedField, highlightedValue, viewerSelectedElement,
         fullData, handleChartValueClick, handleChartHover, handleChartHoverEnd,
         handleElementClick, handleUpdateWidget, handleRemoveWidget,
         data, searchFilteredIds, viewerSelectedIds, chartFilters, paramKeys,
         visibleChartPanels, handleToggleChartPanel, darkMode, bcfTopics, effectiveFilterIds,
-        colorSourceKey, handleToggleColorSource])
+        colorSourceKey, handleToggleColorSource,
+        combineMode, federatedModelsArray, chartModelFilters, handleChangeChartModelFilter])
 
     const [layoutCopied, setLayoutCopied] = useState(false)  // false | true | 'error'
 
     const [showBcfBoard, setShowBcfBoard] = useState(false)
     const [showIdsCheck, setShowIdsCheck] = useState(false)
     const [showClashCheck, setShowClashCheck] = useState(false)
+    const [showDocuments, setShowDocuments] = useState(false)
+
     // Distinct IFC classes in this model, for ClashCheckPanel's group dropdowns.
     // Memoized so the array reference is stable across unrelated re-renders
     // while the panel is open (it's a dependency of an effect in there).
@@ -1934,6 +2217,15 @@ function App() {
             })
     }, [buildDashboardPayload, selectedProject])
 
+    // App()'s gate mounts this component either post-login (authUser always
+    // present) or for an anonymous /shareXXX visit (authUser null — see
+    // App()) — so, unlike the old post-login-only assumption, authUser can
+    // genuinely be absent here. `anonymous` gates BCF/Documents (both 401
+    // server-side for a logged-out visitor regardless of this flag) and,
+    // together with `readOnly`, the layout-editing/share-admin/chat UI.
+    const { user: authUser, logout: authLogout } = useAuth()
+    const anonymous = !authUser
+
     return (
         <div className={`min-h-screen ${darkMode ? 'dark' : 'light'}`}>
             <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-zinc-950 text-zinc-50' : 'bg-gradient-to-br from-slate-100 to-slate-200 text-zinc-900'}`}>
@@ -1957,9 +2249,9 @@ function App() {
                                 initial={{ opacity: 0, x: -20 }}
                                 animate={{ opacity: 1, x: 0 }}
                             >
-                                <img src="/bim-dashboard-logo2.avif" alt="BIM Analytics" className="w-9 h-9 shrink-0 object-contain" />
+                                <img src="/converge-logo2.avif" alt="Converge" className="w-9 h-9 shrink-0 object-contain" />
                                 <div className="hidden sm:block">
-                                    <h1 className="text-2xl font-bold gradient-text leading-none">BIM Analytics</h1>
+                                    <h1 className="text-2xl font-bold gradient-text leading-none">Converge</h1>
                                 </div>
                             </motion.div>
 
@@ -1990,7 +2282,11 @@ function App() {
                             <div className="hidden sm:flex items-center gap-3 flex-1 min-w-0">
                             <div className="w-px h-6 bg-white/10 shrink-0" />
 
-                            {/* Breadcrumb navigation */}
+                            {/* Breadcrumb navigation — locked under readOnly (pointer-events-none
+                                rather than not rendering it) so the shared project/model/version
+                                stays visible as context, just not switchable. BreadcrumbSelector
+                                itself has no disabled prop, so this is done at the call site. */}
+                            <div className={readOnly ? 'pointer-events-none opacity-60' : ''} title={readOnly ? 'Locked in read-only share view' : undefined}>
                             <BreadcrumbSelector
                                 allServers={allServers}
                                 activeServer={activeServer}
@@ -2012,6 +2308,9 @@ function App() {
                                 loadingVersions={loadingVersions}
                                 onSelectVersion={(v) => setSelectedVersion(v)}
                             />
+                            </div>
+
+                            <SemanticSearchStatus normalizerUrl={CONFIG.normalizerUrl} modelId={data?.normalizer_model_id} />
 
                             <div className="flex-1" />
 
@@ -2080,13 +2379,24 @@ function App() {
                                     {exportingIfc ? <Loader2 className="w-6 h-6 animate-spin" /> : <IfcLogoIcon className="w-6 h-6" />}
                                 </motion.button>
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                                    onClick={() => setShowTimeline(v => !v)}
+                                    onClick={() => setSchedulePanelOpen(v => !v)}
                                     disabled={!data?.normalizer_model_id}
-                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${showTimeline ? 'text-amber-400 bg-amber-400/10' : ''}`}
-                                    title="4D Timeline"
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${schedulePanelOpen ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                    title="4D Planner (Gantt)"
                                 >
-                                    <Clock className="w-6 h-6" />
+                                    <CalendarClock className="w-6 h-6" />
                                 </motion.button>
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => setPlaybackBarOpen(v => !v)}
+                                    disabled={!data?.normalizer_model_id}
+                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${playbackBarOpen ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                    title="4D Build-up Playback"
+                                >
+                                    <Play className="w-6 h-6" />
+                                </motion.button>
+                                {/* BCF requires a login server-side (bcf-server's require_bcf_auth) — hidden
+                                    entirely for anonymous share visitors rather than left to 401. */}
+                                {!anonymous && (
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setShowBcfBoard(true)}
                                     disabled={!data?.normalizer_model_id}
@@ -2095,6 +2405,7 @@ function App() {
                                 >
                                     <BcfLogoIcon className="w-6 h-6" />
                                 </motion.button>
+                                )}
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setShowIdsCheck(true)}
                                     disabled={!data?.normalizer_model_id}
@@ -2111,7 +2422,43 @@ function App() {
                                 >
                                     <ClashLogoIcon className="w-7 h-7" />
                                 </motion.button>
-
+                                <CombineModelsPicker
+                                    models={models}
+                                    combinedModels={combinedModels}
+                                    onToggleModel={toggleCombinedModel}
+                                    onLoad={loadCombinedModels}
+                                    onExit={exitCombineMode}
+                                    loading={combiningLoading}
+                                    active={combineMode}
+                                />
+                                {combineMode && (
+                                    <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                        onClick={() => setShowFederatedClash(true)}
+                                        disabled={combinedModels.size < 2}
+                                        className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed text-amber-400"
+                                        title="Combined Clash Detection"
+                                    >
+                                        <ClashLogoIcon className="w-7 h-7" />
+                                    </motion.button>
+                                )}
+                                {/* Documents requires a login server-side (routers/documents.py — every
+                                    route there needs require_login at minimum) — hidden entirely for
+                                    anonymous share visitors rather than left to 401. */}
+                                {!anonymous && (
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => setShowDocuments(true)}
+                                    disabled={!data?.project_id}
+                                    className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    title="Documents"
+                                >
+                                    <FileText className="w-6 h-6" />
+                                </motion.button>
+                                )}
+                                {/* Share/save-as-default/share-admin: available to anonymous full-mode
+                                    visitors (parity with a logged-in visitor's share-link experience),
+                                    hidden under readOnly since that mode locks out layout editing. */}
+                                {!readOnly && (
+                                <>
                                 <motion.button whileHover={{ scale: layoutCopied ? 1 : 1.05 }} whileTap={{ scale: layoutCopied ? 1 : 0.95 }}
                                     onClick={shareLayout}
                                     className={`glass-card icon-btn hover:bg-white/10 transition-colors ${layoutCopied === true ? 'text-emerald-400' : layoutCopied === 'error' ? 'text-red-400' : ''}`}
@@ -2134,6 +2481,8 @@ function App() {
                                 >
                                     <List className="w-6 h-6" />
                                 </motion.button>
+                                </>
+                                )}
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setDarkMode(!darkMode)}
                                     className="glass-card icon-btn hover:bg-white/10"
@@ -2141,6 +2490,15 @@ function App() {
                                 >
                                     {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
                                 </motion.button>
+                                {!anonymous && (
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={authLogout}
+                                    className="glass-card icon-btn hover:bg-white/10"
+                                    title={authUser ? `Sign out (${authUser.name})` : 'Sign out'}
+                                >
+                                    <LogOut className="w-6 h-6" />
+                                </motion.button>
+                                )}
                             </div>
                             </div>
                         </div>
@@ -2235,6 +2593,7 @@ function App() {
                                         <X className="w-5 h-5" />
                                     </button>
                                 </div>
+                                <div className={readOnly ? 'pointer-events-none opacity-60' : ''}>
                                 <BreadcrumbSelector
                                     vertical
                                     allServers={allServers}
@@ -2257,6 +2616,7 @@ function App() {
                                     loadingVersions={loadingVersions}
                                     onSelectVersion={(v) => setSelectedVersion(v)}
                                 />
+                                </div>
                             </motion.div>
                         </motion.div>
                     )}
@@ -2322,13 +2682,22 @@ function App() {
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">IFC export</span>
                                     </button>
                                     <button
-                                        onClick={() => { setShowTimeline(v => !v); setShowMobileActions(false) }}
+                                        onClick={() => { setSchedulePanelOpen(v => !v); setShowMobileActions(false) }}
                                         disabled={!data?.normalizer_model_id}
-                                        className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${showTimeline ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                        className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${schedulePanelOpen ? 'text-amber-400 bg-amber-400/10' : ''}`}
                                     >
-                                        <Clock className="w-6 h-6" />
-                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Timeline</span>
+                                        <CalendarClock className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">4D Planner</span>
                                     </button>
+                                    <button
+                                        onClick={() => { setPlaybackBarOpen(v => !v); setShowMobileActions(false) }}
+                                        disabled={!data?.normalizer_model_id}
+                                        className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${playbackBarOpen ? 'text-amber-400 bg-amber-400/10' : ''}`}
+                                    >
+                                        <Play className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Playback</span>
+                                    </button>
+                                    {!anonymous && (
                                     <button
                                         onClick={() => { setShowBcfBoard(true); setShowMobileActions(false) }}
                                         disabled={!data?.normalizer_model_id}
@@ -2337,6 +2706,7 @@ function App() {
                                         <BcfLogoIcon className="w-6 h-6" />
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">BCF</span>
                                     </button>
+                                    )}
                                     <button
                                         onClick={() => { setShowIdsCheck(true); setShowMobileActions(false) }}
                                         disabled={!data?.normalizer_model_id}
@@ -2353,6 +2723,18 @@ function App() {
                                         <ClashLogoIcon className="w-7 h-7" />
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">Clash</span>
                                     </button>
+                                    {!anonymous && (
+                                    <button
+                                        onClick={() => { setShowDocuments(true); setShowMobileActions(false) }}
+                                        disabled={!data?.project_id}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        <FileText className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Docs</span>
+                                    </button>
+                                    )}
+                                    {!readOnly && (
+                                    <>
                                     <button
                                         onClick={() => { shareLayout(); setShowMobileActions(false) }}
                                         className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
@@ -2375,6 +2757,8 @@ function App() {
                                         <List className="w-6 h-6" />
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">Manage links</span>
                                     </button>
+                                    </>
+                                    )}
                                     <button
                                         onClick={() => { setDarkMode(!darkMode); setShowMobileActions(false) }}
                                         className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
@@ -2382,6 +2766,15 @@ function App() {
                                         {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">Theme</span>
                                     </button>
+                                    {!anonymous && (
+                                    <button
+                                        onClick={() => { authLogout(); setShowMobileActions(false) }}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10"
+                                    >
+                                        <LogOut className="w-6 h-6" />
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">Sign out</span>
+                                    </button>
+                                    )}
                                 </div>
                             </motion.div>
                         </motion.div>
@@ -2416,7 +2809,7 @@ function App() {
                             animate={{ opacity: 1, y: 0 }}
                             className="flex flex-col items-center justify-center h-96 text-center gap-6"
                         >
-                            <img src="/bim-dashboard-logo2-rotating.webp" alt="" className="w-24 h-24" />
+                            <img src="/converge-logo2-rotating.webp" alt="" className="w-24 h-24" />
                             <h2 className="text-xl font-semibold text-zinc-300">Opening BIM Model from your Speckle Server</h2>
                         </motion.div>
                     ) : loading ? (
@@ -2425,7 +2818,7 @@ function App() {
                             animate={{ opacity: 1 }}
                             className="flex flex-col items-center justify-center h-96 gap-4 text-center"
                         >
-                            <img src="/bim-dashboard-logo2-rotating.webp" alt="" className="w-24 h-24" />
+                            <img src="/converge-logo2-rotating.webp" alt="" className="w-24 h-24" />
                             <p className="text-zinc-400 text-sm">
                                 {ingestPhase === 'ingesting' ? 'Ingesting model data — this may take a minute for large models…'
                                     : ingestPhase === 'parsing' ? 'Parsing elements and building analytics…'
@@ -2447,7 +2840,8 @@ function App() {
                             panels={panels}
                             renderPanel={renderPanel}
                             darkMode={darkMode}
-                            onClosePanel={(panel) => {
+                            readOnly={readOnly}
+                            onClosePanel={readOnly ? undefined : (panel) => {
                                 if (panel.type === 'chart' && !panel.widget) handleToggleChartPanel(panel.chartKey)
                                 else if (panel.widget) handleRemoveWidget(panel.widget.id)
                             }}
@@ -2457,7 +2851,9 @@ function App() {
                     )}
                 </main>
 
-                {/* Floating action button for adding widgets */}
+                {/* Floating action button for adding widgets — hidden under readOnly,
+                    which locks out layout editing entirely. */}
+                {!readOnly && (
                 <WidgetFAB
                     onAddWidget={handleAddWidget}
                     disabled={!data}
@@ -2465,6 +2861,7 @@ function App() {
                     visibleChartPanels={visibleChartPanels}
                     onToggleChart={handleToggleChartPanel}
                 />
+                )}
 
                 {/* Publish current filter / selection as a new Speckle version */}
                 <PublishSelectionButton
@@ -2487,10 +2884,22 @@ function App() {
                             }}
                             onFilter={handlePropertyFilters}
                             darkMode={darkMode}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            streamId={data?.project_id}
+                            onDocumentLinksChanged={refreshDocumentPins}
+                            documentLinksVersion={documentLinksVersion}
+                            // Documents requires a login server-side (every route in
+                            // routers/documents.py needs require_login at minimum) — skip
+                            // rendering the section entirely for anonymous visitors rather
+                            // than let it 401.
+                            hideDocuments={anonymous}
                         />
                     )}
                 </AnimatePresence>
 
+                {/* BCF requires a login server-side (bcf-server's require_bcf_auth) —
+                    hidden entirely for anonymous share visitors rather than left to 401. */}
+                {!anonymous && (
                 <BcfTopicPanel
                     projectId={data?.normalizer_model_id}
                     viewerRef={speckleViewerRef}
@@ -2502,6 +2911,7 @@ function App() {
                     serverUrl={activeServer.url}
                     serverToken={activeServer.token}
                 />
+                )}
 
                 <AnimatePresence>
                     {showBcfBoard && (
@@ -2548,6 +2958,60 @@ function App() {
                     )}
                 </AnimatePresence>
 
+                <AnimatePresence>
+                    {showFederatedClash && (
+                        <FederatedClashPanel
+                            projectId={data?.normalizer_model_id}
+                            combinedModels={combinedModels}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            viewerRef={speckleViewerRef}
+                            topics={bcfTopics}
+                            onTopicsChange={setBcfTopics}
+                            onRequestSync={triggerBcfSync}
+                            serverUrl={activeServer.url}
+                            serverToken={activeServer.token}
+                            ifcClasses={clashIfcClasses}
+                            onClose={() => setShowFederatedClash(false)}
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {showDocuments && (
+                        <DocumentsPanel
+                            streamId={data?.project_id}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            serverUrl={activeServer.url}
+                            serverToken={activeServer.token}
+                            onClose={() => setShowDocuments(false)}
+                            onDocumentsChanged={refreshDocumentPins}
+                            onLoadModel={(branchName, commitId) => {
+                                setShowDocuments(false)
+                                loadModelData(data?.project_id, branchName, commitId)
+                            }}
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {schedulePanelOpen && (
+                        <SchedulePanel
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            normalizerModelId={data?.normalizer_model_id}
+                            onFilterElements={ids => setViewerFilteredIds(ids)}
+                            viewerSelectedIds={effectiveFilterIds?.length > 0 ? effectiveFilterIds : viewerSelectedIds}
+                            onClose={() => setSchedulePanelOpen(false)}
+                            // adaptNormalizerSummary (line ~252) renames the backend's
+                            // by_storey to by_level and reduces each entry to a plain count.
+                            storeyCounts={data?.summary?.by_level}
+                        />
+                    )}
+                </AnimatePresence>
+
+                {/* Chat itself needs no login (chat.py has no auth dependency) so it works
+                    for anonymous full-mode visitors — hidden under readOnly for that mode's
+                    "locked, view-only" branding rather than a real security requirement. */}
+                {!readOnly && (
                 <ChatWidget
                     normalizerUrl={CONFIG.normalizerUrl}
                     onFilter={(ids) => {
@@ -2577,6 +3041,7 @@ function App() {
                         } : null,
                     } : null}
                 />
+                )}
 
                 {/* Share links admin modal */}
                 <AnimatePresence>
@@ -2676,6 +3141,40 @@ function App() {
             </div >
         </div >
     )
+}
+
+// Actual auth gate. Dashboard is only ever mounted once `user` is confirmed
+// present OR the visitor arrived via a /shareXXX link (see _shareId above)
+// and VITE_SHARE_LINK_MODE allows anonymous access — so none of its other
+// data-fetching effects can fire for a plain logged-out visit (the previous
+// approach called useAuth() *inside* Dashboard and branched on the result
+// after all of Dashboard's own hooks — including its fetch effects — had
+// already run on mount). Keying Dashboard on the user's guid (or a fixed key
+// for anonymous share visits) also forces a full unmount/remount across a
+// login/logout/login cycle, so a new session never inherits the previous
+// user's already-loaded state.
+function App() {
+    const { user: authUser, loading: authLoading } = useAuth()
+
+    if (authLoading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-zinc-950">
+                <Loader2 className="w-6 h-6 text-zinc-500 animate-spin" />
+            </div>
+        )
+    }
+    if (!authUser) {
+        // Anonymous visitor on a share link: let them through instead of the
+        // sign-in wall, per VITE_SHARE_LINK_MODE. BCF and Documents stay
+        // blocked regardless of mode — those routers require a login
+        // server-side (bim-normalizer/routers/documents.py,
+        // bcf-server's require_bcf_auth), independent of this client gate.
+        if (_shareId) {
+            return <Dashboard key="anon-share" readOnly={CONFIG.shareLinkMode === 'readonly'} />
+        }
+        return <LandingPage />
+    }
+    return <Dashboard key={authUser.guid} />
 }
 
 export default App
