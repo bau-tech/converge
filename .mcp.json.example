@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "speckle-ifc": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["bim-normalizer/speckle_mcp.py"],
+      "env": {
+        "SPECKLE_SERVER_URL": "https://your-speckle-server.com",
+        "NORMALIZER_URL": "http://localhost:8002"
+      }
+    }
+  }
+}

@@ -8,6 +8,9 @@ dist/
 .env
 bim-normalizer/.env
 
+# Machine-specific MCP config (real Python path/domain) — copy .mcp.json.example
+.mcp.json
+
 # Python
 __pycache__/
 *.pyc

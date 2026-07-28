@@ -25,7 +25,7 @@ Also set `MCP_ALLOWED_HOSTS` in the same `.env` to a comma-separated list of eve
 `Host` header the server should accept (the mcp SDK's DNS-rebinding protection rejects
 anything else with `421 Invalid Host header`):
 ```
-MCP_ALLOWED_HOSTS=mcp-speckle.example.com,192.168.1.10:8003
+MCP_ALLOWED_HOSTS=mcp.example.com,192.168.1.10:8003
 ```
 Include the public domain (Step 3) and the docker-host LAN IP:port (used by the
 direct-LAN curl check in **Verify** below).
@@ -36,9 +36,9 @@ Open Nginx Proxy Manager → **Proxy Hosts** → **Add Proxy Host**
 
 | Field | Value |
 |-------|-------|
-| Domain name | `mcp-speckle.example.com` |
+| Domain name | `mcp.example.com` |
 | Scheme | `http` |
-| Forward hostname | `<docker-host LAN IP>` (e.g. `192.168.175.x`) |
+| Forward hostname | `<docker-host LAN IP>` (e.g. `192.168.1.x`) |
 | Forward port | `8003` |
 | Block common exploits | ✓ |
 
@@ -61,7 +61,7 @@ Replace the stdio entry with:
   "mcpServers": {
     "speckle-ifc": {
       "type": "http",
-      "url": "https://mcp-speckle.example.com/mcp",
+      "url": "https://mcp.example.com/mcp",
       "headers": {
         "X-Api-Key": "<your MCP_API_KEY value>"
       }
@@ -90,7 +90,7 @@ curl -i -X POST http://<docker-host-ip>:8003/mcp \
   -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 
 # Via NPM (public HTTPS)
-curl -i -X POST https://mcp-speckle.example.com/mcp \
+curl -i -X POST https://mcp.example.com/mcp \
   -H "X-Api-Key: <your-key>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \

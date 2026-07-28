@@ -11,7 +11,7 @@ def _require(name: str) -> str:
     return v
 
 
-SPECKLE_SERVER_URL: str = os.getenv("SPECKLE_SERVER_URL", "https://speckle.example.com")
+SPECKLE_SERVER_URL: str = _require("SPECKLE_SERVER_URL")
 SPECKLE_TOKEN: str = os.getenv("SPECKLE_TOKEN", "")
 
 

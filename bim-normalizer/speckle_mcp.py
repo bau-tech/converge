@@ -7,7 +7,7 @@ A single MCP server combining:
     ifc_new / ifc_load / ifc_reset / ifc_save
     ifc_summary / ifc_tree / ifc_info / ifc_select / ifc_relations / ifc_materials
 
-  Speckle server tools  (GraphQL → https://speckle.example.com)
+  Speckle server tools  (GraphQL → SPECKLE_SERVER_URL)
     speckle_list_projects / speckle_list_models / speckle_list_versions
     speckle_delete_project / speckle_delete_model / speckle_delete_version
                                  permanent deletes — require confirm=True
@@ -54,7 +54,7 @@ A single MCP server combining:
     speckle_ids_check            run + wait, same shape as speckle_clash_check
 
 Configuration (env or .env file next to this script):
-  SPECKLE_SERVER_URL      default https://speckle.example.com   (also set in .mcp.json)
+  SPECKLE_SERVER_URL      required, no default              (also set in .mcp.json)
   SPECKLE_TOKEN           personal access token                 (loaded from .env)
   NORMALIZER_URL          default http://localhost:8002         (also set in .mcp.json)
   BCF_SERVER_URL          default http://localhost:8004         (bcf-server, for BCF tools)
@@ -111,7 +111,7 @@ except ImportError:
     sys.exit(1)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-_SPECKLE_URL = os.getenv("SPECKLE_SERVER_URL", "https://speckle.example.com").rstrip("/")
+_SPECKLE_URL = os.getenv("SPECKLE_SERVER_URL", "").rstrip("/")
 _SPECKLE_TOKEN = os.getenv("SPECKLE_TOKEN", "")
 _NORMALIZER_URL = os.getenv("NORMALIZER_URL", "http://localhost:8002").rstrip("/")
 # Empty string disables auth (safe for stdio; always set a key for streamable-http/SSE/remote)
@@ -707,7 +707,7 @@ def ifc_dependency_graph(element_id: str, max_depth: int = 2) -> str:
 
 @mcp.tool()
 def speckle_list_projects(limit: int = 25) -> str:
-    """List projects on our Speckle server (https://speckle.example.com)."""
+    """List projects on our Speckle server (SPECKLE_SERVER_URL)."""
     data = _gql("""
         query($limit: Int!) {
             streams(limit: $limit) {

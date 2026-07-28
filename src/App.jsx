@@ -70,7 +70,7 @@ import { LandingPage } from './components/LandingPage'
 
 const CONFIG = {
     normalizerUrl: import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002',
-    speckleServer: import.meta.env.VITE_SPECKLE_SERVER || 'https://speckle.example.com',
+    speckleServer: import.meta.env.VITE_SPECKLE_SERVER || '',
     speckleToken: import.meta.env.VITE_SPECKLE_TOKEN || '',
     // 'full' | 'readonly' — see .env.example. Decides what an anonymous
     // /shareXXX visitor gets once the auth gate (App(), below) would

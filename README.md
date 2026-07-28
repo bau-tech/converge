@@ -99,7 +99,7 @@ docker compose up -d        # starts postgres, nextcloud, bim-normalizer (:8002)
 
 ### 3. MCP server (local, Claude Code)
 
-The `.mcp.json` in the project root is picked up automatically by Claude Code and runs `speckle_mcp.py` directly on your machine over stdio (separate from the `speckle-mcp` Docker service above, which serves the same tools over streamable-HTTP for remote access). Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — it's loaded by this local process at startup via `python-dotenv`. See `bim-normalizer/.env.example` for the variables this file needs (the containerized services above get their config entirely from the root `.env`, not this file).
+Copy `.mcp.json.example` to `.mcp.json` (git-ignored — it holds your local Python path and Speckle server URL) and fill in the `command`/`args`/`env` values for your machine. Claude Code picks it up automatically and runs `speckle_mcp.py` directly over stdio (separate from the `speckle-mcp` Docker service above, which serves the same tools over streamable-HTTP for remote access). Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — it's loaded by this local process at startup via `python-dotenv`. See `bim-normalizer/.env.example` for the variables this file needs (the containerized services above get their config entirely from the root `.env`, not this file).
 
 ---
 
@@ -112,7 +112,7 @@ The `.mcp.json` in the project root is picked up automatically by Claude Code an
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | Yes | Postgres connection, shared by bim-normalizer, bcf-server, and Nextcloud's own DB. `PG_HOST`/`PG_PORT` only matter for tools connecting from outside the compose network — containers always talk to `postgres:5432` directly |
-| `VITE_SPECKLE_SERVER` | Yes | Speckle server URL, e.g. `https://speckle.example.com` (also becomes `SPECKLE_SERVER_URL` for bim-normalizer/bcf-server) |
+| `VITE_SPECKLE_SERVER` | Yes | Speckle server URL, e.g. `https://your-speckle-server.com` (also becomes `SPECKLE_SERVER_URL` for bim-normalizer/bcf-server) |
 | `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile (also becomes `SPECKLE_TOKEN`) |
 | `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL as seen by the frontend, e.g. `http://localhost:8002` |
 | `VITE_EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers for the frontend's server-switcher dropdown (baked in at build time) and bcf-server's admin panel project lookup. Comma-separated, each entry `Name\|URL\|token`. Note: bim-normalizer's own `GET /servers` route reads a differently-named var (`EXTRA_SPECKLE_SERVERS`, no `VITE_` prefix) that docker-compose never sets, so that particular lookup's extra-server list is always empty — the dropdown and bcf-server are unaffected, they read this var directly |
@@ -422,7 +422,7 @@ currently no MCP path to load a normalizer-ingested model here).
 
 ### Local setup (stdio, Claude Code)
 
-`.mcp.json` is already configured. The MCP server reads `SPECKLE_TOKEN` from `bim-normalizer/.env` at startup. No further setup needed.
+Copy `.mcp.json.example` to `.mcp.json` and fill in your Python path and Speckle server URL (see [Quick start](#3-mcp-server-local-claude-code) above). The MCP server reads `SPECKLE_TOKEN` from `bim-normalizer/.env` at startup.
 
 ### Remote access (streamable HTTP via Nginx Proxy Manager)
 
@@ -440,7 +440,7 @@ See [`bim-normalizer/npm-mcp-setup.md`](bim-normalizer/npm-mcp-setup.md) for the
   "mcpServers": {
     "speckle-ifc": {
       "type": "http",
-      "url": "https://mcp-speckle.example.com/mcp",
+      "url": "https://mcp.example.com/mcp",
       "headers": { "X-Api-Key": "<your MCP_API_KEY>" }
     }
   }
