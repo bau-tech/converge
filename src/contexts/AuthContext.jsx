@@ -1,9 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
 
-// Mirrors App.jsx's own CONFIG.normalizerUrl resolution — kept separate
-// (not imported from App.jsx) to avoid a circular import, since App.jsx is
-// itself the consumer of useAuth() below.
-const NORMALIZER_URL = import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002'
+const NORMALIZER_URL = RUNTIME_CONFIG.NORMALIZER_URL
 
 const AuthContext = createContext(null)
 

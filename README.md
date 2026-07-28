@@ -205,6 +205,8 @@ docker compose up -d --build
 # bim-normalizer at :8002, bcf-server at :8004 (internal)
 ```
 
+Both images are also published to GHCR on every push to `master` ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)): `ghcr.io/bau-tech/converge-dashboard` and `ghcr.io/bau-tech/converge-normalizer`. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild. Swap `build:` for `image: ghcr.io/bau-tech/...` per service in `docker-compose.yml` to use them instead of building locally.
+
 ---
 
 ## Project structure

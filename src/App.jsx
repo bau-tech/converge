@@ -67,16 +67,17 @@ import { pullFromSpeckle, pushToSpeckle } from './utils/bcfSync'
 import { useAuth } from './contexts/AuthContext'
 import { LoginScreen } from './components/LoginScreen'
 import { LandingPage } from './components/LandingPage'
+import { RUNTIME_CONFIG } from './runtimeConfig'
 
 const CONFIG = {
-    normalizerUrl: import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002',
-    speckleServer: import.meta.env.VITE_SPECKLE_SERVER || '',
-    speckleToken: import.meta.env.VITE_SPECKLE_TOKEN || '',
+    normalizerUrl: RUNTIME_CONFIG.NORMALIZER_URL,
+    speckleServer: RUNTIME_CONFIG.SPECKLE_SERVER,
+    speckleToken: RUNTIME_CONFIG.SPECKLE_TOKEN,
     // 'full' | 'readonly' — see .env.example. Decides what an anonymous
     // /shareXXX visitor gets once the auth gate (App(), below) would
     // otherwise have sent them to the sign-in screen before Dashboard's own
     // share-resolution effect ever got a chance to run.
-    shareLinkMode: import.meta.env.VITE_SHARE_LINK_MODE || 'full',
+    shareLinkMode: RUNTIME_CONFIG.SHARE_LINK_MODE,
 }
 
 // Detected at module load — same timing as _urlSeed below — so App()'s auth
@@ -110,7 +111,7 @@ const _urlSeed = (() => {
     } catch { return null }
 })()
 
-// Parse VITE_EXTRA_SPECKLE_SERVERS at module load — baked in by Vite, works without backend
+// Parse EXTRA_SPECKLE_SERVERS at module load — works without backend
 const ENV_EXTRA_SERVERS = ((raw) => {
     if (!raw) return []
     return raw.split(',').flatMap((entry, i) => {
@@ -119,7 +120,7 @@ const ENV_EXTRA_SERVERS = ((raw) => {
         if (!url) return []
         return [{ id: `env_${i}`, name: parts[0]?.trim() || url, url, token: parts[2]?.trim() || '' }]
     })
-})(import.meta.env.VITE_EXTRA_SPECKLE_SERVERS)
+})(RUNTIME_CONFIG.EXTRA_SPECKLE_SERVERS)
 
 // GraphQL helper: uses variables (no string interpolation), checks HTTP status + GraphQL errors
 async function gqlFetch(query, variables = {}, signal) {

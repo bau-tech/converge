@@ -236,26 +236,28 @@ services:
   converge:
     build:
       context: .
-      args:
-        VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}
-        VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
-        VITE_NORMALIZER_URL: /normalizer
-        VITE_BCF_URL: /bcf
-        VITE_BCF_API_KEY: ${BCF_API_KEY:-}
-        VITE_OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
-        VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
-        VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
-        VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
-        VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
-        VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
-        VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
-        VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
     container_name: converge
     ports:
       - "8080:80"
     environment:
+      # Reverse-proxy targets (nginx.conf.template)
       NORMALIZER_URL: http://bim-normalizer:8002/
       BCF_SERVER_URL: http://bcf-server:8004/
+      # Frontend runtime config, injected into window.__CONFIG__ at container
+      # start (config.js.template / docker-entrypoint-config.sh) — same image
+      # works for every deployment, no rebuild needed to change any of these.
+      VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}
+      VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      VITE_NORMALIZER_URL: /normalizer
+      VITE_BCF_URL: /bcf
+      VITE_BCF_API_KEY: ${BCF_API_KEY:-}
+      VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
+      VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
+      VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
+      VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
+      VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
+      VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
     depends_on:
       bim-normalizer:
         condition: service_healthy

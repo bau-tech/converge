@@ -7,6 +7,7 @@ import {
     createTopic, createViewpoint, createComment, updateTopic, getSnapshotUrl, listComments,
     listSyncRecords, recordSync, listCommentSync, recordCommentSync,
 } from './bcfClient'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
 
 // Fallback only — this app supports switching between multiple Speckle
 // servers at runtime (see App.jsx's activeServer/allServers), so every call
@@ -16,8 +17,8 @@ import {
 // happens to be the build-time default, regardless of which server the
 // current project actually lives on — Speckle then replies "Project not
 // found" for any project that lives on a different server.
-const DEFAULT_SPECKLE_URL = import.meta.env.VITE_SPECKLE_SERVER || ''
-const DEFAULT_SPECKLE_TOKEN = import.meta.env.VITE_SPECKLE_TOKEN || ''
+const DEFAULT_SPECKLE_URL = RUNTIME_CONFIG.SPECKLE_SERVER
+const DEFAULT_SPECKLE_TOKEN = RUNTIME_CONFIG.SPECKLE_TOKEN
 
 // Also tags the BCF topic itself with the Speckle thread id, purely for
 // human-readable display (e.g. the "Synced to Speckle" badge) — the actual

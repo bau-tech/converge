@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence, useDragControls } from 'framer-motion'
 import { MessageSquare, Send, X, Sparkles, Settings, Cpu, Database, Save, Wrench, Filter, Download, Trash2, Copy, Check } from 'lucide-react'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
 
 // ── Minimal inline markdown renderer ────────────────────────────────────────
 function MarkdownMessage({ content }) {
@@ -108,15 +109,15 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     // LLM Configuration
     const [provider, setProvider] = useState(() => localStorage.getItem('chat_ai_provider') || 'openai')
     const [ollamaConfig, setOllamaConfig] = useState(() => ({
-        baseUrl: localStorage.getItem('chat_ollama_url') || import.meta.env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434',
-        model: localStorage.getItem('chat_ollama_model') || import.meta.env.VITE_OLLAMA_MODEL || 'llama3'
+        baseUrl: localStorage.getItem('chat_ollama_url') || RUNTIME_CONFIG.OLLAMA_BASE_URL,
+        model: localStorage.getItem('chat_ollama_model') || RUNTIME_CONFIG.OLLAMA_MODEL
     }))
     const [lmStudioConfig, setLmStudioConfig] = useState(() => ({
-        baseUrl: localStorage.getItem('chat_lmstudio_url') || import.meta.env.VITE_LMSTUDIO_BASE_URL || 'http://localhost:1234/v1',
+        baseUrl: localStorage.getItem('chat_lmstudio_url') || RUNTIME_CONFIG.LMSTUDIO_BASE_URL,
         model: localStorage.getItem('chat_lmstudio_model') || 'local-model'
     }))
     const [mistralConfig, setMistralConfig] = useState(() => ({
-        apiKey: localStorage.getItem('chat_mistral_key') || import.meta.env.VITE_MISTRAL_API_KEY || '',
+        apiKey: localStorage.getItem('chat_mistral_key') || RUNTIME_CONFIG.MISTRAL_API_KEY,
         model: localStorage.getItem('chat_mistral_model') || 'mistral-large-latest'
     }))
 

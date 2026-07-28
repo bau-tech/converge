@@ -304,7 +304,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `VITE_SPECKLE_SERVER` | Yes | Speckle server URL (also becomes `SPECKLE_SERVER_URL` for bim-normalizer/bcf-server) |
 | `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile (also becomes `SPECKLE_TOKEN`) |
 | `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL as seen by the frontend, e.g. `http://localhost:8002` |
-| `VITE_EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers for the frontend's server-switcher dropdown (baked in at build time) and bcf-server's admin panel project lookup. Comma-separated, each entry `Name\|URL\|token`. Note: bim-normalizer's own `GET /servers` route reads a differently-named var (`EXTRA_SPECKLE_SERVERS`, no `VITE_` prefix) that docker-compose never sets, so that particular lookup's extra-server list is always empty — the dropdown and bcf-server are unaffected, they read this var directly |
+| `VITE_EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers for the frontend's server-switcher dropdown (injected into the frontend at container start — see `src/runtimeConfig.js` — not baked into the image) and bcf-server's admin panel project lookup. Comma-separated, each entry `Name\|URL\|token`. Note: bim-normalizer's own `GET /servers` route reads a differently-named var (`EXTRA_SPECKLE_SERVERS`, no `VITE_` prefix) that docker-compose never sets, so that particular lookup's extra-server list is always empty — the dropdown and bcf-server are unaffected, they read this var directly |
 | `PUBLIC_BASE_URL` | No | Publicly reachable base URL ending in `/normalizer`, used for the webhook auto-sync feature. Leave blank to disable |
 | `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries. `docker-compose.yml` sets a default of `900` if unset in `.env`; bim-normalizer's own Python-level fallback (3600) only applies outside the documented `docker compose up` flow |
 | `DOCUMENT_SYNC_SCAN_INTERVAL_S` | No | Same kind of safety net as above, but for documents that reached Nextcloud some other way than the dashboard's own upload/move/revise/delete calls. Default `3600` |
@@ -503,9 +503,12 @@ converge/
 ├── nextcloud-hooks/                   post-installation/ — auto-installs groupfolders on first Nextcloud boot
 ├── postgres-init/                     01-nextcloud-db.sh — creates Nextcloud's DB on a fresh Postgres volume
 ├── docker-compose.yml                 Full stack: postgres, bim-normalizer, speckle-mcp, bcf-server, dashboard
-├── Dockerfile                         Frontend build (Vite) + nginx serve
+├── Dockerfile                         Frontend build (Vite, no baked-in secrets) + nginx serve
 ├── nginx.conf.template                Proxies /normalizer/ and /bcf/ to backend containers
+├── config.js.template                 Runtime frontend config template (envsubst'd into window.__CONFIG__)
+├── docker-entrypoint-config.sh        Generates config.js from container env vars on every start
 ├── .mcp.json.example                  Template for local MCP config — copy to .mcp.json (git-ignored)
+├── .github/workflows/                 CI: builds + publishes both images to ghcr.io on push/tag
 ├── package.json
 ├── vite.config.js
 ├── tailwind.config.js

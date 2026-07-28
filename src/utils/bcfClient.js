@@ -1,12 +1,14 @@
 // REST wrapper for our self-hosted bcf-server (bim-normalizer/bcf_server.py).
 // Uses the static BCF_API_KEY shared credential — separate from the fake
 // OAuth2/OIDC shim that external clients like BIMcollab ZOOM go through.
-const BCF_URL = import.meta.env.VITE_BCF_URL || '/bcf'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
+
+const BCF_URL = RUNTIME_CONFIG.BCF_URL
 // Non-spec helper endpoints (project resolve, .bcfzip export/import) live on
 // a sibling path, proxied by nginx as its own location block — see
 // nginx.conf.template's /bcf-bridge/ block.
 const BCF_BRIDGE_URL = BCF_URL.replace(/\/bcf$/, '/bcf-bridge')
-const BCF_API_KEY = import.meta.env.VITE_BCF_API_KEY || ''
+const BCF_API_KEY = RUNTIME_CONFIG.BCF_API_KEY
 const BCF_VERSION = '2.1'
 
 async function bcfFetch(baseUrl, path, options = {}) {

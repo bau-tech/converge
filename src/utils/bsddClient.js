@@ -2,7 +2,9 @@
 // re-serves the buildingSMART Data Dictionary API server-side — bSDD
 // silently refuses real cross-origin browser requests (200 + empty body
 // for any non-allow-listed Origin), so this can't call bSDD directly.
-const NORMALIZER_URL = import.meta.env.VITE_NORMALIZER_URL || 'http://localhost:8002'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
+
+const NORMALIZER_URL = RUNTIME_CONFIG.NORMALIZER_URL
 
 async function bsddFetch(path) {
     const res = await fetch(`${NORMALIZER_URL}/bsdd${path}`)
