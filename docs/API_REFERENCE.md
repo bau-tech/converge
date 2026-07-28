@@ -1,6 +1,6 @@
 # API Reference & Project Structure
 
-Detailed reference material split out of the main [README](../README.md) to keep that file focused on onboarding. See the README for architecture, setup, and the bcf-server/MCP docs.
+Detailed reference material split out of the main [README](../README.md) to keep that file focused on onboarding: the full REST API, database schema, bcf-server module map, frontend component list, environment variables, and annotated project structure. See the README for architecture, quick start, and MCP setup — and [`docs/MCP_REFERENCE.md`](MCP_REFERENCE.md) for the full MCP tool catalog.
 
 ---
 
@@ -181,6 +181,165 @@ stage independently settable/clearable and attributed to an actor, not a single 
 
 ---
 
+## Database schema (bim-normalizer)
+
+```
+bim_models          stream_id, commit_id, branch_name, source, author, ingested_at
+  └── bim_elements  application_id, speckle_id, ifc_class, category, name, storey, hash
+        ├── bim_geometry            bbox, centroid, volume_m3, area_m2, mesh (JSONB)
+        ├── bim_parameters          pset, key, value, datatype
+        ├── bim_relationships       element_id → related_id, relation_type
+        └── bim_element_embeddings  embed_text, embedding (FLOAT[]) — semantic search, search/embeddings.py
+
+bim_model_status     stream_id-scoped model/document status tracking (db/model_status.py)
+
+bim_tasks            4D schedule tasks — name, dates, IFC/MSPDI-imported or manually created (db/schedule.py)
+  ├── bim_task_elements      task_id ↔ element_id links, for viewer sync
+  └── bim_task_dependencies  task_id → predecessor_id (schedule sequencing)
+
+bcf_*                projects, topics, comments, viewpoints (BCF-API 2.1/3.0 schema, bcf/db_schema.py)
+
+bim_jobs             job_id, job_type, status, payload, result, error (async job state — ingest/export/
+                     filter-publish/IDS-check/clash-check/document-backfill — DB-backed so a backend
+                     restart doesn't strand a polling client with an unrecoverable 404, db/jobs.py)
+
+bim_documents         stream_id-scoped (survives re-ingestion, unlike model_id), Nextcloud-backed
+                     document metadata — status (WIP/Shared/Published/Archived), doc_type
+                     (document/drawing), a reviewed/approved/verified triad (each with its own
+                     *_by/*_at attribution), revision, linked_bcf_topic, linked_element
+                     (db/documents.py, nextcloud/)
+  └── bim_document_events  append-only audit trail — created/moved/reviewed/approved/verified/revised/deleted/linked
+
+bim_document_roles   stream_id-scoped author/reviewer/approver RBAC backing the /my-roles endpoint
+
+bim_dashboard_layouts        per-project drag-and-drop widget layout (GET/PUT /dashboard-layout)
+bim_classification_overrides manual property overrides (POST /models/{id}/overrides)
+bim_ids_specs                stored IDS specifications (POST /models/{id}/ids-specs)
+auto_sync_servers            watched Speckle servers for webhook-driven auto-sync (GET/POST /auto-sync/servers)
+stream_webhooks               registered Speckle webhook rows (speckle/webhooks.py)
+```
+
+---
+
+## bcf-server modules
+
+A standalone FastAPI process (`bcf_server.py`, same `bim-normalizer/` build context, separate container — mirrors how `speckle-mcp` is wired) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` since BIMcollab ZOOM only understands 2.1. Shares the same Postgres instance as bim-normalizer (`bcf_*` tables, initialised by `bcf/db_schema.py`).
+
+`bcf/projects.py` and `bcf/topics.py` share their router instances across both version mounts (`bcf_server.py`'s prefix loop), but the 2.1 and 3.0 schemas aren't identical — confirmed against the official `release_2_1`/`release_3_0` branches of the BCF-API spec, two fields differ and are branched at request time via `bcf.versions.is_bcf_v3(request)`: the assignable-users list in `GET .../extensions` is `user_id_type` in 2.1 but `users` in 3.0, and 3.0's `topic_GET`/`topic_POST` responses additionally require a `server_assigned_id` string (sourced from the otherwise-unused `"index"` column, backfilled for pre-existing rows by `BACKFILL_INDEX_SQL`). Getting either of these wrong under `/bcf/3.0/` is what made 3.0-based BIMcollab Manager plugins show "no assignable team members" when creating an issue, even though the same data is fine over `/bcf/2.1/`.
+
+| Module | Responsibility |
+|--------|-----------------|
+| `bcf/projects.py`, `bcf/topics.py`, `bcf/comments.py`, `bcf/viewpoints.py` | Core BCF-API resource routers |
+| `bcf/auth.py`, `bcf/auth_discovery.py` | Bearer-token auth + the `/auth` discovery endpoint |
+| `bcf/foundation.py` | OpenCDE Foundation API (`/foundation/{version}/auth`) — BCF 3.0 is an OpenCDE API and some clients look here before falling back to `/bcf/{version}/auth` |
+| `bcf/users.py` (`/bcf-bridge/users`) | `bcf_users` CRUD, backing both the admin panel and OAuth login |
+| `bcf/password.py` | bcrypt password hashing/verification for `bcf_users` |
+| `bcf/oauth.py` | Real OAuth2/OIDC login against `bcf_users` — some clients (confirmed: BIMcollab ZOOM) refuse the spec's Basic-Auth fallback and require a real-looking Authorization Code + PKCE flow with an `openid` scope. Issued tokens/sessions are in-memory only (lost on every restart) |
+| `bcf/admin.py` (`/admin`) | Standalone session-cookie-authenticated admin page (plain HTML/JS, no build step) — manage `bcf_users`, view/revoke active OAuth sessions, browse ingested models with their BCF topics (incl. snapshot thumbnails) and per-project `bcf_extensions` value lists, purge models/streams, and tail the last 100 non-`/health` requests this process has handled. Proxied at `/admin` by `nginx.conf.template` (same pattern as `/bcf/` and `/bcf-bridge/`) so it's reachable from the dashboard's own origin — linked from the "Admin" button in `BcfKanbanBoard.jsx`'s header, which opens it in a new tab |
+| `bcf/request_log.py` | In-memory ring buffer feeding the admin page's request log, fed by a middleware in `bcf_server.py` |
+| `bcf/bridge.py` (`/bcf-bridge/*`) | Resolves a Speckle `stream_id` to an ingested `model_id`, linking BCF projects to this app's own models |
+| `bcf/bcfxml.py` | `.bcfzip` file import/export (BCF-XML interop format every major BIM tool supports) |
+
+Clash and IDS check results are turned into BCF topics by the frontend calling the same `/bcf/2.1` REST API (`bcfClient.createTopic`) — `clash_check.py` and `ids_check.py` deliberately avoid the `ifcclash`/`ifctester` built-in BCF exporters, which lazily import the third-party `bcf-client` package (top-level module `bcf`) and would collide with this app's own local `bcf/` package.
+
+---
+
+## Frontend components
+
+| Component | Description |
+|-----------|-------------|
+| `SpeckleViewer` | 3D model viewer powered by `@speckle/viewer` |
+| `AdaptiveCharts` | Dynamic ECharts charts driven by normalizer summary data |
+| `EChart` | Thin ECharts/core wrapper — one chart instance per container, resize-aware |
+| `AdaptiveMetrics` | KPI cards with configurable highlight thresholds |
+| `ElementTable` | Paginated, filterable element list synced with 3D viewer selection |
+| `ElementPanel` | Detail panel for a single selected element |
+| `PivotTableWidget` | Multi-dimensional breakdown (category × storey × material) |
+| `QuantityWidget` | 5D quantity takeoff view: volume/area bar charts + coverage stats |
+| `ScheduleWidget` | Gantt-style schedule viewer with viewer element sync |
+| `DiffBar` | Visual diff: added / removed / changed element counts |
+| `TimelinePlayer` | 4D build-up animation driven by date parameters |
+| `ValidationWidget` | BIM data quality checks |
+| `FilterWidget` / `ActiveFilters` / `filterRules.js` | Rule-based element filtering used across widgets, the viewer, and filter-publish |
+| `ClashCheckPanel` / `ClashLogoIcon` | Runs and displays `ifcclash` clash detection results, with click-to-highlight in the 3D viewer. Supports checking a model against itself or against a second, separately selected model for cross-discipline clashes |
+| `IdsCheckPanel` / `IdsLogoIcon` | Runs and displays `ifctester` IDS validation results against stored specs |
+| `IdsGraphEditor` / `idsGraphNodeTypes` | Visual node-graph editor (`@xyflow/react`) for authoring IDS specifications without hand-writing XML |
+| `BcfTopicPanel` / `BcfLogoIcon` | BCF topic list/detail view — create, comment, and resolve issues |
+| `BcfKanbanBoard` | Drag-and-drop Kanban board for BCF topic status |
+| `BcfStatsWidget` | Topic counts by status/priority |
+| `DocumentsPanel` | Nextcloud-backed document workflow: drag-and-drop WIP/Shared/Published/Archived board with an app-enforced reviewed → approved → verified gate |
+| `DocumentPreview` (`document-preview/{IfcCanvas,DxfCanvas,DocxCanvas,XlsxCanvas}`) | In-browser document preview — PDF (native iframe), IFC (`web-ifc` WASM + Three.js), DXF (`dxf-viewer`, WebGL/Three.js), DOCX (`docx-preview`, renders to HTML/CSS), XLSX/legacy XLS (SheetJS `xlsx`, `sheet_to_html` per sheet). `.dwg` is converted to DXF server-side (`bim-normalizer/dwg_convert.py` + LibreDWG's `dwg2dxf`) and rendered by the same DXF viewer. No preview path for legacy binary `.doc` |
+| `ChatWidget` | AI assistant chat (OpenAI / Ollama / LM Studio / Mistral) |
+| `MarkdownWidget` | Editable markdown notes panel |
+| `MetricsConfig` | Configuration panel for AdaptiveMetrics thresholds |
+| `ViewerToolbar` | Toolbar for 3D viewer actions (section cuts, explode, etc.) |
+| `DashboardGrid` | Drag-and-drop, resizable widget grid (`react-grid-layout`), persisted per project via `/dashboard-layout` |
+| `WidgetFAB` | Floating action button for adding widgets to the dashboard |
+| `ChartBuilder` / `chartSettingsUI` / `StandaloneChartWidget` | User-configurable custom chart widgets |
+| `BreadcrumbSelector` | Project / model / version picker |
+| `CompareVersionToggle` | Toggle between absolute view and version-diff view |
+| `IngestProgress` | Async ingest/export job progress UI |
+| `PublishSelectionButton` | Publishes the current viewer selection back to Speckle via filter-publish |
+| `VideoWidget` | Embedded video panel for walkthroughs/recordings |
+| `IfcLogoIcon` | IFC logo SVG (used as export button) |
+| `ErrorBoundary` | React error boundary for graceful per-widget failure isolation |
+| `LoginScreen` / `AuthContext` | Dashboard login screen and auth state, gating the ISO 19650 author/reviewer/approver role checks (bypassable only via `DASHBOARD_AUTH_BYPASS`, dev-only) |
+| `SpeckleModelsList` | Browsable list of Speckle projects/models for selection |
+| `CombineModelsPicker` / `FederatedBar` / `FederatedClashPanel` | Federated (multi-model) view: combine several models in the viewer and run cross-model clash checks across them |
+| `ViewpointMarkupEditor` | Annotate/markup a 3D viewpoint before attaching it to a BCF topic |
+| `PanoramaThumbnail` | Thumbnail preview for 360°/panorama images |
+| `SchedulePanel` | Native 4D planner: right-docked drawer with Gantt (`ScheduleGanttView`) and build-up playback (`SchedulePlaybackView`) tabs |
+
+---
+
+## Environment variables
+
+### Root `.env` — the single source of truth for the whole stack
+
+`docker-compose.yml` reads this file and passes each value into whichever container(s) need it (frontend build args, bim-normalizer, bcf-server, speckle-mcp, or the `postgres`/`nextcloud` services directly) — see the `environment:`/`args:` blocks in [docker-compose.yml](../docker-compose.yml) for the exact wiring. There is no per-service `.env` for any of these containers. Every variable below (required and optional) is documented inline in [`.env.example`](../.env.example) — copy it to `.env` and fill in the values.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | Yes | Postgres connection, shared by bim-normalizer, bcf-server, and Nextcloud's own DB. `PG_HOST`/`PG_PORT` only matter for tools connecting from outside the compose network — containers always talk to `postgres:5432` directly |
+| `VITE_SPECKLE_SERVER` | Yes | Speckle server URL (also becomes `SPECKLE_SERVER_URL` for bim-normalizer/bcf-server) |
+| `VITE_SPECKLE_TOKEN` | Yes | Personal access token from your Speckle profile (also becomes `SPECKLE_TOKEN`) |
+| `VITE_NORMALIZER_URL` | Yes | bim-normalizer URL as seen by the frontend, e.g. `http://localhost:8002` |
+| `VITE_EXTRA_SPECKLE_SERVERS` | No | Additional Speckle servers for the frontend's server-switcher dropdown (baked in at build time) and bcf-server's admin panel project lookup. Comma-separated, each entry `Name\|URL\|token`. Note: bim-normalizer's own `GET /servers` route reads a differently-named var (`EXTRA_SPECKLE_SERVERS`, no `VITE_` prefix) that docker-compose never sets, so that particular lookup's extra-server list is always empty — the dropdown and bcf-server are unaffected, they read this var directly |
+| `PUBLIC_BASE_URL` | No | Publicly reachable base URL ending in `/normalizer`, used for the webhook auto-sync feature. Leave blank to disable |
+| `AUTO_SYNC_SCAN_INTERVAL_S` | No | Background re-scan interval in seconds — a dormant-project safety net for missed webhook deliveries. `docker-compose.yml` sets a default of `900` if unset in `.env`; bim-normalizer's own Python-level fallback (3600) only applies outside the documented `docker compose up` flow |
+| `DOCUMENT_SYNC_SCAN_INTERVAL_S` | No | Same kind of safety net as above, but for documents that reached Nextcloud some other way than the dashboard's own upload/move/revise/delete calls. Default `3600` |
+| `LOG_LEVEL` | No | `debug` / `info` / `warning` — passed to both bim-normalizer and bcf-server. Default `debug` |
+| `MCP_API_KEY` | No | Shared secret for remote streamable-HTTP MCP access; empty disables auth (local stdio MCP integration is unaffected — see below) |
+| `MCP_ALLOWED_HOSTS` | No | Comma-separated Host-header allow-list (DNS-rebinding protection) for the remote MCP server |
+| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login the MCP server uses for its Documents/CDE tools when `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set — passed through to the `speckle-mcp` container |
+| `BCF_API_KEY` | Yes (for BCF) | Shared Bearer credential between bcf-server and the dashboard's BCF panel. Required — an empty value sends `Authorization: Bearer ` and bcf-server rejects it |
+| `BCF_OIDC_SECRET` | No | Signs the `id_token` issued by the OAuth2/OIDC login flow (`bcf/oauth.py`) for clients like BIMcollab ZOOM. Falls back to `BCF_API_KEY`, then a hardcoded dev value, if unset |
+| `BCF_ADMIN_EMAIL` / `BCF_ADMIN_PASSWORD` | No | Idempotent startup seed for one `bcf_users` account, for convenience only — the `/admin` panel is always reachable via `BCF_API_KEY` regardless, so leaving these unset can't lock you out |
+| `DASHBOARD_SESSION_SECRET` | No | Signs the dashboard's own login session cookie. Falls back to `BCF_OIDC_SECRET`, then `BCF_API_KEY`, if left blank — set explicitly in production |
+| `DASHBOARD_AUTH_BYPASS` | No | **DEV/TESTING ONLY.** Skips the dashboard login screen and all ISO 19650 role checks. Leave unset/false always — never set in a deployed environment. Logs a startup warning whenever enabled |
+| `NEXTCLOUD_ADMIN_USER` / `NEXTCLOUD_ADMIN_PASSWORD` | Yes | Nextcloud's headless auto-install admin account; also used by bim-normalizer for OCS user/group provisioning |
+| `NEXTCLOUD_DB_USER` / `NEXTCLOUD_DB_PASS` | Yes | Nextcloud's own Postgres role (seeded by `postgres-init/01-nextcloud-db.sh` on a fresh volume) |
+| `NEXTCLOUD_APP_PASSWORD` | No | WebDAV service account password for bim-normalizer's document uploads/moves/deletes (generate via Nextcloud Settings > Security > "Create new app password"). Falls back to the admin password above if unset |
+| `NEXTCLOUD_PORT` | No | Admin/debug port only — never proxied by this dashboard's nginx. Default `8005` |
+| `NEXTCLOUD_URL` / `NEXTCLOUD_USER` | No | Only override if bim-normalizer should talk to a Nextcloud instance other than the bundled container, or use a dedicated WebDAV account instead of the admin one |
+| `VITE_OPENAI_API_KEY` | No | OpenAI key for the AI chat agent (also becomes `OPENAI_API_KEY` server-side) |
+| `VITE_OLLAMA_BASE_URL` / `VITE_OLLAMA_MODEL` | No | Local Ollama endpoint and model name |
+| `VITE_LMSTUDIO_BASE_URL` / `VITE_LMSTUDIO_MODEL` | No | LM Studio endpoint and model name |
+| `VITE_MISTRAL_API_KEY` | No | Mistral AI key (also becomes `MISTRAL_API_KEY` server-side) |
+
+### `bim-normalizer/.env` — local Claude Code MCP integration only
+
+Unrelated to the container stack above. `.mcp.json` runs `speckle_mcp.py` directly on your machine via stdio, and `python-dotenv` loads this file for whichever variables `.mcp.json`'s own `env` block doesn't already set, plus the BCF/Documents tool credentials below:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SPECKLE_SERVER_URL` | No | Speckle server URL — usually already set in `.mcp.json`'s `env` block, which takes precedence |
+| `SPECKLE_TOKEN` | Yes | Personal access token; this is the actual reason this file exists |
+| `BCF_API_KEY` | No | Only needed to use the BCF/Documents MCP tools locally — shared Bearer credential with bcf-server |
+| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login for Documents/CDE MCP tools, used if `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set |
+
+---
+
 ## Project structure
 
 ```
@@ -346,7 +505,7 @@ converge/
 ├── docker-compose.yml                 Full stack: postgres, bim-normalizer, speckle-mcp, bcf-server, dashboard
 ├── Dockerfile                         Frontend build (Vite) + nginx serve
 ├── nginx.conf.template                Proxies /normalizer/ and /bcf/ to backend containers
-├── .mcp.json                          MCP server registration (Claude Code)
+├── .mcp.json.example                  Template for local MCP config — copy to .mcp.json (git-ignored)
 ├── package.json
 ├── vite.config.js
 ├── tailwind.config.js
