@@ -208,7 +208,7 @@ docker compose up -d --build
 
 Both images are also published to GHCR on every push to `master` ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)): `ghcr.io/bau-tech/converge-dashboard` and `ghcr.io/bau-tech/converge-normalizer`. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild. Swap `build:` for `image: ghcr.io/bau-tech/...` per service in `docker-compose.yml` to use them instead of building locally.
 
-The same workflow also mirrors both images to Docker Hub if `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` repo secrets are set (Settings → Secrets and variables → Actions) — otherwise that step is skipped and only GHCR is published.
+The same workflow also mirrors both images to Docker Hub — [`docker.io/euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) and [`docker.io/euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer) — as long as the `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` repo variable/secret (Settings → Secrets and variables → Actions) are set; otherwise that step is skipped and only GHCR is published.
 
 ---
 
