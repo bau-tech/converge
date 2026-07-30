@@ -167,6 +167,24 @@ def get_document(conn, doc_id: str) -> dict | None:
     return _row_to_doc(row) if row else None
 
 
+def update_nc_path(conn, doc_id: str, nc_path: str) -> dict:
+    """Rewrites nc_path only (status unchanged) — used when a folder
+    containing this document is renamed (routers/documents.py's
+    rename_folder), as opposed to set_status()'s status-transition move."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE bim_documents SET nc_path = %s, updated_at = NOW() WHERE doc_id = %s RETURNING {_COLUMNS}",
+                (nc_path, doc_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return _row_to_doc(row)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def set_status(conn, doc_id: str, status: str, nc_path: str) -> dict:
     try:
         with conn.cursor() as cur:

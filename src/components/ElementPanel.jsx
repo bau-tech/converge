@@ -4,6 +4,7 @@ import {
     Paperclip, Link2, Unlink2, Plus, Search, FileText,
 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
+import { DocumentPreview } from './DocumentPreview'
 
 // Recursive Key-Value Tree Component
 const ObjectTreeItem = ({ data, label, depth = 0, path = '', onFilter, onCopy, isAutoWidth = false, activeFilter = null }) => {
@@ -144,6 +145,7 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
     const [loadingAvailable, setLoadingAvailable] = useState(false)
     const [search, setSearch] = useState('')
     const [busyId, setBusyId] = useState(null)
+    const [previewDoc, setPreviewDoc] = useState(null)
 
     const base = (normalizerUrl || '').replace(/\/$/, '')
 
@@ -246,18 +248,31 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
             <div className="space-y-1">
                 {docs.map((d) => (
                     <div key={d.doc_id} className="flex items-center justify-between gap-2 text-xs bg-white/5 rounded px-2 py-1.5 group">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                            <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                            <span className="truncate text-zinc-300" title={d.filename}>{d.filename}</span>
-                        </div>
                         <button
-                            onClick={() => unlinkDoc(d.doc_id)}
-                            disabled={busyId === d.doc_id}
-                            className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 shrink-0 disabled:opacity-50"
-                            title="Unlink document"
+                            onClick={() => setPreviewDoc(d)}
+                            className="flex items-center gap-1.5 min-w-0 text-left"
+                            title={`View ${d.filename}`}
                         >
-                            {busyId === d.doc_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Unlink2 className="w-3 h-3" />}
+                            <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                            <span className="truncate text-zinc-300">{d.filename}</span>
                         </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                onClick={() => setPreviewDoc(d)}
+                                className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-cyan-400"
+                                title="View document"
+                            >
+                                <Eye className="w-3 h-3" />
+                            </button>
+                            <button
+                                onClick={() => unlinkDoc(d.doc_id)}
+                                disabled={busyId === d.doc_id}
+                                className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-red-400 disabled:opacity-50"
+                                title="Unlink document"
+                            >
+                                {busyId === d.doc_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Unlink2 className="w-3 h-3" />}
+                            </button>
+                        </div>
                     </div>
                 ))}
             </div>
@@ -309,6 +324,17 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
                             </div>
                         </div>
                     </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {previewDoc && (
+                    <DocumentPreview
+                        doc={previewDoc}
+                        downloadUrl={`${base}/projects/${streamId}/documents/${previewDoc.doc_id}/download`}
+                        dwgPreviewUrl={`${base}/projects/${streamId}/documents/${previewDoc.doc_id}/preview.dxf`}
+                        onClose={() => setPreviewDoc(null)}
+                    />
                 )}
             </AnimatePresence>
         </div>

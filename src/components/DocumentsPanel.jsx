@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import {
     X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, UploadCloud, GitBranch, Ruler,
-    LayoutGrid, List,
+    LayoutGrid, List, Folder, FolderPlus, Pencil,
 } from 'lucide-react'
 import { DocumentPreview } from './DocumentPreview'
 import { SpeckleModelsList } from './SpeckleModelsList'
@@ -16,6 +16,22 @@ function isPreviewable(filename) {
 }
 
 const COLUMNS = ['WIP', 'Shared', 'Published', 'Archived']
+// Mirrors bim-normalizer/nextcloud/groupfolders.py's STATUS_FOLDERS — needed
+// to derive a document's subfolder from its nc_path client-side (see
+// docFolderPath below), since folder placement isn't its own DB column.
+const STATUS_SUBFOLDER = { WIP: '01_WIP', Shared: '02_Shared', Published: '03_Published', Archived: '04_Archived' }
+
+// A document's subfolder, relative to its status root — '' means it sits
+// directly in the status root (no folder). Derived on demand from nc_path
+// rather than stored, so this feature needed zero schema/migration.
+function docFolderPath(doc) {
+    const prefix = `${doc.nc_group_folder}/${STATUS_SUBFOLDER[doc.status]}/`
+    if (!doc.nc_path || !doc.nc_path.startsWith(prefix)) return ''
+    const remainder = doc.nc_path.slice(prefix.length)
+    const idx = remainder.lastIndexOf('/')
+    return idx === -1 ? '' : remainder.slice(0, idx)
+}
+
 const COLUMN_COLOR = {
     WIP: { border: 'border-zinc-400/50', bg: 'bg-zinc-400/10', text: 'text-zinc-300', badge: 'bg-zinc-400/20 text-zinc-200' },
     Shared: { border: 'border-blue-500/50', bg: 'bg-blue-500/10', text: 'text-blue-300', badge: 'bg-blue-500/25 text-blue-300' },
@@ -217,6 +233,22 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     const [deleting, setDeleting] = useState(false)
     const [isDraggingFile, setIsDraggingFile] = useState(false)
     const [modelsUploading, setModelsUploading] = useState(false)
+    // Folder navigation — ONE shared path across all 4 status columns (a
+    // folder spans the whole workflow, not 4 independent trees; see
+    // docFolderPath above and create_folder in routers/documents.py).
+    const [folderPath, setFolderPath] = useState('')
+    const [subfolders, setSubfolders] = useState([])
+    const [newFolderPrompt, setNewFolderPrompt] = useState(false)
+    const [newFolderName, setNewFolderName] = useState('')
+    const [creatingFolder, setCreatingFolder] = useState(false)
+    // Rename targets the folder *name* being edited (a direct child of the
+    // currently-browsed folderPath — never folderPath itself), so no
+    // adjustment to folderPath is ever needed on success.
+    const [renameFolderTarget, setRenameFolderTarget] = useState(null)
+    const [renameFolderValue, setRenameFolderValue] = useState('')
+    const [renamingFolder, setRenamingFolder] = useState(false)
+    const [deleteFolderTarget, setDeleteFolderTarget] = useState(null)
+    const [deletingFolder, setDeletingFolder] = useState(false)
     const fileInputRef = useRef(null)
     const reviseInputRef = useRef(null)
     const modelsListRef = useRef(null)
@@ -234,7 +266,11 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     // separate endpoint/state, since bim_documents already carries it.
     const wantDrawings = activeTab === 'drawings'
     const columns = COLUMNS.reduce((acc, status) => {
-        acc[status] = documents.filter(d => d.status === status && ((d.doc_type || 'document') === 'drawing') === wantDrawings)
+        acc[status] = documents.filter(d =>
+            d.status === status &&
+            ((d.doc_type || 'document') === 'drawing') === wantDrawings &&
+            docFolderPath(d) === folderPath
+        )
         return acc
     }, {})
 
@@ -254,6 +290,23 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     }, [streamId, base])
 
     useEffect(() => { loadDocuments() }, [loadDocuments])
+
+    // A folderPath from a previous project would be meaningless (or worse,
+    // coincidentally valid but wrong) after switching streams.
+    useEffect(() => { setFolderPath('') }, [streamId])
+
+    const loadSubfolders = useCallback(async () => {
+        if (!streamId || !base) return
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents/folders?path=${encodeURIComponent(folderPath)}`)
+            if (!res.ok) throw new Error(`Could not load folders (${res.status})`)
+            setSubfolders((await res.json()).folders || [])
+        } catch (err) {
+            setError(err.message)
+        }
+    }, [streamId, base, folderPath])
+
+    useEffect(() => { loadSubfolders() }, [loadSubfolders])
 
     useEffect(() => {
         if (!streamId || !base) return
@@ -316,6 +369,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         form.append('file', file)
         if (docType) form.append('doc_type', docType)
         if (modelId) form.append('model_id', modelId)
+        if (folderPath) form.append('folder_path', folderPath)
         const res = await fetch(`${base}/projects/${streamId}/documents/upload`, {
             method: 'POST', body: form,
         })
@@ -353,6 +407,74 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         const files = Array.from(e.target.files || [])
         e.target.value = ''
         uploadFiles(files, uploadOptsForActiveTab())
+    }
+
+    const createFolder = async () => {
+        const name = newFolderName.trim()
+        if (!name) return
+        setCreatingFolder(true)
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents/folders`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ parent_path: folderPath, name }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `Create folder failed (${res.status})`)
+            }
+            await loadSubfolders()
+            setNewFolderPrompt(false)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setCreatingFolder(false)
+        }
+    }
+
+    const renameFolder = async () => {
+        const newName = renameFolderValue.trim()
+        if (!newName || !renameFolderTarget) return
+        setRenamingFolder(true)
+        try {
+            const path = folderPath ? `${folderPath}/${renameFolderTarget}` : renameFolderTarget
+            const res = await fetch(`${base}/projects/${streamId}/documents/folders/rename`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path, new_name: newName }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `Rename failed (${res.status})`)
+            }
+            await Promise.all([loadSubfolders(), loadDocuments()])
+            setRenameFolderTarget(null)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setRenamingFolder(false)
+        }
+    }
+
+    const deleteFolder = async () => {
+        if (!deleteFolderTarget) return
+        setDeletingFolder(true)
+        try {
+            const path = folderPath ? `${folderPath}/${deleteFolderTarget}` : deleteFolderTarget
+            const res = await fetch(`${base}/projects/${streamId}/documents/folders?path=${encodeURIComponent(path)}`, {
+                method: 'DELETE',
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `Delete folder failed (${res.status})`)
+            }
+            await Promise.all([loadSubfolders(), loadDocuments()])
+            setDeleteFolderTarget(null)
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setDeletingFolder(false)
+        }
     }
 
     const handleDragEnter = (e) => {
@@ -629,6 +751,41 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 </button>
             </div>
 
+            {(activeTab === 'documents' || activeTab === 'drawings') && (
+                <div className="flex items-center justify-between px-5 pt-2 shrink-0">
+                    <div className="flex items-center gap-1 text-[11px] text-[var(--speckle-foreground-3)]">
+                        <button
+                            onClick={() => setFolderPath('')}
+                            className={folderPath === '' ? 'text-[var(--speckle-foreground)] font-medium' : 'hover:text-[var(--speckle-foreground)]'}
+                        >
+                            Root
+                        </button>
+                        {folderPath && folderPath.split('/').map((seg, i, arr) => {
+                            const upTo = arr.slice(0, i + 1).join('/')
+                            return (
+                                <span key={upTo} className="flex items-center gap-1">
+                                    <span>/</span>
+                                    <button
+                                        onClick={() => setFolderPath(upTo)}
+                                        className={upTo === folderPath ? 'text-[var(--speckle-foreground)] font-medium' : 'hover:text-[var(--speckle-foreground)]'}
+                                    >
+                                        {seg}
+                                    </button>
+                                </span>
+                            )
+                        })}
+                    </div>
+                    {canAct && (
+                        <button
+                            onClick={() => { setNewFolderName(''); setNewFolderPrompt(true) }}
+                            className="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
+                        >
+                            <FolderPlus className="w-3.5 h-3.5" /> New Folder
+                        </button>
+                    )}
+                </div>
+            )}
+
             {activeTab === 'models' ? (
                 <SpeckleModelsList
                     ref={modelsListRef}
@@ -639,6 +796,42 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
             ) : loading ? (
                 <div className="flex-1 flex items-center justify-center text-xs text-[var(--speckle-foreground-3)]">Loading documents…</div>
             ) : (
+                <>
+                {subfolders.length > 0 && (
+                    <div className="flex items-center gap-2 flex-wrap px-5 pt-3 shrink-0">
+                        {subfolders.map(name => (
+                            <div
+                                key={name}
+                                className="group flex items-center gap-1 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
+                            >
+                                <button
+                                    onClick={() => setFolderPath(folderPath ? `${folderPath}/${name}` : name)}
+                                    className="flex items-center gap-1.5 text-[11px] pl-2.5 pr-1 py-1.5"
+                                >
+                                    <Folder className="w-3.5 h-3.5" /> {name}
+                                </button>
+                                {canAct && (
+                                    <div className="flex items-center gap-0.5 pr-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button
+                                            onClick={() => { setRenameFolderValue(name); setRenameFolderTarget(name) }}
+                                            className="p-1 hover:text-[var(--speckle-foreground)]"
+                                            title="Rename folder"
+                                        >
+                                            <Pencil className="w-3 h-3" />
+                                        </button>
+                                        <button
+                                            onClick={() => setDeleteFolderTarget(name)}
+                                            className="p-1 hover:text-red-400"
+                                            title="Delete folder"
+                                        >
+                                            <Trash2 className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
                 <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDoc(null)}>
                     <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-4 p-5">
                         {COLUMNS.map(status => (
@@ -671,6 +864,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                         )}
                     </DragOverlay>
                 </DndContext>
+                </>
             )}
 
             {selectedDoc && (
@@ -833,6 +1027,135 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                     className="flex-1 text-xs px-2 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
                                 >
                                     {deleting ? 'Deleting…' : 'Delete'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {newFolderPrompt && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[215000] flex items-center justify-center bg-black/50"
+                        onClick={() => !creatingFolder && setNewFolderPrompt(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            className="glass-card w-[320px] p-4 space-y-3"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <p className="text-sm font-medium text-[var(--speckle-foreground)]">New folder</p>
+                            <input
+                                autoFocus
+                                value={newFolderName}
+                                onChange={e => setNewFolderName(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && createFolder()}
+                                placeholder="Folder name"
+                                // A CSS-variable background with a Tailwind opacity slash
+                                // modifier (bg-[var(--speckle-outline-3)]/50, used elsewhere
+                                // in this file for buttons/divs) doesn't reliably override an
+                                // <input>'s browser-default white background — resulting in
+                                // white-on-white invisible text. bg-zinc-800 is a plain
+                                // Tailwind color (no CSS-var decomposition involved, so it
+                                // actually renders) and already has an established .light-mode
+                                // override elsewhere in index.css, matching the working pattern
+                                // LoginScreen.jsx's own text input already uses.
+                                className="w-full text-xs px-2 py-2 rounded-lg bg-zinc-800 border border-white/10 text-zinc-100 outline-none focus:border-primary/60"
+                            />
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    onClick={() => setNewFolderPrompt(false)}
+                                    disabled={creatingFolder}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={createFolder}
+                                    disabled={creatingFolder || !newFolderName.trim()}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                                >
+                                    {creatingFolder ? 'Creating…' : 'Create'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {renameFolderTarget && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[215000] flex items-center justify-center bg-black/50"
+                        onClick={() => !renamingFolder && setRenameFolderTarget(null)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            className="glass-card w-[320px] p-4 space-y-3"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <p className="text-sm font-medium text-[var(--speckle-foreground)]">Rename folder</p>
+                            <input
+                                autoFocus
+                                value={renameFolderValue}
+                                onChange={e => setRenameFolderValue(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && renameFolder()}
+                                placeholder="Folder name"
+                                className="w-full text-xs px-2 py-2 rounded-lg bg-zinc-800 border border-white/10 text-zinc-100 outline-none focus:border-primary/60"
+                            />
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    onClick={() => setRenameFolderTarget(null)}
+                                    disabled={renamingFolder}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={renameFolder}
+                                    disabled={renamingFolder || !renameFolderValue.trim() || renameFolderValue.trim() === renameFolderTarget}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                                >
+                                    {renamingFolder ? 'Renaming…' : 'Rename'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {deleteFolderTarget && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[215000] flex items-center justify-center bg-black/50"
+                        onClick={() => !deletingFolder && setDeleteFolderTarget(null)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            className="glass-card w-[320px] p-4 space-y-3"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <p className="text-sm font-medium text-[var(--speckle-foreground)]">Delete this folder?</p>
+                            <p className="text-xs text-[var(--speckle-foreground-3)] break-all">{deleteFolderTarget}</p>
+                            <p className="text-[11px] text-[var(--speckle-foreground-disabled)]">This removes it and everything inside it (in every status) from Nextcloud. This cannot be undone.</p>
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    onClick={() => setDeleteFolderTarget(null)}
+                                    disabled={deletingFolder}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={deleteFolder}
+                                    disabled={deletingFolder}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+                                >
+                                    {deletingFolder ? 'Deleting…' : 'Delete'}
                                 </button>
                             </div>
                         </motion.div>

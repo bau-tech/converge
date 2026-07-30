@@ -49,6 +49,19 @@ def _group_folder(stream_id: str) -> str:
     return group_folder_mountpoint(stream_id)
 
 
+def _sanitize_folder_path(path: str | None) -> str:
+    """Client-supplied subfolder paths get concatenated directly into WebDAV
+    paths (ensure_folder/upload_bytes/list_folder) — reject '..'/empty
+    segments so a caller can't traverse outside the group folder's status
+    roots."""
+    path = (path or "").strip("/")
+    if not path:
+        return ""
+    if any(seg in ("", ".", "..") for seg in path.split("/")):
+        raise HTTPException(status_code=422, detail="Invalid folder path")
+    return path
+
+
 def _latest_model_id(conn, stream_id: str) -> str | None:
     with conn.cursor() as cur:
         cur.execute(
@@ -87,6 +100,40 @@ def list_documents(stream_id: str, status: str | None = None, linked_element: st
         return _list(conn, stream_id, status=status, linked_element=linked_element)
     finally:
         release_conn(conn)
+
+
+def _union_subfolder_names(group_folder: str, path: str) -> set[str]:
+    """Subfolder names at `path`, unioned across all 4 status roots — a
+    folder is one logical thing spanning the whole WIP->Shared->Published->
+    Archived workflow (see create_folder), and may exist asymmetrically if
+    created/renamed directly in Nextcloud under only one status root.
+    Shared by list_subfolders (below) and rename_folder's destination-name
+    collision check."""
+    from nextcloud.client import list_folder as nc_list_folder
+
+    names: set[str] = set()
+    for status_sub in _STATUS_FOLDERS.values():
+        base = f"{group_folder}/{status_sub}/{path}" if path else f"{group_folder}/{status_sub}"
+        for entry in nc_list_folder(base, depth="1"):
+            if entry["is_dir"]:
+                names.add(entry["name"])
+    return names
+
+
+@router.get("/projects/{stream_id}/documents/folders")
+def list_subfolders(stream_id: str, path: str = "", user: CurrentUser = Depends(require_login)):
+    """Must stay registered before GET /documents/{doc_id} below, same
+    reason linked-positions already has to be — an untyped `{doc_id}: str`
+    path param would otherwise swallow the literal "folders" segment.
+    Read-only: list_folder() already returns [] for a not-yet-provisioned
+    group folder, no ensure_project_group() needed."""
+    sub = _sanitize_folder_path(path)
+    group_folder = _group_folder(stream_id)
+    try:
+        names = _union_subfolder_names(group_folder, sub)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nextcloud folder listing failed: {exc}")
+    return {"path": sub, "folders": sorted(names)}
 
 
 @router.get("/projects/{stream_id}/documents/linked-positions")
@@ -233,6 +280,7 @@ async def upload_document(
     stream_id: str, file: UploadFile,
     doc_type: str = Form("document"),
     model_id: str | None = Form(None),
+    folder_path: str | None = Form(None),
     user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
 ):
     """Always lands in 01_WIP — new documents must go through the approval
@@ -241,18 +289,24 @@ async def upload_document(
     doc_type='drawing' requires an explicit model_id — deliberately not
     falling back to _latest_model_id() the way generic documents do below,
     since a drawing's model link is meant to be a deliberate user choice,
-    not a best-effort guess."""
+    not a best-effort guess.
+
+    folder_path (optional) places the upload inside a subfolder of WIP —
+    see create_folder() below for how a folder comes to exist across all
+    4 status roots in the first place."""
     from db.connection import get_conn, release_conn
     from db.documents import upsert_document, record_event
-    from nextcloud.client import upload_bytes
+    from nextcloud.client import upload_bytes, ensure_folder
     from nextcloud.provisioning import ensure_project_group
 
     if doc_type not in _VALID_DOC_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid doc_type, must be one of {_VALID_DOC_TYPES}")
 
+    sub = _sanitize_folder_path(folder_path)
     content = await file.read()
     filename = file.filename or "document"
     group_folder = _group_folder(stream_id)
+    target_dir = f"{group_folder}/{_STATUS_FOLDERS['WIP']}/{sub}" if sub else f"{group_folder}/{_STATUS_FOLDERS['WIP']}"
 
     # Short-lived connection just for validation/model resolution — released
     # before the (potentially slow) Nextcloud upload, same as the rest of
@@ -271,11 +325,16 @@ async def upload_document(
 
     try:
         ensure_project_group(stream_id)
+        if sub:
+            # Defensive/idempotent (MKCOL 405s harmlessly if it already
+            # exists via create_folder) — removes any hard ordering
+            # dependency on the client having called that route first.
+            ensure_folder(target_dir)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
 
     try:
-        meta = upload_bytes(f"{group_folder}/{_STATUS_FOLDERS['WIP']}/{filename}", content, overwrite=False)
+        meta = upload_bytes(f"{target_dir}/{filename}", content, overwrite=False)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud upload failed: {exc}")
 
@@ -291,6 +350,163 @@ async def upload_document(
     finally:
         release_conn(conn)
     return doc
+
+
+class CreateFolderRequest(BaseModel):
+    parent_path: str = ""
+    name: str
+
+
+@router.post("/projects/{stream_id}/documents/folders")
+def create_folder(
+    stream_id: str, body: CreateFolderRequest,
+    user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
+):
+    """Creates one logical folder spanning all 4 status roots at once
+    (ensure_folder x4) — a folder is one thing across the whole WIP->
+    Shared->Published->Archived workflow, not 4 independent trees (see
+    move_document's subfolder-preservation below). parent_path must already
+    exist (MKCOL requires an existing parent) — never an issue in practice
+    since the frontend only ever creates one level at a time from wherever
+    it's currently browsing, which by construction is a path it already
+    navigated into via list_subfolders()."""
+    from nextcloud.client import ensure_folder
+    from nextcloud.provisioning import ensure_project_group
+
+    name = body.name.strip()
+    if not name or "/" in name or name in (".", ".."):
+        raise HTTPException(status_code=422, detail="Invalid folder name")
+    parent = _sanitize_folder_path(body.parent_path)
+    folder_path = f"{parent}/{name}" if parent else name
+
+    try:
+        ensure_project_group(stream_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
+
+    group_folder = _group_folder(stream_id)
+    try:
+        for sub in _STATUS_FOLDERS.values():
+            ensure_folder(f"{group_folder}/{sub}/{folder_path}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nextcloud folder creation failed: {exc}")
+
+    return {"path": folder_path, "name": name}
+
+
+@router.delete("/projects/{stream_id}/documents/folders")
+def delete_folder(stream_id: str, path: str, user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE))):
+    """Recursively deletes a folder and everything inside it, across all 4
+    status roots. Every affected bim_documents row (any status, this folder
+    or a nested one beneath it) is soft-deleted first — same as
+    delete_document, audit history (bim_document_events) survives, never a
+    hard DB delete — then the actual Nextcloud folders are removed.
+    Nextcloud's WebDAV DELETE on a collection is recursive by spec, which is
+    exactly the "delete folder and its contents" behaviour wanted here."""
+    from db.connection import get_conn, release_conn
+    from db.documents import list_documents as _list_docs, soft_delete_document, record_event
+    from nextcloud.client import delete as nc_delete
+
+    folder_path = _sanitize_folder_path(path)
+    if not folder_path:
+        raise HTTPException(status_code=422, detail="Cannot delete the root")
+
+    group_folder = _group_folder(stream_id)
+    conn = get_conn()
+    try:
+        docs = _list_docs(conn, stream_id)
+        # Prefix match (not equality) so a nested subfolder's documents are
+        # caught too — deleting "Structural" must also remove anything
+        # under "Structural/SubA".
+        affected = [
+            d for d in docs
+            if d["nc_path"].startswith(f"{group_folder}/{_STATUS_FOLDERS[d['status']]}/{folder_path}/")
+        ]
+        for doc in affected:
+            soft_delete_document(conn, doc["doc_id"])
+            record_event(conn, doc["doc_id"], "deleted", actor=user.name, actor_guid=user.guid)
+    finally:
+        release_conn(conn)
+
+    # Best-effort per status root — a root that never had this folder (see
+    # the asymmetric-folder reasoning throughout this file) 404s harmlessly
+    # via nc_delete's own tolerance; any other failure is logged rather than
+    # aborting the loop, since partial cleanup is still strictly better than
+    # none and the DB side (the part users actually see) is already done.
+    for sub in _STATUS_FOLDERS.values():
+        try:
+            nc_delete(f"{group_folder}/{sub}/{folder_path}")
+        except Exception as exc:
+            logger.warning("delete_folder: failed to remove %s/%s: %s", sub, folder_path, exc)
+
+    return {"deleted": folder_path, "documents_removed": len(affected)}
+
+
+class RenameFolderRequest(BaseModel):
+    path: str
+    new_name: str
+
+
+@router.post("/projects/{stream_id}/documents/folders/rename")
+def rename_folder(stream_id: str, body: RenameFolderRequest, user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE))):
+    """Renames a folder (its last path segment) across all 4 status roots,
+    then rewrites nc_path for every affected bim_documents row.
+
+    Checks for a destination-name collision *before* touching anything —
+    without this, a partial failure (Nextcloud MOVE returns 409/412 for an
+    already-existing destination on some status root but not others, and
+    nc_move()/client.py doesn't distinguish that from "source didn't exist
+    here" 404s) could leave some status roots renamed and others not, with
+    no reliable signal to tell the two failure modes apart afterward. With
+    the upfront check, the only expected per-root failure left is "this
+    status root never had the folder" — tolerable, same reasoning as
+    create_folder/list_subfolders."""
+    from db.connection import get_conn, release_conn
+    from db.documents import list_documents as _list_docs, update_nc_path, record_event
+    from nextcloud.client import move as nc_move
+
+    new_name = body.new_name.strip()
+    if not new_name or "/" in new_name or new_name in (".", ".."):
+        raise HTTPException(status_code=422, detail="Invalid folder name")
+    old_path = _sanitize_folder_path(body.path)
+    if not old_path:
+        raise HTTPException(status_code=422, detail="Cannot rename the root")
+
+    parent, _, _old_name = old_path.rpartition("/")
+    new_path = f"{parent}/{new_name}" if parent else new_name
+    if new_path == old_path:
+        return {"path": old_path}
+
+    group_folder = _group_folder(stream_id)
+    try:
+        existing = _union_subfolder_names(group_folder, parent)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nextcloud folder listing failed: {exc}")
+    if new_name in existing:
+        raise HTTPException(status_code=409, detail=f'A folder named "{new_name}" already exists here')
+
+    for sub in _STATUS_FOLDERS.values():
+        try:
+            nc_move(f"{group_folder}/{sub}/{old_path}", f"{group_folder}/{sub}/{new_path}")
+        except Exception as exc:
+            logger.warning("rename_folder: failed to move %s/%s -> %s: %s", sub, old_path, new_path, exc)
+
+    conn = get_conn()
+    try:
+        docs = _list_docs(conn, stream_id)
+        updated = 0
+        for d in docs:
+            status_sub = _STATUS_FOLDERS[d["status"]]
+            old_prefix = f"{group_folder}/{status_sub}/{old_path}/"
+            if d["nc_path"].startswith(old_prefix):
+                new_nc_path = f"{group_folder}/{status_sub}/{new_path}/" + d["nc_path"][len(old_prefix):]
+                update_nc_path(conn, d["doc_id"], new_nc_path)
+                record_event(conn, d["doc_id"], "folder_renamed", from_value=d["nc_path"], to_value=new_nc_path, actor=user.name, actor_guid=user.guid)
+                updated += 1
+    finally:
+        release_conn(conn)
+
+    return {"path": new_path, "documents_updated": updated}
 
 
 class MoveRequest(BaseModel):
@@ -344,9 +560,29 @@ def move_document(stream_id: str, doc_id: str, body: MoveRequest, user: CurrentU
         group_folder = doc["nc_group_folder"]
         old_folder = _STATUS_FOLDERS[doc["status"]]
         new_folder = _STATUS_FOLDERS[body.status]
-        new_path = f"{group_folder}/{new_folder}/{doc['filename']}"
+
+        # Preserve whatever subfolder the document is currently in — the old
+        # flat reconstruction below silently dropped it on every status
+        # change. doc["nc_path"] is already authoritative (same pattern
+        # revise_document uses), so derive the subfolder from its prefix
+        # rather than assuming a flat group_folder/status/filename shape.
+        old_path = doc["nc_path"]
+        prefix = f"{group_folder}/{old_folder}/"
+        subfolder = ""
+        if old_path.startswith(prefix):
+            remainder = old_path[len(prefix):]  # "{subfolder/}filename" or "filename"
+            subfolder, _, _ = remainder.rpartition("/")
+
+        new_dir = f"{group_folder}/{new_folder}/{subfolder}" if subfolder else f"{group_folder}/{new_folder}"
+        new_path = f"{new_dir}/{doc['filename']}"
         try:
-            nc_move(f"{group_folder}/{old_folder}/{doc['filename']}", new_path)
+            from nextcloud.client import ensure_folder
+            if subfolder:
+                # Defensive: the destination status root should already have
+                # this subfolder (create_folder() makes it in all 4 at
+                # once), but idempotent MKCOL costs nothing and guards races.
+                ensure_folder(new_dir)
+            nc_move(old_path, new_path)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Nextcloud move failed: {exc}")
 

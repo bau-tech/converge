@@ -33,12 +33,21 @@ def reconcile_project(conn, stream_id: str) -> int:
 
     indexed = 0
     for status, subfolder in STATUS_FOLDERS.items():
-        for entry in list_folder(f"{group_folder}/{subfolder}", "1"):
+        # depth="infinity" (was "1") — status folders can now have arbitrary
+        # subfolders (see routers/documents.py's create_folder), so a
+        # depth-1 walk would silently miss any file placed inside one by
+        # some means other than this app's own upload flow (e.g. dragged
+        # into Nextcloud's own web UI directly). entry["path"] is already
+        # the correct full relative path at any depth (_parse_propfind
+        # strips the DAV prefix regardless), so use it directly instead of
+        # reconstructing group_folder/subfolder/name — that reconstruction
+        # was only ever correct because depth=1 never had nested paths.
+        for entry in list_folder(f"{group_folder}/{subfolder}", "infinity"):
             if entry["is_dir"]:
                 continue
             upsert_document(
                 conn, stream_id=stream_id, model_id=model_id,
-                nc_fileid=entry["fileid"], nc_path=f"{group_folder}/{subfolder}/{entry['name']}",
+                nc_fileid=entry["fileid"], nc_path=entry["path"],
                 nc_group_folder=group_folder, filename=entry["name"], mime_type=entry.get("mime_type"),
                 size_bytes=entry.get("size"), etag=entry.get("etag"), status=status,
             )
