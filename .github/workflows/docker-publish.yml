@@ -43,16 +43,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Optional second registry — only runs if DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
-      # repo secrets are set (Account Settings -> Security -> New Access Token on
-      # hub.docker.com for the token). Gated with `if:` on both steps below so a
-      # repo that hasn't configured these yet still publishes to GHCR normally
-      # instead of failing the whole job on a missing login.
+      # Optional second registry — only runs if the DOCKERHUB_USERNAME repo
+      # *variable* (Settings -> Secrets and variables -> Actions -> Variables
+      # tab, not Secrets — it's not sensitive) and the DOCKERHUB_TOKEN repo
+      # *secret* (same page, Secrets tab; generate at hub.docker.com ->
+      # Account Settings -> Security -> New Access Token) are both set.
+      # Gated on the `vars.DOCKERHUB_USERNAME` check specifically (not
+      # secrets) because the `secrets` context isn't available in step `if:`
+      # conditions at all — confirmed via actionlint, which fails the whole
+      # workflow file at parse time if you try, not just this step. Splitting
+      # username into a non-secret var is what makes the conditional possible
+      # in the first place, not just a style choice.
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        if: ${{ vars.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata (GHCR)
@@ -67,11 +73,11 @@ jobs:
             type=sha,prefix=,format=short
 
       - name: Extract metadata (Docker Hub)
-        id: meta-dockerhub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        id: meta_dockerhub
+        if: ${{ vars.DOCKERHUB_USERNAME != '' }}
         uses: docker/metadata-action@v5
         with:
-          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+          images: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -86,7 +92,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.tags }}
-            ${{ steps.meta-dockerhub.outputs.tags }}
+            ${{ steps.meta_dockerhub.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
