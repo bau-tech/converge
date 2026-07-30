@@ -98,6 +98,8 @@ docker compose up -d        # starts postgres, nextcloud, bim-normalizer (:8002)
                              # bcf-server (:8004), speckle-mcp (:8003), dashboard (:8080)
 ```
 
+`docker compose up -d` builds both application images locally on first run. To skip the build and pull the already-published ones instead, swap each service's `build:` block for an `image:` pointing at GHCR or Docker Hub before running — see [Deployment (Docker)](#deployment-docker) below for the exact image names and the `pull_policy` change that goes with it.
+
 ### 3. MCP server (local, Claude Code)
 
 Copy `.mcp.json.example` to `.mcp.json` (git-ignored — it holds your local Python path and Speckle server URL) and fill in the `command`/`args`/`env` values for your machine. Claude Code picks it up automatically and runs `speckle_mcp.py` directly over stdio. Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — see [MCP server](#mcp-server-speckle_mcppy) below and `bim-normalizer/.env.example`.
