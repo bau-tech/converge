@@ -16,26 +16,34 @@ router = APIRouter(tags=["ifc-export"])
 logger = logging.getLogger(__name__)
 
 _EXPORT_TMP_PREFIX = "bim_export_"
+_EXPORT_TMP_PREFIX_IFCX = "bim_export_ifcx_"
 
 
 def _export_temp_path(job_id: str) -> str:
     return os.path.join(tempfile.gettempdir(), f"{_EXPORT_TMP_PREFIX}{job_id}.ifc")
 
 
-def _prune_export_jobs(conn) -> None:
+def _export_temp_path_ifcx(job_id: str) -> str:
+    return os.path.join(tempfile.gettempdir(), f"{_EXPORT_TMP_PREFIX_IFCX}{job_id}.ifcx")
+
+
+def _prune_export_jobs(conn, job_type: str = "export") -> None:
     """Prune old export jobs from bim_jobs, deleting their backing temp files
-    first — db.jobs.prune_jobs only deletes rows, it doesn't know about files."""
+    first — db.jobs.prune_jobs only deletes rows, it doesn't know about files.
+    job_type distinguishes the mature IFC4X3 flow ("export") from the
+    experimental IFC5/.ifcx flow ("export_ifcx") so pruning one never touches
+    the other's jobs/temp files."""
     from db.jobs import JOB_KEEP
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT job_id, result->>'temp_path' FROM bim_jobs
-                WHERE job_type = 'export' AND status IN ('complete', 'failed')
+                WHERE job_type = %s AND status IN ('complete', 'failed')
                 ORDER BY created_at DESC
                 OFFSET %s
                 """,
-                (JOB_KEEP,),
+                (job_type, JOB_KEEP),
             )
             stale = cur.fetchall()
     except Exception:
@@ -47,7 +55,7 @@ def _prune_export_jobs(conn) -> None:
                 os.remove(temp_path)
             except OSError as exc:
                 logger.warning("_prune_export_jobs: failed to remove temp file %s: %s", temp_path, exc)
-    prune_jobs(conn, "export")
+    prune_jobs(conn, job_type)
 
 
 def _load_export_data(model_id: str, coord_unit: str) -> tuple:
@@ -275,9 +283,7 @@ async def start_export_ifc(model_id: str, coord_unit: str = "mm", include_schedu
     return {"job_id": job_id, "status": "pending"}
 
 
-@router.get("/models/{model_id}/export/ifc/{job_id}/status")
-def export_job_status(model_id: str, job_id: str):
-    """Poll the status of a background IFC export job."""
+def _job_status_response(job_id: str) -> dict:
     from db.connection import get_conn, release_conn
 
     conn = get_conn()
@@ -291,6 +297,74 @@ def export_job_status(model_id: str, job_id: str):
             detail="Export job not found — it may have completed before a backend restart, or never existed",
         )
     return {"job_id": job_id, "status": job["status"], "error": job["error"]}
+
+
+@router.get("/models/{model_id}/export/ifc/{job_id}/status")
+def export_job_status(model_id: str, job_id: str):
+    """Poll the status of a background IFC4X3 export job."""
+    return _job_status_response(job_id)
+
+
+@router.get("/models/{model_id}/export/ifcx/{job_id}/status")
+def export_job_status_ifcx(model_id: str, job_id: str):
+    """Poll the status of a background, EXPERIMENTAL IFC5 (.ifcx) export job."""
+    return _job_status_response(job_id)
+
+
+@router.post("/models/{model_id}/export/ifcx")
+async def start_export_ifcx(model_id: str, coord_unit: str = "mm"):
+    """
+    Start an async, EXPERIMENTAL IFC5 (.ifcx) export job. IFC5 is an
+    unratified alpha spec from buildingSMART — this covers only spatial
+    hierarchy, IFC class, body mesh geometry, and flat properties (no
+    materials, quantities, relationships, or 4D schedule; see
+    /export/ifc for the mature IFC4X3 export that includes those).
+    Returns {job_id, status}. Poll GET /export/ifcx/{job_id}/status, then
+    download from GET /export/ifcx/{job_id}/download.
+    """
+    from ifc.export_ifcx import export_model_ifcx
+    from db.connection import get_conn, release_conn
+
+    job_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        create_job(conn, job_id, "export_ifcx", payload={
+            "model_id": model_id, "coord_unit": coord_unit,
+        })
+    finally:
+        release_conn(conn)
+
+    async def _run():
+        conn2 = get_conn()
+        try:
+            model_row, elements, params = await asyncio.to_thread(
+                _load_export_data, model_id, coord_unit
+            )
+            model_name = model_row.get("branch_name") or model_row.get("commit_id", model_id)[:8]
+            ifcx_bytes = await run_cpu_bound(
+                export_model_ifcx, model_row, elements, params, coord_unit
+            )
+            filename = f"{model_name}_{model_id[:8]}.ifcx"
+            temp_path = _export_temp_path_ifcx(job_id)
+            def _write_export_file():
+                with open(temp_path, "wb") as f:
+                    f.write(ifcx_bytes)
+            await asyncio.to_thread(_write_export_file)
+            update_job(conn2, job_id, status="complete", result={
+                "filename": filename, "temp_path": temp_path,
+            })
+            logger.info("IFC5 (.ifcx) export job %s complete: %d bytes", job_id, len(ifcx_bytes))
+        except Exception as exc:
+            logger.error("IFC5 (.ifcx) export job %s failed: %s", job_id, exc, exc_info=True)
+            update_job(conn2, job_id, status="failed", error=str(exc))
+        finally:
+            try:
+                _prune_export_jobs(conn2, "export_ifcx")
+            finally:
+                release_conn(conn2)
+
+    fire_and_forget(_run())
+    return {"job_id": job_id, "status": "pending"}
 
 
 class OriginalIfcRequest(BaseModel):
@@ -329,9 +403,7 @@ async def get_original_ifc(stream_id: str, request: OriginalIfcRequest | None = 
     )
 
 
-@router.get("/models/{model_id}/export/ifc/{job_id}/download")
-def export_job_download(model_id: str, job_id: str):
-    """Download the IFC file once the export job is complete. Cleans up the job after download."""
+def _download_export_job(job_id: str, default_filename: str, media_type: str):
     from db.connection import get_conn, release_conn
 
     conn = get_conn()
@@ -346,7 +418,7 @@ def export_job_download(model_id: str, job_id: str):
             raise HTTPException(status_code=409, detail=f"Export not ready: {job['status']}")
 
         temp_path = job["result"].get("temp_path")
-        filename = job["result"].get("filename") or f"export_{job_id[:8]}.ifc"
+        filename = job["result"].get("filename") or default_filename
         if not temp_path or not os.path.exists(temp_path):
             raise HTTPException(
                 status_code=410,
@@ -380,9 +452,23 @@ def export_job_download(model_id: str, job_id: str):
 
     return StreamingResponse(
         _iter_file(temp_path),
-        media_type="application/x-step",
+        media_type=media_type,
         headers={
             "Content-Disposition": _content_disposition(filename),
             "Content-Length": str(file_size),
         },
     )
+
+
+@router.get("/models/{model_id}/export/ifc/{job_id}/download")
+def export_job_download(model_id: str, job_id: str):
+    """Download the IFC4X3 file once the export job is complete. Cleans up the job after download."""
+    return _download_export_job(job_id, f"export_{job_id[:8]}.ifc", "application/x-step")
+
+
+@router.get("/models/{model_id}/export/ifcx/{job_id}/download")
+def export_job_download_ifcx(model_id: str, job_id: str):
+    """Download the EXPERIMENTAL IFC5 (.ifcx) file once the export job is
+    complete. Cleans up the job after download. Media type is plain JSON —
+    no IANA-registered .ifcx MIME type exists yet, and .ifcx *is* JSON."""
+    return _download_export_job(job_id, f"export_{job_id[:8]}.ifcx", "application/json")

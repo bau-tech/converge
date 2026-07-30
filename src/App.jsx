@@ -43,6 +43,7 @@ import QuantityWidget from './components/QuantityWidget'
 import { VideoWidget } from './components/VideoWidget'
 import { StandaloneChartWidget } from './components/StandaloneChartWidget'
 import { IfcLogoIcon } from './components/IfcLogoIcon'
+import { IfcExportMenu } from './components/IfcExportMenu'
 import { BreadcrumbSelector } from './components/BreadcrumbSelector'
 import { SemanticSearchStatus } from './components/SemanticSearchStatus'
 import { WidgetFAB } from './components/WidgetFAB'
@@ -330,6 +331,7 @@ function Dashboard({ readOnly = false }) {
     const [loadingProjects, setLoadingProjects] = useState(true)
     const [loadingModels, setLoadingModels] = useState(false)
     const [exportingIfc, setExportingIfc] = useState(false)
+    const [exportingIfcx, setExportingIfcx] = useState(false)
     const [reIngesting, setReIngesting] = useState(false)
     const [schedulePanelOpen, setSchedulePanelOpen] = useState(_urlSeed?.ui?.showTimeline ?? false)
     const [playbackBarOpen, setPlaybackBarOpen] = useState(false)
@@ -1174,6 +1176,70 @@ function Dashboard({ readOnly = false }) {
             setLoadError(`IFC export failed: ${e.message}`)
         } finally {
             setExportingIfc(false)
+        }
+    }
+
+    // EXPERIMENTAL — IFC5 (.ifcx), buildingSMART's still-unratified alpha
+    // spec. Same ingest→start→poll→download shape as exportIfc() above, but
+    // deliberately skips the original-IFC-passthrough fast path (that only
+    // applies to the mature IFC4X3 format) and the include_schedule param
+    // (4D schedule isn't part of this exporter's v1 scope — see
+    // ifc/export_ifcx.py).
+    const exportIfcx = async () => {
+        const streamId  = selectedProject?.id
+        const commitId  = data?.version_id
+        const modelName = selectedModel?.name || 'model'
+        if (!streamId || !commitId) return
+
+        setExportingIfcx(true)
+        setLoadError(null)
+        try {
+            const ingestRes = await fetch(`${CONFIG.normalizerUrl}/ingest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    stream_id: streamId,
+                    commit_id: commitId,
+                    server_url: activeServer.url,
+                    token: activeServer.token || undefined,
+                })
+            })
+            const ingestBody = await safeJson(ingestRes, 'Ingest')
+            let modelId = ingestBody.model_id
+            if (!modelId && ingestBody.job_id) {
+                for (let i = 0; i < 120; i++) {
+                    await new Promise(r => setTimeout(r, 1500))
+                    const statusRes = await fetch(`${CONFIG.normalizerUrl}/ingest/status/${ingestBody.job_id}`)
+                    const s = await safeJson(statusRes, 'Ingest status')
+                    if (s.status === 'complete') { modelId = s.model_id; break }
+                    if (s.status === 'failed') throw new Error(s.error || 'Ingest failed')
+                }
+                if (!modelId) throw new Error('Ingest timed out after 3 minutes')
+            }
+
+            const startRes = await fetch(`${CONFIG.normalizerUrl}/models/${modelId}/export/ifcx`, { method: 'POST' })
+            const { job_id } = await safeJson(startRes, 'Export start')
+
+            for (let i = 0; i < 180; i++) {
+                await new Promise(r => setTimeout(r, 2000))
+                const statusRes = await fetch(`${CONFIG.normalizerUrl}/models/${modelId}/export/ifcx/${job_id}/status`)
+                const s = await safeJson(statusRes, 'Export status')
+                if (s.status === 'complete') break
+                if (s.status === 'failed') throw new Error(s.error || 'Export generation failed')
+                if (i === 179) throw new Error('Export timed out after 6 minutes')
+            }
+
+            const downloadUrl = `${CONFIG.normalizerUrl}/models/${modelId}/export/ifcx/${job_id}/download`
+            const a = document.createElement('a')
+            a.href = downloadUrl
+            a.download = `${modelName}_${commitId.slice(0, 8)}.ifcx`
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a)
+        } catch (e) {
+            setLoadError(`IFC5 (.ifcx) export failed: ${e.message}`)
+        } finally {
+            setExportingIfcx(false)
         }
     }
 
@@ -2371,14 +2437,14 @@ function Dashboard({ readOnly = false }) {
                                 >
                                     {reIngesting ? <Loader2 className="w-6 h-6 animate-spin" /> : <RotateCcw className="w-6 h-6" />}
                                 </motion.button>
-                                <motion.button whileHover={{ scale: exportingIfc ? 1 : 1.05 }} whileTap={{ scale: exportingIfc ? 1 : 0.95 }}
-                                    onClick={exportIfc}
-                                    disabled={!data || exportingIfc}
-                                    className={`glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${exportingIfc ? 'opacity-60' : ''}`}
-                                    title={isIfcSource ? 'Download original IFC from Speckle' : 'Export IFC4X3'}
-                                >
-                                    {exportingIfc ? <Loader2 className="w-6 h-6 animate-spin" /> : <IfcLogoIcon className="w-6 h-6" />}
-                                </motion.button>
+                                <IfcExportMenu
+                                    disabled={!data}
+                                    exportingIfc={exportingIfc}
+                                    exportingIfcx={exportingIfcx}
+                                    isIfcSource={isIfcSource}
+                                    onExportIfc4x3={exportIfc}
+                                    onExportIfcx={exportIfcx}
+                                />
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setSchedulePanelOpen(v => !v)}
                                     disabled={!data?.normalizer_model_id}
@@ -2683,6 +2749,14 @@ function Dashboard({ readOnly = false }) {
                                         <span className="text-[10px] text-[var(--speckle-foreground-3)]">IFC export</span>
                                     </button>
                                     <button
+                                        onClick={() => { exportIfcx(); setShowMobileActions(false) }}
+                                        disabled={!data || exportingIfcx}
+                                        className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                        {exportingIfcx ? <Loader2 className="w-6 h-6 animate-spin" /> : <IfcLogoIcon className="w-6 h-6" />}
+                                        <span className="text-[10px] text-[var(--speckle-foreground-3)]">IFC5 (Alpha)</span>
+                                    </button>
+                                    <button
                                         onClick={() => { setSchedulePanelOpen(v => !v); setShowMobileActions(false) }}
                                         disabled={!data?.normalizer_model_id}
                                         className={`flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed ${schedulePanelOpen ? 'text-amber-400 bg-amber-400/10' : ''}`}
@@ -2785,7 +2859,12 @@ function Dashboard({ readOnly = false }) {
                 )}
 
                 {/* Main Content */}
-                <main className="w-full max-w-[2400px] mx-auto px-4 lg:px-6 py-2">
+                {/* px-2 below (sm+: px-4/px-6) — GridDashboard's mobile layout adds its
+                    own small vertical padding (p-2) but relies on this for its horizontal
+                    gutter, so the two don't stack into an oversized ~48px-per-side inset
+                    that shrank every mobile dashboard card well below the actual device
+                    width. */}
+                <main className="w-full max-w-[2400px] mx-auto px-2 sm:px-4 lg:px-6 py-2">
                     {/* Error Banner */}
                     {loadError && (
                         <motion.div

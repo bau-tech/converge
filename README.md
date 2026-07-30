@@ -18,7 +18,8 @@ Browser — React + Vite
   • native 4D planner        WBS/Gantt authoring + CPM + build-up playback
       │
       ├─ REST ──────────► bim-normalizer :8002   (FastAPI, Python 3.11)
-      │                     PostgreSQL schema · IFC export (IFC4X3)
+      │                     PostgreSQL schema · IFC export (IFC4X3,
+      │                       experimental IFC5/.ifcx)
       │                     Clash check (ifcclash) · IDS check (ifctester)
       │                     Documents (Nextcloud) — reviewed → approved →
       │                       verified gate · Auth (dashboard login)
@@ -107,7 +108,7 @@ Every environment variable (required and optional) is documented inline in `.env
 
 ## bim-normalizer
 
-FastAPI backend (`:8002`) that ingests Speckle commits into a normalised PostgreSQL schema and serves ~70 REST routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export, IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (the ISO 19650 reviewed → approved → verified gate), dashboard layout/sharing, and debug utilities.
+FastAPI backend (`:8002`) that ingests Speckle commits into a normalised PostgreSQL schema and serves ~70 REST routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export (the mature IFC4X3/STEP export, plus an experimental IFC5/`.ifcx` export — buildingSMART's unratified next-gen JSON-based format), IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (the ISO 19650 reviewed → approved → verified gate), dashboard layout/sharing, and debug utilities.
 
 Ingest pipeline: `fetch_commit` (specklepy GraphQL) → `flatten_elements` → `detect_source` (Revit/Tekla/IFC/Navisworks/Blender/Rhino/Grasshopper) → `classify_element` → geometry/parameter extraction → PostgreSQL upsert → best-effort embedding build for semantic search. Re-running `/ingest` for an already-stored commit is an idempotent fast path (`force: true` to re-classify). Speckle webhooks can drive ingestion automatically with nobody's browser open.
 

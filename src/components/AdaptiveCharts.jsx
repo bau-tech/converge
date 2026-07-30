@@ -1,7 +1,7 @@
 import EChart from './EChart'
 import { baseOption, categoryAxisStyle, valueAxisStyle, legendStyle } from '../lib/echartsTheme'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2, Palette, Layers } from 'lucide-react'
+import { X, Plus, ChevronDown, BarChart3, PieChart, Sparkles, GripVertical, Pencil, Pin, Settings2, Palette, Layers, Loader2 } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { ChartBuilder } from './ChartBuilder'
 import { discoverProperties, aggregateProperty, discoverNumericProperties, aggregateNumericProperty } from '../utils/propertyScanner'
@@ -295,7 +295,19 @@ function prepareBarOption(data, config, highlightedValue, { darkMode = true, sta
             name: valueLabel,
             data: seriesData,
             label: {
-                show: showLabels,
+                // Vertical bar charts pack many categories into a narrow
+                // fixed-width card (e.g. "Elements by Level" with 15
+                // storeys) — at any usable font size, top-of-bar value
+                // labels for more than ~10 bars collide into illegible
+                // overlapping text on a mobile-width card. ECharts'
+                // labelLayout.hideOverlap was tried here first but doesn't
+                // reliably suppress bar-label collisions in practice
+                // (matches multiple upstream apache/echarts bug reports);
+                // capping by category count is deterministic instead —
+                // exact values remain available via the tooltip on tap.
+                // Horizontal bars don't have this problem (one row per
+                // category, spaced by bar thickness not width).
+                show: showLabels && (isHorizontal || sorted.length <= 10),
                 position: isHorizontal ? 'right' : 'top',
                 color: valueFontColor,
                 fontSize: valueFontSize,
@@ -753,7 +765,10 @@ export function DynamicChart({
                             {effectiveConfig.title}
                         </span>
                         {effectiveConfig.clickable && !fullDataReady && (
-                            <span className="text-[10px] text-yellow-500 shrink-0">Loading…</span>
+                            // Icon instead of a "Loading…" text badge — on a narrow mobile
+                            // card the text badge alone ate ~50px that would otherwise go to
+                            // the title, worsening truncation specifically during load.
+                            <Loader2 className="w-3 h-3 text-yellow-500 shrink-0 animate-spin" title="Loading…" />
                         )}
                     </div>
                     {federatedModels.length > 0 && (
@@ -811,7 +826,7 @@ export function DynamicChart({
 
                     {effectiveConfig.title}
                     {effectiveConfig.clickable && !fullDataReady && (
-                        <span className="text-xs text-yellow-500 font-normal">(Loading...)</span>
+                        <Loader2 className="w-3.5 h-3.5 text-yellow-500 shrink-0 animate-spin" title="Loading…" />
                     )}
                 </h3>
                 <div className="flex items-center gap-1">

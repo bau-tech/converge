@@ -15,7 +15,22 @@ const MOBILE_BREAKPOINT = 768
 // visible area, and the value jumps as the address bar shows/hides on
 // scroll. A fixed px height tied to a real device viewport doesn't move.
 const MOBILE_VIEWPORT_HEIGHT = 667
-const MOBILE_PANEL_HEIGHT = Math.round(MOBILE_VIEWPORT_HEIGHT / 2)  // half the screen — viewer and charts/widgets alike
+// Sized so the viewer plus one full chart/widget panel both fit within one
+// iPhone 7 screen with (near-)zero scrolling: measured overhead above the
+// viewer (header incl. collapsed Stats accordion + the mobile layout's own
+// top padding) is 137px, plus an 8px gap between the two panels, leaving
+// ~522px to split.
+//
+// MOBILE_CHART_HEIGHT can't go much below ~240 — a vertical bar chart with
+// rotated category labels (e.g. "Elements by Level") reserves a fixed ~110px
+// for axis/label chrome (prepareBarOption's `grid.top`/`grid.bottom` in
+// AdaptiveCharts.jsx) regardless of container size, so anything shorter
+// leaves too little room for the bars themselves — tried 200px first and it
+// rendered as illegible squashed bars with overlapping axis text, which
+// defeats the point of fitting it on screen at all. 240 leaves a legible
+// ~100px plot area. The viewer gets the remaining budget.
+const MOBILE_VIEWER_HEIGHT = 280
+const MOBILE_CHART_HEIGHT = 240
 // Bumped v4 -> v5 to force everyone onto the new compact default sizing below
 // (viewer + 4 charts + a table all fit on one screen without scrolling).
 //
@@ -562,19 +577,26 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
 
     if (isMobile) {
         return (
-            <div className="flex flex-col gap-2 p-2">
+            // Horizontal padding dropped (py-2 only) — <main> in App.jsx already
+            // supplies the mobile gutter; adding another here stacked into an
+            // oversized inset that shrank every card well below the actual
+            // device width (see App.jsx's <main> comment).
+            <div className="flex flex-col gap-2 py-2">
                 {panels.map(panel => (
                     <div
                         key={panel.id}
                         className="panel-thin w-full overflow-hidden"
                         // Viewer always pins directly below the header on mobile — there's
                         // no per-user toggle here (unlike desktop's Pin/PinOff button);
-                        // it's always on for this layout. Both viewer and charts/widgets
-                        // get the same MOBILE_PANEL_HEIGHT (half the iPhone 7's screen).
+                        // it's always on for this layout. Viewer and chart/widget panels
+                        // get different fixed heights (not a shared constant) so the
+                        // viewer plus one full chart both fit within the iPhone 7's
+                        // native 667px viewport height with no scrolling needed — see
+                        // MOBILE_VIEWER_HEIGHT/MOBILE_CHART_HEIGHT above.
                         style={
                             panel.type === 'viewer'
-                                ? { height: MOBILE_PANEL_HEIGHT, position: 'sticky', top: headerHeight + PIN_TOP_GAP, zIndex: PIN_Z_INDEX }
-                                : { height: MOBILE_PANEL_HEIGHT }
+                                ? { height: MOBILE_VIEWER_HEIGHT, position: 'sticky', top: headerHeight + PIN_TOP_GAP, zIndex: PIN_Z_INDEX }
+                                : { height: MOBILE_CHART_HEIGHT }
                         }
                     >
                         {renderPanel(panel)}
