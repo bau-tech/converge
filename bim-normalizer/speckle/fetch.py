@@ -219,11 +219,21 @@ def find_original_ifc_blob_for_commit(
     → convertedCommitId) — precise per-commit, unlike find_original_ifc_blob()
     which just guesses the largest .ifc blob anywhere on the stream.
 
-    Falls back to find_original_ifc_blob() when:
-      - the server's schema doesn't expose fileUploads (older/newer Speckle
-        server versions vary here), or
-      - no upload converted into this commit (e.g. the commit came from a
-        connector push rather than a web-UI "upload file" import).
+    Only falls back to find_original_ifc_blob()'s stream-wide guess when the
+    fileUploads lookup itself is unavailable (older/newer Speckle server
+    schema variance, network error) — i.e. when we genuinely have no way to
+    know either way. When the lookup succeeds but no upload converted into
+    this commit (e.g. the commit came from a connector push rather than a
+    web-UI "upload file" import), that's a definitive answer: this commit
+    has no corresponding file upload, so there is no correct blob to guess
+    at. Guessing anyway previously picked the largest .ifc blob ANYWHERE on
+    the stream regardless of whether it had anything to do with this commit
+    — confirmed to silently return a completely unrelated model's IFC file
+    (mismatched element counts, no overlap with the model's own stored
+    IfcGUID parameters) on a stream with multiple unrelated .ifc uploads.
+    Returning None here is safe: callers (resolve_model_ifc_bytes) already
+    treat None as "fall back to bim-normalizer's own synthetic export",
+    which is guaranteed to actually be this model's geometry.
     """
     tok = token or settings.SPECKLE_TOKEN
     srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
@@ -276,16 +286,19 @@ def find_original_ifc_blob_for_commit(
                 "file_size": match.get("fileSize"),
             }
         logger.info(
-            "No file-upload matched commit %s on stream %s — falling back to stream-wide IFC blob search",
+            "No file-upload matched commit %s on stream %s — this commit has no "
+            "corresponding original IFC (likely a connector push, not a file "
+            "upload); using bim-normalizer's synthetic export instead of "
+            "guessing at an unrelated blob",
             commit_id, stream_id,
         )
+        return None
     except Exception as exc:
         logger.info(
             "fileUploads lookup unavailable for stream %s (%s) — falling back to stream-wide IFC blob search",
             stream_id, exc,
         )
-
-    return find_original_ifc_blob(stream_id, tok, srv)
+        return find_original_ifc_blob(stream_id, tok, srv)
 
 
 def iter_original_ifc_blob(stream_id: str, blob: dict, chunk_size: int = 1024 * 1024):
