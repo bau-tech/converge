@@ -1,3 +1,31 @@
+# LibreDWG's dwg2dxf — converts uploaded .dwg documents to .dxf on preview
+# request (dwg_convert.py), since no free/open library renders DWG directly
+# (not packaged in Debian at all; see bim-normalizer/testing-documents.md).
+# GPL-3 CLI tool invoked as a subprocess, same pattern as shelling out to
+# ffmpeg — doesn't require this project's own code to be GPL. The release
+# tarball ships pregenerated configure/Makefile.in, so no autoconf/automake/
+# libtool needed. --disable-shared statically links dwg2dxf so it has no
+# runtime .so dependency to worry about.
+#
+# Built in its own stage so gcc/make (and the source tree) never land in the
+# final image — only the resulting static binary gets copied over. That's
+# ~250MB of compiler toolchain the running container never needs (pip
+# packages below already ship prebuilt wheels, no compiler required for
+# those either).
+FROM python:3.11-slim AS libredwg-builder
+ARG LIBREDWG_VERSION=0.14.8413
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sL "https://github.com/LibreDWG/libredwg/releases/download/${LIBREDWG_VERSION}/libredwg-${LIBREDWG_VERSION}.tar.gz" -o /tmp/libredwg.tar.gz \
+    && tar -xzf /tmp/libredwg.tar.gz -C /tmp \
+    && cd /tmp/libredwg-${LIBREDWG_VERSION} \
+    && ./configure --disable-bindings --disable-docs --disable-write --disable-shared \
+    && make -j"$(nproc)" \
+    && cp programs/dwg2dxf /usr/local/bin/dwg2dxf
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -7,30 +35,14 @@ WORKDIR /app
 # preview provider can't handle a given PDF. Deliberately not LibreOffice
 # (that's still only used, if ever, for DOCX/XLSX, which this doesn't add) —
 # pdftoppm is a tiny single-purpose CLI, no office-suite weight or
-# concurrency hazard.
+# concurrency hazard. curl stays here too — the HEALTHCHECK below shells out
+# to it.
 RUN apt-get update && apt-get install -y \
-    gcc \
     curl \
-    make \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# LibreDWG's dwg2dxf — converts uploaded .dwg documents to .dxf on preview
-# request (dwg_convert.py), since no free/open library renders DWG directly
-# (not packaged in Debian at all; see bim-normalizer/testing-documents.md).
-# GPL-3 CLI tool invoked as a subprocess, same pattern as shelling out to
-# ffmpeg — doesn't require this project's own code to be GPL. The release
-# tarball ships pregenerated configure/Makefile.in, so no autoconf/automake/
-# libtool needed. --disable-shared statically links dwg2dxf so it has no
-# runtime .so dependency to worry about.
-ARG LIBREDWG_VERSION=0.14.8413
-RUN curl -sL "https://github.com/LibreDWG/libredwg/releases/download/${LIBREDWG_VERSION}/libredwg-${LIBREDWG_VERSION}.tar.gz" -o /tmp/libredwg.tar.gz \
-    && tar -xzf /tmp/libredwg.tar.gz -C /tmp \
-    && cd /tmp/libredwg-${LIBREDWG_VERSION} \
-    && ./configure --disable-bindings --disable-docs --disable-write --disable-shared \
-    && make -j"$(nproc)" \
-    && cp programs/dwg2dxf /usr/local/bin/dwg2dxf \
-    && cd / && rm -rf /tmp/libredwg.tar.gz /tmp/libredwg-${LIBREDWG_VERSION}
+COPY --from=libredwg-builder /usr/local/bin/dwg2dxf /usr/local/bin/dwg2dxf
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
