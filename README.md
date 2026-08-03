@@ -78,6 +78,18 @@ Both the Speckle connectors **v3** instance/definition split (geometry on `obj.d
 
 ---
 
+## System requirements
+
+Idle, the full stack (postgres, nextcloud, bim-normalizer, bcf-server, speckle-mcp, dashboard) sits around 500MB RAM. The real constraint is ingest, not steady state: each ingest worker can independently balloon to several GB while processing a large Revit/IFC/Tekla commit (specklepy materializes the whole commit tree — meshes included — before any per-element processing), and bim-normalizer runs `cpu_count - 2` of those workers concurrently (see `bim-normalizer/process_pool.py`). More cores means more workers means more simultaneous multi-GB spikes possible, so RAM and CPU count should scale together, not RAM alone.
+
+| Tier | RAM | Fits |
+|---|---|---|
+| Minimum | 4GB | Small/medium models, one ingest at a time, light BCF/document use |
+| Recommended | 8GB | Typical use — large models, occasional overlapping ingests, headroom for Nextcloud/Postgres growth |
+| Heavy | 16GB | Large Revit/IFC models with frequent concurrent ingests, or more CPU cores |
+
+---
+
 ## Quick start
 
 ### 1. Frontend dev server (optional — for `npm run dev` against an already-running backend)
@@ -112,7 +124,7 @@ Every environment variable (required and optional) is documented inline in `.env
 
 FastAPI backend (`:8002`) that ingests Speckle commits into a normalised PostgreSQL schema and serves ~70 REST routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export (the mature IFC4X3/STEP export, plus an experimental IFC5/`.ifcx` export — buildingSMART's unratified next-gen JSON-based format), IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (the ISO 19650 reviewed → approved → verified gate), dashboard layout/sharing, and debug utilities.
 
-Ingest pipeline: `fetch_commit` (specklepy GraphQL) → `flatten_elements` → `detect_source` (Revit/Tekla/IFC/Navisworks/Blender/Rhino/Grasshopper) → `classify_element` → geometry/parameter extraction → PostgreSQL upsert → best-effort embedding build for semantic search. Re-running `/ingest` for an already-stored commit is an idempotent fast path (`force: true` to re-classify). Speckle webhooks can drive ingestion automatically with nobody's browser open.
+Ingest pipeline: `fetch_commit` (specklepy GraphQL) → `flatten_elements` → `detect_source` (Revit/Tekla/IFC/Navisworks/Blender/Rhino/Grasshopper) → `classify_element` → geometry/parameter extraction → PostgreSQL upsert → best-effort embedding build for semantic search. Re-running `/ingest` for an already-stored commit is an idempotent fast path (`force: true` to re-classify). Speckle webhooks can drive ingestion automatically with nobody's browser open, and the same webhooks — plus a periodic reconciliation scan as a safety net for missed deliveries — mirror deletions back: a project/branch/commit removed on Speckle is purged locally too, including its documents and Nextcloud group folder. Speckle is always the source of truth; converge never deletes anything there on its own.
 
 **Full REST API tables, database schema, and setup:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
 
@@ -126,6 +138,8 @@ docker compose logs -f bim-normalizer
 ## bcf-server
 
 A standalone FastAPI process (`bcf_server.py`, separate container) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` (BIMcollab ZOOM only understands 2.1). Shares the same Postgres instance as bim-normalizer. Topics carry a status field rendered as a drag-and-drop Kanban board (`BcfKanbanBoard.jsx`) alongside the standard topic list/detail view (`BcfTopicPanel.jsx`).
+
+A standalone, session-authenticated admin panel (`/admin`, linked from the "Admin" button in `BcfKanbanBoard.jsx`) manages `bcf_users`, active OAuth sessions, and ingested models/BCF topics — including permanently purging a project: local models, BCF topics, roles/status, documents, and its Nextcloud group folder, all without touching the source project on Speckle.
 
 **Full module map and the 2.1/3.0 schema differences:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#bcf-server-modules).
 
