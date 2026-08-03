@@ -53,7 +53,10 @@ def validate_ids_xml(content: str) -> None:
         raise InvalidIdsError(detail) from exc
 
 
-def run_ids_check(ifc_bytes: bytes, ids_content: str, resolve_application_ids: bool = False) -> dict:
+def run_ids_check(
+    ifc_bytes: bytes, ids_content: str, resolve_application_ids: bool = False,
+    revit_guid_map: dict[str, str] | None = None,
+) -> dict:
     """
     Validate an in-memory IFC file against an IDS spec and return a
     JSON-serializable report (ifctester.reporter.Json's results dict).
@@ -70,6 +73,16 @@ def run_ids_check(ifc_bytes: bytes, ids_content: str, resolve_application_ids: b
     that Tag so 3D highlighting on click can resolve it. A real original
     IFC's Tag has no relation to application_id, so that path is left
     returning the raw GlobalId as before.
+
+    revit_guid_map: pass the map from routers.ifc_export.build_revit_guid_map()
+    when ifc_bytes is a real original IFC from a Revit-published model —
+    resolves the Revit exporter's own GlobalIds back to application_id via
+    the computed UniqueId<->GlobalId correlation (see revit_guid.py),
+    covering the case resolve_application_ids doesn't (a genuine original
+    IFC file, not our synthetic export). Mutually exclusive in practice
+    with resolve_application_ids (one model is either synthetic-exported
+    or original-IFC-checked, never both), but both are tried independently
+    so passing both is harmless.
     """
     tmp_path = None
     try:
@@ -87,6 +100,13 @@ def run_ids_check(ifc_bytes: bytes, ids_content: str, resolve_application_ids: b
                         tag = entity.get("tag")
                         if tag and str(tag).strip():
                             entity["global_id"] = str(tag).strip()
+        if revit_guid_map:
+            for specification in results.get("specifications", []):
+                for requirement in specification.get("requirements", []):
+                    for entity in requirement.get("failed_entities", []):
+                        mapped = revit_guid_map.get(entity.get("global_id"))
+                        if mapped:
+                            entity["global_id"] = mapped
         # Json.encode() stringifies anything non-JSON-native (ifcopenshell
         # entity instances in particular) — round-trip through json to get a
         # plain dict back instead of a half-native/half-stringified mix.

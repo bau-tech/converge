@@ -393,7 +393,7 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                             {ifcSource && (
                                 <p className="text-[11px] text-[var(--speckle-foreground-3)] -mt-1">
                                     {ifcSource === 'original_ifc'
-                                        ? 'Checked against the original IFC file uploaded to this stream — 3D highlighting/snapshots will work for IFC-sourced models. For models published from Revit (where this IFC was independently exported), the clash GlobalIds won\'t match this model\'s elements, so highlighting/snapshots won\'t resolve.'
+                                        ? 'Checked against the original IFC file uploaded to this stream. 3D highlighting/snapshots work for IFC-sourced models and for models published from Revit (resolved automatically); other/non-Revit exporters may not resolve.'
                                         : 'No original IFC file found on this stream — checked against a reconstructed IFC. 3D highlighting/snapshots still work, resolved through each element\'s id.'}
                                 </p>
                             )}

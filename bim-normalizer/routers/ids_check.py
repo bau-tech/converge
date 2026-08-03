@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from job_registry import _is_uuid, fire_and_forget
 from process_pool import run_cpu_bound
 from db.jobs import create_job, update_job, get_job, prune_jobs
-from routers.ifc_export import resolve_model_ifc_bytes
+from routers.ifc_export import resolve_model_ifc_bytes, build_revit_guid_map
 
 router = APIRouter(tags=["ids-check"])
 logger = logging.getLogger(__name__)
@@ -173,9 +173,17 @@ async def start_ids_check(model_id: str, body: IdsCheckRequest):
                 model_id, body.token, body.server_url, body.coord_unit
             )
 
+            # For a real original IFC (e.g. Revit's own exporter output),
+            # its GlobalIds have no direct relation to application_id —
+            # resolve them back via the computed Revit UniqueId<->GlobalId
+            # correlation so 3D highlighting on click still works.
+            revit_guid_map = (
+                await build_revit_guid_map(model_id) if ifc_source == "original_ifc" else {}
+            )
+
             logger.info("IDS check job %s: validating against %s (%d bytes)", job_id, ifc_source, len(ifc_bytes))
             result = await run_cpu_bound(
-                run_ids_check, ifc_bytes, ids_content, ifc_source == "synthetic_export",
+                run_ids_check, ifc_bytes, ids_content, ifc_source == "synthetic_export", revit_guid_map,
             )
             update_job(conn2, job_id, status="complete", result={"report": result, "ifc_source": ifc_source})
             logger.info("IDS check job %s complete: status=%s", job_id, result.get("status"))

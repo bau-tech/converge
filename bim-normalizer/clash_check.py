@@ -36,7 +36,7 @@ def _with_geometry_count(check_file, selector: str) -> int:
     )
 
 
-def _resolve_id(check_file, global_id: str, resolve_application_ids: bool) -> str:
+def _resolve_id(check_file, global_id: str, resolve_application_ids: bool, guid_map: dict | None = None) -> str:
     """
     When checking against bim-normalizer's own synthetic IFC export
     (ifc/export.py), every element's Tag is set to its Speckle
@@ -45,16 +45,24 @@ def _resolve_id(check_file, global_id: str, resolve_application_ids: bool) -> st
     random in that export (ifcopenshell.guid.new()) and can never resolve
     to a scene object, so substitute the Tag here instead. Only called
     with resolve_application_ids=True for the synthetic-export path —
-    a real original IFC's Tag has no relation to application_id, so that
-    path is left returning the raw GlobalId as before.
+    a real original IFC's Tag has no relation to application_id.
+
+    guid_map: for a real original IFC (e.g. Revit's own exporter output),
+    pass the map from routers.ifc_export.build_revit_guid_map() instead —
+    resolves the exporter's own GlobalId back to application_id via the
+    computed Revit UniqueId<->GlobalId correlation (revit_guid.py).
     """
-    if not resolve_application_ids:
-        return global_id
-    try:
-        tag = check_file.by_guid(global_id).Tag
-        return tag.strip() if tag and tag.strip() else global_id
-    except Exception:
-        return global_id
+    if resolve_application_ids:
+        try:
+            tag = check_file.by_guid(global_id).Tag
+            return tag.strip() if tag and tag.strip() else global_id
+        except Exception:
+            return global_id
+    if guid_map:
+        mapped = guid_map.get(global_id)
+        if mapped:
+            return mapped
+    return global_id
 
 
 def _apply_mode_settings(clash_set: dict, mode: str, tolerance: float, clearance: float, allow_touching: bool) -> None:
@@ -70,7 +78,10 @@ def _apply_mode_settings(clash_set: dict, mode: str, tolerance: float, clearance
         raise ValueError(f"Unknown clash mode: {mode!r}")
 
 
-def _extract_clashes(clash_set: dict, check_file_a, resolve_a: bool, check_file_b, resolve_b: bool) -> list[dict]:
+def _extract_clashes(
+    clash_set: dict, check_file_a, resolve_a: bool, check_file_b, resolve_b: bool,
+    guid_map_a: dict | None = None, guid_map_b: dict | None = None,
+) -> list[dict]:
     # check_file_a/check_file_b are the same object for a same-model rule, or
     # two different ifcopenshell files for a cross-model rule — each side's
     # GlobalId is only ever meaningful (and only ever resolved) against the
@@ -79,8 +90,8 @@ def _extract_clashes(clash_set: dict, check_file_a, resolve_a: bool, check_file_
     for c in clash_set.get("clashes", {}).values():
         clash_type = c.get("type")
         clashes.append({
-            "a_global_id": _resolve_id(check_file_a, c["a_global_id"], resolve_a),
-            "b_global_id": _resolve_id(check_file_b, c["b_global_id"], resolve_b),
+            "a_global_id": _resolve_id(check_file_a, c["a_global_id"], resolve_a, guid_map_a),
+            "b_global_id": _resolve_id(check_file_b, c["b_global_id"], resolve_b, guid_map_b),
             "a_ifc_class": c["a_ifc_class"],
             "b_ifc_class": c["b_ifc_class"],
             "a_name": c["a_name"],
@@ -93,7 +104,10 @@ def _extract_clashes(clash_set: dict, check_file_a, resolve_a: bool, check_file_
     return clashes
 
 
-def _run_one_rule(check_file, tmp_path: str, rule: dict, resolve_application_ids: bool = False) -> dict:
+def _run_one_rule(
+    check_file, tmp_path: str, rule: dict, resolve_application_ids: bool = False,
+    guid_map: dict | None = None,
+) -> dict:
     """
     Run a single clash rule against an already-open ifcopenshell file backed
     by tmp_path. Returns the same result shape regardless of how many other
@@ -135,11 +149,17 @@ def _run_one_rule(check_file, tmp_path: str, rule: dict, resolve_application_ids
     clasher.clash_sets = [clash_set]
     clasher.clash()
 
-    clashes = _extract_clashes(clash_set, check_file, resolve_application_ids, check_file, resolve_application_ids)
+    clashes = _extract_clashes(
+        clash_set, check_file, resolve_application_ids, check_file, resolve_application_ids,
+        guid_map, guid_map,
+    )
     return {**base_result, "count": len(clashes), "clashes": clashes}
 
 
-def run_clash_checks(ifc_bytes: bytes, rules: list[dict], resolve_application_ids: bool = False) -> list[dict]:
+def run_clash_checks(
+    ifc_bytes: bytes, rules: list[dict], resolve_application_ids: bool = False,
+    guid_map: dict | None = None,
+) -> list[dict]:
     """
     Run one or more clash rules against the same IFC model in a single pass —
     the model is written to a temp file and opened with ifcopenshell exactly
@@ -155,6 +175,9 @@ def run_clash_checks(ifc_bytes: bytes, rules: list[dict], resolve_application_id
     resolve_application_ids: pass True when ifc_bytes came from
     bim-normalizer's own synthetic export (not a real original IFC) — see
     _resolve_id's docstring.
+
+    guid_map: for a real original IFC, pass the map from
+    routers.ifc_export.build_revit_guid_map() — see _resolve_id's docstring.
 
     Passing the same selector as both A and B in a rule double-inserts every
     matching element into ifcclash's BVH tree (once per group) and silently
@@ -176,7 +199,7 @@ def run_clash_checks(ifc_bytes: bytes, rules: list[dict], resolve_application_id
             tmp_path = f.name
 
         check_file = ifcopenshell.open(tmp_path)
-        return [_run_one_rule(check_file, tmp_path, rule, resolve_application_ids) for rule in rules]
+        return [_run_one_rule(check_file, tmp_path, rule, resolve_application_ids, guid_map) for rule in rules]
     finally:
         if tmp_path:
             try:
@@ -188,6 +211,7 @@ def run_clash_checks(ifc_bytes: bytes, rules: list[dict], resolve_application_id
 def _run_one_cross_rule(
     check_file_a, tmp_path_a: str, check_file_b, tmp_path_b: str, rule: dict,
     resolve_a: bool = False, resolve_b: bool = False,
+    guid_map_a: dict | None = None, guid_map_b: dict | None = None,
 ) -> dict:
     """
     Like _run_one_rule, but group "a" and group "b" always come from two
@@ -230,13 +254,14 @@ def _run_one_cross_rule(
     clasher.clash_sets = [clash_set]
     clasher.clash()
 
-    clashes = _extract_clashes(clash_set, check_file_a, resolve_a, check_file_b, resolve_b)
+    clashes = _extract_clashes(clash_set, check_file_a, resolve_a, check_file_b, resolve_b, guid_map_a, guid_map_b)
     return {**base_result, "count": len(clashes), "clashes": clashes}
 
 
 def run_cross_model_clash_checks(
     ifc_bytes_a: bytes, ifc_bytes_b: bytes, rules: list[dict],
     resolve_a: bool = False, resolve_b: bool = False,
+    guid_map_a: dict | None = None, guid_map_b: dict | None = None,
 ) -> list[dict]:
     """
     Like run_clash_checks, but checks model A's elements against model B's
@@ -252,6 +277,9 @@ def run_cross_model_clash_checks(
     from bim-normalizer's own synthetic export rather than a real original
     IFC — see _resolve_id's docstring. The two sides are resolved
     independently since either model can have its own IFC source.
+
+    guid_map_a / guid_map_b: for whichever side(s) are a real original IFC,
+    pass that model's map from routers.ifc_export.build_revit_guid_map().
     """
     tmp_path_a = tmp_path_b = None
     try:
@@ -265,7 +293,10 @@ def run_cross_model_clash_checks(
         check_file_a = ifcopenshell.open(tmp_path_a)
         check_file_b = ifcopenshell.open(tmp_path_b)
         return [
-            _run_one_cross_rule(check_file_a, tmp_path_a, check_file_b, tmp_path_b, rule, resolve_a, resolve_b)
+            _run_one_cross_rule(
+                check_file_a, tmp_path_a, check_file_b, tmp_path_b, rule,
+                resolve_a, resolve_b, guid_map_a, guid_map_b,
+            )
             for rule in rules
         ]
     finally:

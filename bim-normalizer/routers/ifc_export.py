@@ -106,6 +106,37 @@ def _load_export_data(model_id: str, coord_unit: str) -> tuple:
     return model_row, elements, params_by_element
 
 
+def _load_application_ids(model_id: str) -> list[str]:
+    """Fetch every element's application_id for this model — the minimal
+    query build_revit_guid_map() below needs, without pulling geometry/
+    params like _load_export_data() does."""
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT application_id FROM bim_elements WHERE model_id = %s AND application_id IS NOT NULL",
+                (model_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        release_conn(conn)
+
+
+async def build_revit_guid_map(model_id: str) -> dict[str, str]:
+    """Maps a Revit-exporter IFC GlobalId -> this model's application_id,
+    for whichever elements have a Revit-shaped application_id (see
+    revit_guid.py). Call only when checking against a model's real
+    original IFC (ifc_source == "original_ifc") — for bim-normalizer's own
+    synthetic export the existing Tag-based resolution already works and
+    is exact, whereas this is a computed/heuristic match. Empty dict
+    (cheap no-op) for non-Revit models."""
+    from revit_guid import build_guid_map
+
+    application_ids = await asyncio.to_thread(_load_application_ids, model_id)
+    return build_guid_map(application_ids)
+
+
 def _load_relationships_for_export(model_id: str) -> list[dict]:
     """
     Fetch this model's bim_relationships rows (parent/room/space links — see

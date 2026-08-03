@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from db.jobs import create_job, update_job, get_job, prune_jobs
 from job_registry import fire_and_forget
 from process_pool import run_cpu_bound
-from routers.ifc_export import resolve_model_ifc_bytes
+from routers.ifc_export import resolve_model_ifc_bytes, build_revit_guid_map
 
 router = APIRouter(tags=["clash-check"])
 logger = logging.getLogger(__name__)
@@ -68,6 +68,14 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
                     resolve_model_ifc_bytes(model_id, body.token, body.server_url, body.coord_unit),
                     resolve_model_ifc_bytes(body.compare_model_id, body.token, body.server_url, body.coord_unit),
                 )
+                # For whichever side(s) are a real original IFC (e.g. Revit's
+                # own exporter output), resolve its GlobalIds back to
+                # application_id via the computed Revit UniqueId<->GlobalId
+                # correlation — see build_revit_guid_map's docstring.
+                guid_map_a = await build_revit_guid_map(model_id) if ifc_source_a == "original_ifc" else {}
+                guid_map_b = (
+                    await build_revit_guid_map(body.compare_model_id) if ifc_source_b == "original_ifc" else {}
+                )
                 logger.info(
                     "Clash check job %s: checking %s (%s) against %s (%s)",
                     job_id, model_id, ifc_source_a, body.compare_model_id, ifc_source_b,
@@ -75,6 +83,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
                 results = await run_cpu_bound(
                     run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, rule_dicts,
                     ifc_source_a == "synthetic_export", ifc_source_b == "synthetic_export",
+                    guid_map_a, guid_map_b,
                 )
                 total = sum(r.get("count", 0) for r in results)
                 update_job(conn2, job_id, status="complete", result={
@@ -99,17 +108,18 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
             # each clash's GlobalId with the element's Tag, which ifc/export.py
             # sets to application_id — so highlighting still works. A real
             # original IFC (e.g. Revit's own exporter output) assigns its own
-            # GlobalIds/Tags with no relation to application_id, so 3D
-            # highlighting still won't resolve for that path; this is a known,
-            # accepted gap (no Revit UniqueId <-> IFC GlobalId mapping exists).
+            # GlobalIds/Tags with no relation to application_id — for that
+            # path, guid_map (built below when applicable) resolves them back
+            # via the computed Revit UniqueId<->GlobalId correlation instead.
             ifc_bytes, ifc_source = await resolve_model_ifc_bytes(
                 model_id, body.token, body.server_url, body.coord_unit
             )
+            guid_map = await build_revit_guid_map(model_id) if ifc_source == "original_ifc" else {}
 
             logger.info("Clash check job %s: checking against %s (%d bytes)", job_id, ifc_source, len(ifc_bytes))
             results = await run_cpu_bound(
                 run_clash_checks, ifc_bytes, rule_dicts,
-                ifc_source == "synthetic_export",
+                ifc_source == "synthetic_export", guid_map,
             )
             total = sum(r.get("count", 0) for r in results)
             update_job(conn2, job_id, status="complete", result={
@@ -137,13 +147,15 @@ def clash_check_status(model_id: str, job_id: str):
     """Poll a clash-detection job. Once status == 'complete', `result` holds the clash list.
     `ifc_source` indicates whether the check ran against the model's true
     original IFC file ("original_ifc") or bim-normalizer's reconstruction
-    ("synthetic_export", used when no original IFC blob is attached — for
-    this path, clash GlobalIds are already resolved to application_id
-    server-side so 3D highlighting/screenshots work; for "original_ifc",
-    a real exporter's own GlobalIds have no relation to application_id, so
-    highlighting won't resolve there). For a cross-model check (request had
-    compare_model_id set), `ifc_source` is null and `compare` instead holds
-    {model_b_id, ifc_source_a, ifc_source_b} — one ifc_source per model."""
+    ("synthetic_export", used when no original IFC blob is attached). Either
+    way, clash GlobalIds are resolved to application_id server-side so 3D
+    highlighting/screenshots work — for "synthetic_export" via an exact Tag
+    match, for "original_ifc" via a computed Revit UniqueId<->GlobalId
+    correlation (revit_guid.py) that only covers Revit-shaped application_ids,
+    so highlighting may still not resolve for non-Revit sources (e.g. Tekla).
+    For a cross-model check (request had compare_model_id set), `ifc_source`
+    is null and `compare` instead holds {model_b_id, ifc_source_a,
+    ifc_source_b} — one ifc_source per model."""
     from db.connection import get_conn, release_conn
 
     conn = get_conn()
