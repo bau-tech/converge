@@ -13,6 +13,7 @@ oauth.py uses for its id_token, but with a distinct signing key and a
 other.
 """
 import hashlib
+import logging
 import time
 
 import jwt
@@ -26,9 +27,10 @@ from bcf.password import hash_password, verify_password
 from bcf.projects import EXTENSION_KINDS, default_extension_values, extension_value_lists
 from bcf.request_log import recent as recent_requests
 from bcf.schemas import DocumentRoleCreate, ExtensionValueCreate, UserCreate
-from db.purge import purge_speckle_models
+from db.purge import purge_speckle_models, purge_project_documents
 
 router = APIRouter(tags=["bcf-admin"])
+logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "bcf_admin_session"
 SESSION_TTL_SECONDS = 8 * 3600
@@ -502,7 +504,7 @@ async function purgeModel(btn) {{
 }}
 
 async function purgeStream(btn) {{
-    if (!confirm('Permanently delete EVERY version of this project and any linked BCF topics?')) return;
+    if (!confirm('Permanently delete EVERY version of this project, its BCF topics, its documents, and its Nextcloud folder? This does NOT delete the project on Speckle itself.')) return;
     await api(`/admin/api/streams/${{btn.dataset.stream}}`, {{ method: 'DELETE' }});
     loadOverview();
 }}
@@ -823,8 +825,23 @@ def admin_purge_model(model_id: str, _email: str = Depends(require_admin_session
 
 @router.delete("/admin/api/streams/{stream_id}")
 def admin_purge_stream(stream_id: str, _email: str = Depends(require_admin_session)):
+    """
+    Full teardown of a project's local footprint: every bim_documents row
+    for this stream (soft-deleted, actual files removed too) and,
+    best-effort, the project's Nextcloud group folder (with its contents)
+    and dedicated group — see db.purge.purge_project_documents — plus the
+    DB-side purge (models, BCF topics, roles, status) via
+    purge_speckle_models. Does NOT touch the project on Speckle itself —
+    Speckle is the source of truth, so an admin doing this should also
+    delete the project there if that's the intent.
+    """
+    deleted_doc_ids, group_folder_deleted = purge_project_documents(stream_id, actor=f"{_email} (project deletion)")
     deleted = purge_speckle_models(stream_id)
-    return {"deleted": deleted}
+    return {
+        "deleted_models": deleted,
+        "deleted_documents": deleted_doc_ids,
+        "group_folder_deleted": group_folder_deleted,
+    }
 
 
 # ---------------------------------------------------------------------------

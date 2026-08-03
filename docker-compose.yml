@@ -210,6 +210,16 @@ services:
       # token per project instead of only ever trying the default server's.
       VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
+      # Needed for the admin panel's "delete project" action (bcf/admin.py's
+      # admin_purge_stream): soft-deleting bim_documents rows also deletes
+      # the actual files via the WebDAV service account, and tears down the
+      # project's Nextcloud group folder via the admin OCS account — same
+      # vars bim-normalizer already gets above.
+      NEXTCLOUD_URL: ${NEXTCLOUD_URL:-http://nextcloud}
+      NEXTCLOUD_USER: ${NEXTCLOUD_USER:-admin}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy

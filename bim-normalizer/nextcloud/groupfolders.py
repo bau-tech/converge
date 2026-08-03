@@ -11,7 +11,7 @@ require — separate from the WebDAV service account in client.py.
 import logging
 
 from config import settings
-from nextcloud.client import NextcloudConflictError, _ocs_request, ensure_folder
+from nextcloud.client import NextcloudConflictError, NextcloudError, _ocs_request, ensure_folder
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +102,32 @@ def ensure_group_folder(stream_id: str) -> int:
         ensure_folder(f"{mount_point}/{sub}")
 
     return folder_id
+
+
+def delete_group_folder(stream_id: str) -> bool:
+    """Tear down a project's group folder — the reverse of
+    ensure_group_folder(): removes the Groupfolders mount (and everything in
+    it, via the Groupfolders app's own delete, which is atomic and doesn't
+    need per-file WebDAV deletes) and its dedicated group. Used only by the
+    explicit "delete this project" admin action (bcf/admin.py), never by
+    unattended webhook/sync cleanup.
+
+    Best-effort and idempotent: a project whose Documents panel was never
+    opened has no group folder to begin with, which is normal, not an
+    error. Returns True if a group folder was actually found and deleted.
+    """
+    group_id = group_id_for_project(stream_id)
+    mount_point = group_folder_mountpoint(stream_id)
+
+    folders = _list_group_folders()
+    folder_id = next((fid for fid, f in folders.items() if f.get("mount_point") == mount_point), None)
+    found = folder_id is not None
+    if found:
+        _ocs_request("DELETE", f"apps/groupfolders/folders/{folder_id}", _admin_auth(), base="")
+
+    try:
+        _ocs_request("DELETE", f"cloud/groups/{group_id}", _admin_auth())
+    except NextcloudError as exc:
+        logger.info("Group %s delete skipped during project teardown (likely never existed): %s", group_id, exc)
+
+    return found

@@ -157,7 +157,7 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
     import json
 
     from db.connection import get_conn, release_conn
-    from db.purge import purge_speckle_models
+    from db.purge import purge_speckle_models, purge_project_documents
     from pipeline.normalize import ingest_commit
 
     raw_body = await request.body()
@@ -199,11 +199,12 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
 
     if event_name == "stream_delete":
         # The stream itself is gone — drop our watch registration AND every
-        # local model/BCF-topic ingested from it. Speckle is the single
-        # source of truth, so a project deleted there shouldn't keep living
-        # in the dashboard/BCF server. The periodic scan's reconciliation
-        # pass (speckle/webhooks.scan_server) is the fallback for streams
-        # registered before this trigger existed.
+        # local model/BCF-topic ingested from it, plus its documents and
+        # Nextcloud group folder (purge_project_documents). Speckle is the
+        # single source of truth, so a project deleted there shouldn't keep
+        # living in the dashboard/BCF server or Nextcloud. The periodic
+        # scan's reconciliation pass (speckle/webhooks.scan_server) is the
+        # fallback for streams registered before this trigger existed.
         conn = get_conn()
         try:
             with conn.cursor() as cur:
@@ -214,12 +215,21 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
             raise
         finally:
             release_conn(conn)
+        deleted_doc_ids, group_folder_deleted = purge_project_documents(
+            stream_id, actor="system (Speckle stream_delete webhook)"
+        )
         models_deleted = purge_speckle_models(stream_id)
         logger.info(
-            "Webhook %s: stream %s deleted upstream — removed local registration and %d local model(s)",
-            webhook_row_id, stream_id, models_deleted,
+            "Webhook %s: stream %s deleted upstream — removed local registration, %d local model(s), "
+            "%d document(s), group folder deleted=%s",
+            webhook_row_id, stream_id, models_deleted, len(deleted_doc_ids), group_folder_deleted,
         )
-        return {"status": "removed", "models_deleted": models_deleted}
+        return {
+            "status": "removed",
+            "models_deleted": models_deleted,
+            "documents_deleted": len(deleted_doc_ids),
+            "group_folder_deleted": group_folder_deleted,
+        }
 
     if event_name == "commit_delete":
         deleted_commit_id = event_data.get("id") or (event_data.get("commit") or {}).get("id")

@@ -185,7 +185,7 @@ def scan_server(server_url: str, token: str) -> int:
     removed = 0
     purged = 0
 
-    from db.purge import purge_speckle_models
+    from db.purge import purge_speckle_models, purge_project_documents
 
     conn = get_conn()
     try:
@@ -211,15 +211,19 @@ def scan_server(server_url: str, token: str) -> int:
             # (e.g. the webhook was missed while this backend was down).
             # Purge local data too, not just the watch registration, so
             # reconnecting actually catches up instead of leaving stale
-            # models/BCF topics behind indefinitely.
+            # models/BCF topics/documents behind indefinitely.
             for stream_id in stale:
                 try:
+                    deleted_doc_ids, group_folder_deleted = purge_project_documents(
+                        stream_id, actor="system (reconciliation scan)"
+                    )
                     deleted = purge_speckle_models(stream_id)
-                    if deleted:
+                    if deleted or deleted_doc_ids or group_folder_deleted:
                         purged += deleted
                         logger.info(
-                            "Reconciliation: stream %s no longer exists on %s — purged %d local model(s)",
-                            stream_id, server_url, deleted,
+                            "Reconciliation: stream %s no longer exists on %s — purged %d local model(s), "
+                            "%d document(s), group folder deleted=%s",
+                            stream_id, server_url, deleted, len(deleted_doc_ids), group_folder_deleted,
                         )
                 except Exception as exc:
                     logger.error(
@@ -239,13 +243,16 @@ def scan_server(server_url: str, token: str) -> int:
             locally_ingested = {row[0] for row in cur.fetchall()}
         for stream_id in locally_ingested - stream_id_set:
             try:
+                deleted_doc_ids, group_folder_deleted = purge_project_documents(
+                    stream_id, actor="system (reconciliation scan)"
+                )
                 deleted = purge_speckle_models(stream_id)
-                if deleted:
+                if deleted or deleted_doc_ids or group_folder_deleted:
                     purged += deleted
                     logger.info(
                         "Reconciliation: stream %s (ingested from %s, never webhook-registered) no longer "
-                        "exists upstream — purged %d local model(s)",
-                        stream_id, server_url, deleted,
+                        "exists upstream — purged %d local model(s), %d document(s), group folder deleted=%s",
+                        stream_id, server_url, deleted, len(deleted_doc_ids), group_folder_deleted,
                     )
             except Exception as exc:
                 logger.error(
