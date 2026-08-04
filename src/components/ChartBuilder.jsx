@@ -15,6 +15,21 @@ import {
     BarChart2 // Histogram
 } from 'lucide-react'
 import { useState, useMemo, useEffect } from 'react'
+import { createPortal } from 'react-dom'
+import { settingBtnCls, settingBtnActive, settingBtnInactive, settingInputCls } from './chartSettingsUI'
+
+const CATEGORICAL_TYPES = [
+    { type: 'bar', label: 'Bar', icon: BarChart3 },
+    { type: 'pie', label: 'Pie', icon: PieChart },
+    { type: 'sunburst', label: 'Sunburst', icon: Target },
+    { type: 'treemap', label: 'Treemap', icon: LayoutDashboard },
+]
+
+const NUMERIC_TYPES = [
+    { type: 'histogram', label: 'Histogram', icon: BarChart2 },
+    { type: 'box', label: 'Box Plot', icon: Box },
+    { type: 'violin', label: 'Violin Plot', icon: Activity },
+]
 
 export function ChartBuilder({
     isOpen,
@@ -115,11 +130,10 @@ export function ChartBuilder({
     }
 
     const selectedFieldData = availableFields.find(f => f.key === selectedField)
-    const hasDiscoveredFields = groupedFields.discoveredFields.length > 0
 
     if (!isOpen) return null
 
-    return (
+    return createPortal(
         <AnimatePresence>
             <motion.div
                 initial={{ opacity: 0 }}
@@ -132,61 +146,61 @@ export function ChartBuilder({
                     initial={{ opacity: 0, scale: 0.9, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                    className="glass-card shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col"
+                    className="glass-card shadow-2xl w-[290px] overflow-hidden max-h-[85vh] flex flex-col gap-2.5 text-[var(--speckle-foreground)]"
                     onClick={e => e.stopPropagation()}
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--speckle-outline-3)]">
-                        <div className="flex items-center gap-2">
-                            <Sparkles className="w-5 h-5 text-[var(--speckle-outline-1)]" />
-                            <h2 className="text-sm font-semibold">
+                    <div className="flex items-center justify-between px-3 pt-2.5">
+                        <div className="flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5 text-[var(--speckle-outline-1)]" />
+                            <span className="text-[11px] font-semibold text-[var(--speckle-foreground-2)] uppercase tracking-wider">
                                 {initialConfig ? 'Edit Custom Chart' : 'Create Custom Chart'}
-                            </h2>
+                            </span>
                         </div>
                         <button
                             onClick={onClose}
-                            className="p-2 hover:bg-[var(--speckle-outline-3)] rounded-md transition-colors"
+                            className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors"
                         >
-                            <X className="w-5 h-5" />
+                            <X size={13} />
                         </button>
                     </div>
 
                     {/* Body - Scrollable */}
-                    <div className="p-5 space-y-5 overflow-y-auto flex-1">
+                    <div className="px-3 pb-1 space-y-2.5 overflow-y-auto flex-1">
                         {/* Search (if many fields) */}
                         {availableFields.length > 10 && (
                             <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--speckle-foreground-3)]" />
+                                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--speckle-foreground-3)]" />
                                 <input
                                     type="text"
                                     value={searchTerm}
                                     onChange={e => setSearchTerm(e.target.value)}
                                     placeholder="Search properties..."
-                                    className="w-full glass rounded-md pl-10 pr-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-[var(--speckle-outline-1)]/50 transition-colors placeholder:text-[var(--speckle-foreground-3)]"
+                                    className={`${settingInputCls} pl-6`}
                                 />
                             </div>
                         )}
 
                         {/* Field Selection - Grouped */}
-                        <div>
-                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Data Field</label>
-                            <div className="glass rounded-md max-h-48 overflow-y-auto">
+                        <div className="flex flex-col gap-1">
+                            <span className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Data Field</span>
+                            <div className="glass rounded-md max-h-36 overflow-y-auto">
                                 {/* Summary Fields */}
                                 {filteredFields.summaryFields.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
-                                            <Database className="w-3 h-3" />
+                                        <div className="px-2 py-1 text-[10px] font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-1">
+                                            <Database className="w-2.5 h-2.5" />
                                             Summary
                                         </div>
                                         {filteredFields.summaryFields.map(field => (
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors flex items-center justify-between ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
+                                                className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-[var(--speckle-outline-3)] transition-colors flex items-center justify-between ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
-                                                <span>{field.config.title}</span>
-                                                <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} items</span>
+                                                <span className="truncate">{field.config.title}</span>
+                                                <span className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0 ml-1">{field.entryCount}</span>
                                             </button>
                                         ))}
                                     </div>
@@ -195,25 +209,20 @@ export function ChartBuilder({
                                 {/* Dimensions (Numeric Properties) - Distribution Charts */}
                                 {filteredFields.numericFields?.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
-                                            📊 Elements by Dimension (Distribution)
+                                        <div className="px-2 py-1 text-[10px] font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0">
+                                            📊 Elements by Dimension
                                         </div>
                                         {filteredFields.numericFields.map(field => (
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
+                                                className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
                                                 <div className="flex items-center justify-between">
-                                                    <span>{field.config.title}</span>
-                                                    <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} elements</span>
+                                                    <span className="truncate">{field.config.title}</span>
+                                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0 ml-1">{field.entryCount}</span>
                                                 </div>
-                                                {field.stats && (
-                                                    <div className="text-xs text-[var(--speckle-foreground-3)] mt-0.5 flex gap-3">
-                                                        <span>range: {field.stats.min?.toFixed(1)} - {field.stats.max?.toFixed(1)}</span>
-                                                    </div>
-                                                )}
                                             </button>
                                         ))}
                                     </div>
@@ -222,23 +231,20 @@ export function ChartBuilder({
                                 {/* Discovered Properties */}
                                 {filteredFields.discoveredFields.length > 0 && (
                                     <div>
-                                        <div className="px-3 py-2 text-xs font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-2">
-                                            <Search className="w-3 h-3" />
-                                            Discovered Properties {!fullData && '(Loading...)'}
+                                        <div className="px-2 py-1 text-[10px] font-medium text-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10 sticky top-0 flex items-center gap-1">
+                                            <Search className="w-2.5 h-2.5" />
+                                            Discovered {!fullData && '(Loading...)'}
                                         </div>
                                         {filteredFields.discoveredFields.map(field => (
                                             <button
                                                 key={field.key}
                                                 onClick={() => setSelectedField(field.key)}
-                                                className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
+                                                className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-[var(--speckle-outline-3)] transition-colors ${selectedField === field.key ? 'bg-[var(--speckle-outline-1)]/20' : ''
                                                     }`}
                                             >
                                                 <div className="flex items-center justify-between">
-                                                    <span>{field.config.title}</span>
-                                                    <span className="text-xs text-[var(--speckle-foreground-3)]">{field.entryCount} values</span>
-                                                </div>
-                                                <div className="text-xs text-[var(--speckle-foreground-3)] mt-0.5 truncate">
-                                                    {field.path}
+                                                    <span className="truncate">{field.config.title}</span>
+                                                    <span className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0 ml-1">{field.entryCount}</span>
                                                 </div>
                                             </button>
                                         ))}
@@ -247,130 +253,47 @@ export function ChartBuilder({
 
                                 {/* No results */}
                                 {filteredFields.summaryFields.length === 0 && filteredFields.discoveredFields.length === 0 && (filteredFields.numericFields?.length || 0) === 0 && (
-                                    <div className="px-3 py-6 text-center text-[var(--speckle-foreground-3)] text-sm">
+                                    <div className="px-2 py-4 text-center text-[var(--speckle-foreground-3)] text-[11px]">
                                         No fields found
                                     </div>
                                 )}
                             </div>
-                            {(groupedFields.discoveredFields.length > 0 || groupedFields.numericFields?.length > 0) && (
-                                <p className="text-xs text-[var(--speckle-foreground-3)] mt-2">
-                                    💡 Properties are scanned from your model's elements
-                                </p>
-                            )}
                         </div>
 
                         {/* Chart Type Selection */}
-                        <div>
-                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Chart Type</label>
-                            <div className="grid grid-cols-2 gap-3">
-                                {/* Basic Types (Always Available for Categorical) */}
-                                {(!selectedFieldData?.isNumeric) && (
-                                    <>
-                                        <button
-                                            onClick={() => setChartType('bar')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'bar'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <BarChart3 className="w-5 h-5" />
-                                            <span>Bar Chart</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setChartType('pie')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'pie'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <PieChart className="w-5 h-5" />
-                                            <span>Pie Chart</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setChartType('sunburst')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'sunburst'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <Target className="w-5 h-5" />
-                                            <span>Sunburst</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setChartType('treemap')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'treemap'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <LayoutDashboard className="w-5 h-5" />
-                                            <span>Treemap</span>
-                                        </button>
-                                    </>
-                                )}
-
-                                {/* Numeric Types */}
-                                {(selectedFieldData?.isNumeric) && (
-                                    <>
-                                        <button
-                                            onClick={() => setChartType('histogram')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'histogram'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <BarChart2 className="w-5 h-5" />
-                                            <span>Histogram</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setChartType('box')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'box'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                        >
-                                            <Box className="w-5 h-5" />
-                                            <span>Box Plot</span>
-                                        </button>
-                                        <button
-                                            onClick={() => setChartType('violin')}
-                                            className={`flex items-center justify-center gap-2 px-4 py-3 rounded-md border transition-all ${chartType === 'violin'
-                                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)]'
-                                                : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                                }`}
-                                            title="Renders as a box plot"
-                                        >
-                                            <Activity className="w-5 h-5" />
-                                            <span>Violin Plot</span>
-                                        </button>
-                                    </>
-                                )}
+                        <div className="flex flex-col gap-1">
+                            <span className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Chart Type</span>
+                            <div className="flex gap-1 flex-wrap">
+                                {(selectedFieldData?.isNumeric ? NUMERIC_TYPES : CATEGORICAL_TYPES).map(({ type, label, icon: Icon }) => (
+                                    <button
+                                        key={type}
+                                        onClick={() => setChartType(type)}
+                                        className={`${settingBtnCls} flex items-center gap-1 ${chartType === type ? settingBtnActive : settingBtnInactive}`}
+                                    >
+                                        <Icon className="w-3 h-3" />
+                                        {label}
+                                    </button>
+                                ))}
                             </div>
                         </div>
 
                         {/* Orientation (only for bar charts) */}
                         {chartType === 'bar' && (
-                            <div>
-                                <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block">Orientation</label>
-                                <div className="grid grid-cols-2 gap-3">
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Orientation</span>
+                                <div className="flex gap-1">
                                     <button
                                         onClick={() => setOrientation('h')}
-                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm transition-all ${orientation === 'h'
-                                            ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10'
-                                            : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                            }`}
+                                        className={`flex-1 ${settingBtnCls} flex items-center justify-center gap-1 ${orientation === 'h' ? settingBtnActive : settingBtnInactive}`}
                                     >
-                                        <BarChart3 className="w-4 h-4" />
+                                        <BarChart3 className="w-3 h-3" />
                                         Horizontal
                                     </button>
                                     <button
                                         onClick={() => setOrientation('v')}
-                                        className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-md border text-sm transition-all ${orientation === 'v'
-                                            ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)]/10'
-                                            : 'border-[var(--speckle-outline-3)] hover:border-[var(--speckle-outline-2)]'
-                                            }`}
+                                        className={`flex-1 ${settingBtnCls} flex items-center justify-center gap-1 ${orientation === 'v' ? settingBtnActive : settingBtnInactive}`}
                                     >
-                                        <BarChart3 className="w-4 h-4 rotate-90" />
+                                        <BarChart3 className="w-3 h-3 rotate-90" />
                                         Vertical
                                     </button>
                                 </div>
@@ -378,34 +301,34 @@ export function ChartBuilder({
                         )}
 
                         {/* Custom Title */}
-                        <div>
-                            <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider mb-2 block flex items-center gap-2">
-                                <Type className="w-3 h-3" />
+                        <div className="flex flex-col gap-1">
+                            <span className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider flex items-center gap-1">
+                                <Type className="w-2.5 h-2.5" />
                                 Custom Title (optional)
-                            </label>
+                            </span>
                             <input
                                 type="text"
                                 value={customTitle}
                                 onChange={e => setCustomTitle(e.target.value)}
                                 placeholder={selectedFieldData?.config.title || 'Enter chart title...'}
-                                className="w-full glass rounded-md px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-[var(--speckle-outline-1)]/50 transition-colors placeholder:text-[var(--speckle-foreground-3)]"
+                                className={settingInputCls}
                             />
                         </div>
 
                         {/* Preview indicator */}
                         {selectedField && (
-                            <div className="glass rounded-md p-4">
-                                <p className="text-xs text-[var(--speckle-foreground-3)] mb-1">Preview</p>
-                                <div className="flex items-center gap-2">
+                            <div className="glass rounded-md p-2">
+                                <p className="text-[10px] text-[var(--speckle-foreground-3)] mb-1">Preview</p>
+                                <div className="flex items-center gap-1.5">
                                     {chartType === 'pie'
-                                        ? <PieChart className="w-4 h-4 text-[var(--speckle-outline-1)]" />
-                                        : <BarChart3 className={`w-4 h-4 text-[var(--speckle-outline-1)] ${orientation === 'v' ? 'rotate-90' : ''}`} />
+                                        ? <PieChart className="w-3 h-3 text-[var(--speckle-outline-1)]" />
+                                        : <BarChart3 className={`w-3 h-3 text-[var(--speckle-outline-1)] ${orientation === 'v' ? 'rotate-90' : ''}`} />
                                     }
-                                    <span className="text-sm font-medium">
+                                    <span className="text-[11px] font-medium truncate">
                                         {customTitle || selectedFieldData?.config.title}
                                     </span>
                                     {selectedFieldData?.isDiscovered && (
-                                        <span className="text-xs px-1.5 py-0.5 bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)] rounded">
+                                        <span className="text-[10px] px-1 py-0.5 bg-[var(--speckle-outline-1)]/20 text-[var(--speckle-outline-1)] rounded shrink-0">
                                             Discovered
                                         </span>
                                     )}
@@ -415,27 +338,28 @@ export function ChartBuilder({
                     </div>
 
                     {/* Footer */}
-                    <div className="flex gap-3 px-5 py-4 border-t border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation)]/30">
+                    <div className="flex gap-2 px-3 pb-2.5 pt-1">
                         <button
                             onClick={onClose}
-                            className="flex-1 px-4 py-2.5 rounded-md border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors text-sm"
+                            className={`flex-1 ${settingBtnCls} ${settingBtnInactive} justify-center`}
                         >
                             Cancel
                         </button>
                         <button
                             onClick={handleCreate}
                             disabled={!selectedField}
-                            className={`flex-1 px-4 py-2.5 rounded-md flex items-center justify-center gap-2 text-sm font-medium transition-all ${selectedField
-                                ? 'bg-[var(--speckle-outline-1)] text-white hover:opacity-90'
-                                : 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] cursor-not-allowed'
+                            className={`flex-1 px-1.5 py-1 rounded-md text-[11px] font-medium transition-colors border flex items-center justify-center gap-1 ${selectedField
+                                ? 'border-[var(--speckle-outline-1)] bg-[var(--speckle-outline-1)] text-white hover:opacity-90 cursor-pointer'
+                                : 'border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation)] text-[var(--speckle-foreground-3)] cursor-not-allowed'
                                 }`}
                         >
-                            <Check className="w-4 h-4" />
+                            <Check className="w-3 h-3" />
                             {initialConfig ? 'Update Chart' : 'Create Chart'}
                         </button>
                     </div>
                 </motion.div>
             </motion.div>
-        </AnimatePresence>
+        </AnimatePresence>,
+        document.body
     )
 }
