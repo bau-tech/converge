@@ -1,9 +1,21 @@
+# Every service below sets mem_limit — this host runs alongside ~30 other
+# LXCs sharing the same physical RAM with little slack (see process_pool.py's
+# worker-count comment), and without a cgroup cap a single runaway container
+# competes for memory against all of them rather than failing on its own.
+# Sized from observed idle usage (docker stats) plus headroom for real spikes
+# (ifcopenshell/specklepy can balloon several GB processing a large model —
+# see process_pool.py), not from a formal load test. bim-normalizer and
+# speckle-mcp get the most headroom since both hold whole models in memory;
+# hitting the cap there OOM-kills the offending process (a pool worker, or,
+# worst case, the container itself, which restart: unless-stopped recovers
+# from) instead of pressuring the whole host.
 services:
 
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: speckle-postgres
+    mem_limit: 512m
     environment:
       POSTGRES_USER: ${PG_USER:-speckle}
       POSTGRES_PASSWORD: ${PG_PASS:-speckle}
@@ -34,6 +46,7 @@ services:
   nextcloud:
     image: nextcloud:apache
     container_name: nextcloud
+    mem_limit: 512m
     ports:
       - "${NEXTCLOUD_PORT:-8005}:80"
     environment:
@@ -85,6 +98,7 @@ services:
     image: bim-normalizer:latest
     pull_policy: build
     container_name: bim-normalizer
+    mem_limit: 3g
     ports:
       - "8002:8002"
     environment:
@@ -140,6 +154,7 @@ services:
     image: bim-normalizer:latest
     pull_policy: build
     container_name: speckle-mcp
+    mem_limit: 3g
     command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
       - "8003:8003"
@@ -179,6 +194,7 @@ services:
     image: bim-normalizer:latest
     pull_policy: build
     container_name: bcf-server
+    mem_limit: 512m
     command: ["python", "bcf_server.py"]
     ports:
       - "8004:8004"
@@ -247,6 +263,7 @@ services:
     build:
       context: .
     container_name: converge
+    mem_limit: 256m
     ports:
       - "8080:80"
     environment:

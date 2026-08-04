@@ -1,9 +1,13 @@
+# See docker-compose.yml for why every service below sets mem_limit —
+# same rationale applies here, just running published images instead of
+# building locally.
 services:
 
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: speckle-postgres
+    mem_limit: 512m
     environment:
       POSTGRES_USER: ${PG_USER:-speckle}
       POSTGRES_PASSWORD: ${PG_PASS:-speckle}
@@ -28,6 +32,7 @@ services:
   nextcloud:
     image: nextcloud:apache
     container_name: nextcloud
+    mem_limit: 512m
     ports:
       - "${NEXTCLOUD_PORT:-8005}:80"
     environment:
@@ -69,6 +74,7 @@ services:
     image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: bim-normalizer
+    mem_limit: 3g
     ports:
       - "8002:8002"
     environment:
@@ -117,6 +123,7 @@ services:
     image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: speckle-mcp
+    mem_limit: 3g
     command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
       - "8003:8003"
@@ -146,6 +153,7 @@ services:
     image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: bcf-server
+    mem_limit: 512m
     command: ["python", "bcf_server.py"]
     ports:
       - "8004:8004"
@@ -189,6 +197,7 @@ services:
     image: docker.io/euch/converge-dashboard:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: converge
+    mem_limit: 256m
     ports:
       - "8080:80"
     environment:
