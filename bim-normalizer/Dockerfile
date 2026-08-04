@@ -24,7 +24,8 @@ RUN curl -sL "https://github.com/LibreDWG/libredwg/releases/download/${LIBREDWG_
     && cd /tmp/libredwg-${LIBREDWG_VERSION} \
     && ./configure --disable-bindings --disable-docs --disable-write --disable-shared \
     && make -j"$(nproc)" \
-    && cp programs/dwg2dxf /usr/local/bin/dwg2dxf
+    && cp programs/dwg2dxf /usr/local/bin/dwg2dxf \
+    && strip /usr/local/bin/dwg2dxf
 
 FROM python:3.11-slim
 
