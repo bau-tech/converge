@@ -110,7 +110,14 @@ docker compose up -d        # starts postgres, nextcloud, bim-normalizer (:8002)
                              # bcf-server (:8004), speckle-mcp (:8003), dashboard (:8080)
 ```
 
-`docker compose up -d` builds both application images locally on first run. To skip the build and pull the already-published ones instead, swap each service's `build:` block for an `image:` pointing at GHCR or Docker Hub before running — see [Deployment (Docker)](#deployment-docker) below for the exact image names and the `pull_policy` change that goes with it.
+`docker compose up -d` builds both application images locally on first run. To skip the build and run the already-published release images from Docker Hub instead:
+
+```bash
+cp .env.example .env        # same env vars as above
+docker compose -f docker-compose.release.yml up -d
+```
+
+See [Deployment (Docker)](#deployment-docker) below for pinning a specific version and using GHCR instead.
 
 ### 3. MCP server (local, Claude Code)
 
@@ -222,9 +229,28 @@ docker compose up -d --build
 # bim-normalizer at :8002, bcf-server at :8004 (internal)
 ```
 
-Both images are also published to GHCR on every push to `master` ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)): `ghcr.io/bau-tech/converge-dashboard` and `ghcr.io/bau-tech/converge-normalizer`. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild. Swap `build:` for `image: ghcr.io/bau-tech/...` per service in `docker-compose.yml` to use them instead of building locally.
+### Running from the released images (no build required)
 
-The same workflow also mirrors both images to Docker Hub — [`docker.io/euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) and [`docker.io/euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer) — as long as the `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` repo variable/secret (Settings → Secrets and variables → Actions) are set; otherwise that step is skipped and only GHCR is published.
+Both images are published on every push to `master` and on every `v*.*.*` tag ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)) to two registries:
+
+- Docker Hub: [`docker.io/euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) and [`docker.io/euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer)
+- GHCR: `ghcr.io/bau-tech/converge-dashboard` and `ghcr.io/bau-tech/converge-normalizer`
+
+Each push produces four tags per image: `latest` (default branch only), a semver `X.Y.Z` + `X.Y` pair (tag pushes only, e.g. `0.1.0` / `0.1`), and the short commit SHA. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild.
+
+[`docker-compose.release.yml`](docker-compose.release.yml) is a ready-to-use copy of `docker-compose.yml` with `bim-normalizer`/`speckle-mcp`/`bcf-server`/`converge` pulling from Docker Hub instead of building:
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.release.yml up -d
+
+# pin a specific release instead of latest
+CONVERGE_VERSION=0.1.0 docker compose -f docker-compose.release.yml up -d
+```
+
+To pull from GHCR instead, edit `docker-compose.release.yml` and swap the `docker.io/euch/converge-*` image names for `ghcr.io/bau-tech/converge-*` (same tags apply). Both GHCR packages are public, so no `docker login` is needed either way.
+
+Postgres and Nextcloud still come from their upstream public images either way (`postgres:16-alpine`, `nextcloud:apache`) — only the two converge-authored services change.
 
 ---
 

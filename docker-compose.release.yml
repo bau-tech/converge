@@ -1,0 +1,227 @@
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: speckle-postgres
+    environment:
+      POSTGRES_USER: ${PG_USER:-speckle}
+      POSTGRES_PASSWORD: ${PG_PASS:-speckle}
+      POSTGRES_DB: ${PG_NAME:-speckle}
+      NEXTCLOUD_DB_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      NEXTCLOUD_DB_PASS: ${NEXTCLOUD_DB_PASS:-}
+    ports:
+      - "${PG_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-speckle}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
+  # ── Nextcloud (document storage, versioning, per-user permissions) ──────────
+  nextcloud:
+    image: nextcloud:apache
+    container_name: nextcloud
+    ports:
+      - "${NEXTCLOUD_PORT:-8005}:80"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASS:?NEXTCLOUD_DB_PASS is required}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}
+      NEXTCLOUD_TRUSTED_DOMAINS: nextcloud
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - nextcloud_config:/var/www/html/config
+      - nextcloud_custom_apps:/var/www/html/custom_apps
+      - ./nextcloud-hooks/post-installation:/docker-entrypoint-hooks.d/post-installation:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    networks:
+      - speckle-net
+
+  # ── BIM Normalizer ────────────────────────────────────────────────────────────
+  # Pulls the released image instead of building from ./bim-normalizer — see
+  # docker-compose.yml for the local-build version of this same service.
+  # CONVERGE_VERSION selects the tag: latest (default), a semver release
+  # (e.g. 0.1.0 / 0.1), or a short commit SHA — see the published tags at
+  # https://hub.docker.com/r/euch/converge-normalizer/tags. Swap the image
+  # repo below for ghcr.io/bau-tech/converge-normalizer to pull from GHCR
+  # instead of Docker Hub.
+  bim-normalizer:
+    image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
+    pull_policy: always
+    container_name: bim-normalizer
+    ports:
+      - "8002:8002"
+    environment:
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      SPECKLE_SKIP_ANALYTICS: "true"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      AUTO_SYNC_SCAN_INTERVAL_S: ${AUTO_SYNC_SCAN_INTERVAL_S:-900}
+      OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
+      MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${PG_USER:-speckle}
+      PG_PASS: ${PG_PASS:-speckle}
+      PG_NAME: ${PG_NAME:-speckle}
+      PORT: 8002
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      NEXTCLOUD_URL: ${NEXTCLOUD_URL:-http://nextcloud}
+      NEXTCLOUD_USER: ${NEXTCLOUD_USER:-admin}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
+      DOCUMENT_SYNC_SCAN_INTERVAL_S: ${DOCUMENT_SYNC_SCAN_INTERVAL_S:-3600}
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
+      # DEV/TESTING ONLY — see the warning next to this var in .env.example.
+      DASHBOARD_AUTH_BYPASS: ${DASHBOARD_AUTH_BYPASS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - speckle-net
+
+  # ── Speckle IFC MCP Server (streamable HTTP, remote access) ──────────────────
+  speckle-mcp:
+    image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
+    pull_policy: always
+    container_name: speckle-mcp
+    command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
+    ports:
+      - "8003:8003"
+    environment:
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      NORMALIZER_URL: http://bim-normalizer:8002
+      MCP_API_KEY: ${MCP_API_KEY:-}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      BCF_SERVER_URL: http://bcf-server:8004
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      BCF_ADMIN_EMAIL: ${BCF_ADMIN_EMAIL:-}
+      BCF_ADMIN_PASSWORD: ${BCF_ADMIN_PASSWORD:-}
+      MCP_DASHBOARD_EMAIL: ${MCP_DASHBOARD_EMAIL:-}
+      MCP_DASHBOARD_PASSWORD: ${MCP_DASHBOARD_PASSWORD:-}
+    depends_on:
+      bim-normalizer:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    networks:
+      - speckle-net
+
+  # ── BCF-API server ────────────────────────────────────────────────────────────
+  bcf-server:
+    image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
+    pull_policy: always
+    container_name: bcf-server
+    command: ["python", "bcf_server.py"]
+    ports:
+      - "8004:8004"
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: ${PG_USER:-speckle}
+      PG_PASS: ${PG_PASS:-speckle}
+      PG_NAME: ${PG_NAME:-speckle}
+      PORT: 8004
+      BCF_API_KEY: ${BCF_API_KEY:-}
+      BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      BCF_ADMIN_EMAIL: ${BCF_ADMIN_EMAIL:-}
+      BCF_ADMIN_PASSWORD: ${BCF_ADMIN_PASSWORD:-}
+      SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
+      SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      NEXTCLOUD_URL: ${NEXTCLOUD_URL:-http://nextcloud}
+      NEXTCLOUD_USER: ${NEXTCLOUD_USER:-admin}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bim-normalizer:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - speckle-net
+
+  # ── Frontend Dashboard (Nginx + built Vite SPA) ──────────────────────────────
+  converge:
+    image: docker.io/euch/converge-dashboard:${CONVERGE_VERSION:-latest}
+    pull_policy: always
+    container_name: converge
+    ports:
+      - "8080:80"
+    environment:
+      NORMALIZER_URL: http://bim-normalizer:8002/
+      BCF_SERVER_URL: http://bcf-server:8004/
+      VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}
+      VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      VITE_NORMALIZER_URL: /normalizer
+      VITE_BCF_URL: /bcf
+      VITE_BCF_API_KEY: ${BCF_API_KEY:-}
+      VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
+      VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
+      VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
+      VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
+      VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
+      VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
+    depends_on:
+      bim-normalizer:
+        condition: service_healthy
+      bcf-server:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
+volumes:
+  pgdata:
+  nextcloud_html:
+  nextcloud_data:
+  nextcloud_config:
+  nextcloud_custom_apps:
+
+networks:
+  speckle-net:
+    driver: bridge
