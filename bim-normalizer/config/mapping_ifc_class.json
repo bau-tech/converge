@@ -49,6 +49,7 @@
   "IfcGeographicElement":         "Topography",
   "IfcSite":                      "Site",
   "IfcBuildingElementProxy":      "Generic Models",
+  "IfcOpeningElement":            "Openings",
   "IfcBuildingStorey":            "Levels",
   "IfcGrid":                      "Grids"
 }

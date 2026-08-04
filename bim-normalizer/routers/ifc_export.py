@@ -226,6 +226,73 @@ async def resolve_model_ifc_bytes(
     return ifc_bytes, ifc_source
 
 
+async def extract_ifc_relationships(
+    model_id: str, token: str | None, server_url: str | None, coord_unit: str
+) -> int:
+    """
+    Ingest-time (best-effort, fire-and-forget — see routers/ingest.py's
+    _run_embeddings for the same treatment) extraction of real IFC
+    relationships (aggregation, spatial containment, physical connections,
+    openings — see ifc/relationship_types.py) into bim_relationships,
+    alongside the existing Revit-only parent/room/space rows from
+    db/insert.py's build_relationships. Reuses the same IFC-resolution
+    machinery as clash/IDS check (resolve_model_ifc_bytes above) and the
+    same Revit UniqueId<->GlobalId correlation as the clash/IDS highlighting
+    fix (build_revit_guid_map above), for the same underlying reason: a real
+    original IFC's GlobalIds don't match application_id for Revit-sourced
+    models.
+
+    Returns the number of relationship rows written. Never raises — a model
+    with no usable IFC representation, or one ifcopenshell can't parse, just
+    yields 0; this must never disrupt ingest.
+    """
+    from db.connection import get_conn, release_conn
+    from db.insert import insert_ifc_relationships
+    from ifc.relationship_types import extract_ifc_relationship_links
+
+    try:
+        ifc_bytes, ifc_source = await resolve_model_ifc_bytes(model_id, token, server_url, coord_unit)
+        revit_guid_map = await build_revit_guid_map(model_id) if ifc_source == "original_ifc" else {}
+
+        def _load_app_id_map() -> dict[str, str]:
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT application_id, element_id FROM bim_elements "
+                        "WHERE model_id = %s AND application_id IS NOT NULL AND application_id <> ''",
+                        (model_id,),
+                    )
+                    return {row[0]: str(row[1]) for row in cur.fetchall()}
+            finally:
+                release_conn(conn)
+
+        app_id_to_element = await asyncio.to_thread(_load_app_id_map)
+
+        links = await run_cpu_bound(
+            extract_ifc_relationship_links, ifc_bytes, ifc_source, app_id_to_element, revit_guid_map
+        )
+
+        def _write() -> int:
+            conn = get_conn()
+            try:
+                count = insert_ifc_relationships(conn, model_id, links)
+                conn.commit()
+                return count
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                release_conn(conn)
+
+        count = await asyncio.to_thread(_write)
+        logger.info("extract_ifc_relationships: model %s — %d relationship(s) from %s", model_id, count, ifc_source)
+        return count
+    except Exception as exc:
+        logger.warning("extract_ifc_relationships failed for model %s: %s", model_id, exc, exc_info=True)
+        return 0
+
+
 @router.get("/models/{model_id}/quantities")
 def get_model_quantities(model_id: str, group_by: str = "ifc_class"):
     """

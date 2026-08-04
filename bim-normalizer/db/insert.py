@@ -922,3 +922,72 @@ def build_relationships(conn, model_id: str) -> int:
                 list(links),
             )
         return len(links)
+
+
+# relation_type values written here (aggregates/contained_in/connects/voids/fills)
+# are distinct from build_relationships' own (parent/room/space) — see
+# ifc/relationship_types.py's _IFC_CLASS_TO_RELATION_TYPE — so the two DELETEs
+# below only ever remove rows the respective function itself wrote, never each
+# other's.
+_IFC_RELATION_TYPES = ("aggregates", "contained_in", "connects", "voids", "fills")
+
+
+def insert_ifc_relationships(conn, model_id: str, links: list[tuple[str, str, str]]) -> int:
+    """
+    Write real IFC relationships (already extracted + GlobalId-resolved by
+    routers/ifc_export.py's extract_ifc_relationships) into bim_relationships.
+
+    Idempotent like build_relationships: replaces this model's rows of these
+    specific relation_types on every call, so a re-run (re-ingest, or a
+    one-off backfill) never accumulates stale or duplicate links.
+
+    Also backfills bim_elements.storey for any element whose only reliable
+    storey signal is a real "contained_in" (IfcRelContainedInSpatialStructure)
+    relationship — confirmed necessary for IFC-sourced models specifically:
+    ifc/spatial.py's get_storey() only ever reads flat per-element attributes
+    (obj.level, parameters["Level"], Tekla PHASE, ...), and Speckle's IFC
+    importer doesn't expose spatial containment on those attributes or via
+    Base-object-tree nesting at all (confirmed against real ingested data —
+    IfcBuildingStorey objects in the Speckle tree have no children of their
+    own) — the *only* place that containment survives is the real IFC file's
+    own relationship entities, which is exactly what `links` resolves. Never
+    overwrites a storey value already set by classify.py's own per-source
+    logic — this only fills the gap for elements it left NULL.
+
+    Returns the number of relationship rows written.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM bim_relationships WHERE relation_type = ANY(%s) AND element_id IN "
+            "(SELECT element_id FROM bim_elements WHERE model_id = %s)",
+            (list(_IFC_RELATION_TYPES), model_id),
+        )
+        if links:
+            execute_values(
+                cur,
+                "INSERT INTO bim_relationships (element_id, related_id, relation_type) VALUES %s "
+                "ON CONFLICT (element_id, related_id, relation_type) DO NOTHING",
+                links,
+            )
+
+        storey_ids = {storey_id for storey_id, _contained_id, rtype in links if rtype == "contained_in"}
+        if storey_ids:
+            cur.execute(
+                "SELECT element_id::text, name FROM bim_elements WHERE element_id = ANY(%s::uuid[])",
+                (list(storey_ids),),
+            )
+            storey_names = {r[0]: r[1] for r in cur.fetchall() if r[1]}
+            storey_updates = [
+                (contained_id, storey_names[storey_id])
+                for storey_id, contained_id, rtype in links
+                if rtype == "contained_in" and storey_id in storey_names
+            ]
+            if storey_updates:
+                execute_values(
+                    cur,
+                    "UPDATE bim_elements AS e SET storey = v.storey_name "
+                    "FROM (VALUES %s) AS v(element_id, storey_name) "
+                    "WHERE e.element_id = v.element_id::uuid AND e.storey IS NULL",
+                    storey_updates,
+                )
+        return len(links)

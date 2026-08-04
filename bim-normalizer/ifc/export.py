@@ -244,10 +244,38 @@ def export_model(
     storey_elevations = _estimate_storey_elevations(elements, scale)
     unique_storeys = sorted({(e.get("storey") or "Level 0") for e in elements})
 
+    # Every product entity below gets Tag=application_id (see tag= at the
+    # _create_product call), letting a synthetic export's GlobalIds (always
+    # freshly random — see _stable_global_id) be resolved back to the
+    # originating bim_elements row. IfcBuildingStorey has no Tag attribute
+    # at all in the IFC schema (Tag is IfcElement-only; storeys are
+    # IfcSpatialStructureElement, a different branch — confirmed against the
+    # IFC4X3 EXPRESS schema), so that trick doesn't apply here. If a Level
+    # element matching this storey's name was itself ingested (category
+    # "Levels", ifc_class "IfcBuildingStorey" — Levels are ingested as
+    # ordinary elements alongside everything else), stash its application_id
+    # in a small custom pset on the storey entity instead — the one thing
+    # every IfcSpatialStructureElement can carry — so
+    # ifc/relationship_types.py's resolve_relationship_element_ids can
+    # resolve real IfcRelContainedInSpatialStructure/IfcRelAggregates
+    # relationships back to a real element_id even for synthetic exports,
+    # not just an original IFC's own GlobalIds.
+    storey_app_ids: dict[str, str] = {
+        e["name"]: e["application_id"]
+        for e in elements
+        if e.get("ifc_class") == "IfcBuildingStorey" and e.get("name") and e.get("application_id")
+    }
+
     storey_map: dict[str, object] = {}
     for name in unique_storeys:
         elev = storey_elevations.get(name, 0.0)
-        storey_map[name] = _make_storey(f, name, elev, owner_history)
+        storey_entity = _make_storey(f, name, elev, owner_history)
+        app_id = storey_app_ids.get(name)
+        if app_id:
+            _attach_psets(f, owner_history, storey_entity, [
+                {"key": "application_id", "value": app_id, "pset": "Converge", "datatype": "string"},
+            ])
+        storey_map[name] = storey_entity
 
     f.create_entity(
         "IfcRelAggregates",

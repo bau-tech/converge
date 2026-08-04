@@ -21,6 +21,8 @@ A single MCP server combining:
     speckle_get_object          raw Speckle object properties (streaming, first object only)
     speckle_element_detail      full element: geometry quantities + all parameter sets
     speckle_element_relationships  parent/room/space links resolved at ingest time (no IFC load needed)
+    speckle_element_connectivity  multi-hop connectivity graph (relationships + real IFC relations where
+                                 available + geometric touching), DB-backed — no IFC load needed
     speckle_diff_models         added/removed/changed elements + per-category deltas
     speckle_qa_check            0-1 quality score: names, storeys, geometry, materials, duplicates
     speckle_compare_categories  side-by-side category table for up to 6 models
@@ -92,6 +94,12 @@ try:
 except ImportError:
     print("ifcopenshell not installed. Run: pip install ifcopenshell", file=sys.stderr)
     sys.exit(1)
+
+# Relationship-type table and adjacency-building pass shared with
+# bim-normalizer's own ingest-time relationship extraction (db/insert.py's
+# build_ifc_relationships) — see ifc/relationship_types.py.
+from ifc.relationship_types import IFC_GRAPH_REL_TYPES as _IFC_GRAPH_REL_TYPES
+from ifc.relationship_types import build_ifc_graph_edges as _build_ifc_graph_edges
 
 try:
     import ifc5d  # noqa: F401
@@ -567,42 +575,6 @@ def ifc_materials() -> str:
     for mat in mats:
         lines.append(f"  {mat.Name or '(unnamed)'}")
     return "\n".join(lines)
-
-
-# Relationship types walked by ifc_dependency_graph, each as
-# (ifc_class, relating_attr, related_attr, relating_role_label, related_role_label).
-# related_attr may hold a single entity or a list — both are handled uniformly.
-# Every relationship becomes two labeled directed edges (relating->related and
-# related->relating) so a plain BFS can walk the whole graph without needing
-# separate "upstream"/"downstream" logic per relationship type — the label on
-# each edge already says which role the neighbor plays.
-_IFC_GRAPH_REL_TYPES = [
-    ("IfcRelAggregates", "RelatingObject", "RelatedObjects", "has part", "is part of"),
-    ("IfcRelNests", "RelatingObject", "RelatedObjects", "nests", "is nested in"),
-    ("IfcRelContainedInSpatialStructure", "RelatingStructure", "RelatedElements", "contains", "is contained in"),
-    ("IfcRelConnectsElements", "RelatingElement", "RelatedElement", "connects to", "connects to"),
-    ("IfcRelVoidsElement", "RelatingBuildingElement", "RelatedOpeningElement", "has opening", "voids"),
-    ("IfcRelFillsElement", "RelatingOpeningElement", "RelatedBuildingElement", "is filled by", "fills"),
-]
-
-
-def _build_ifc_graph_edges(m: "ifcopenshell.file") -> dict:
-    """One pass over the loaded model building an undirected-for-traversal
-    adjacency map keyed by entity STEP id: {step_id: [(other_step_id, label), ...]}."""
-    edges: dict = {}
-    for ifc_class, relating_attr, related_attr, relating_label, related_label in _IFC_GRAPH_REL_TYPES:
-        for rel in m.by_type(ifc_class):
-            relating = getattr(rel, relating_attr, None)
-            related = getattr(rel, related_attr, None)
-            if relating is None or related is None or not hasattr(relating, "id"):
-                continue
-            related_list = related if isinstance(related, (list, tuple)) else [related]
-            for r in related_list:
-                if not hasattr(r, "id"):
-                    continue
-                edges.setdefault(relating.id(), []).append((r.id(), relating_label))
-                edges.setdefault(r.id(), []).append((relating.id(), related_label))
-    return edges
 
 
 @mcp.tool()
@@ -1367,6 +1339,59 @@ def speckle_element_relationships(element_id: str) -> str:
             f"  [{r.get('relation_type', '?')}] {arrow} {r.get('name') or '(unnamed)'} "
             f"[{r.get('ifc_class', '?')}/{r.get('category', '?')}]  speckle_id={r.get('speckle_id', '')}"
         )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_element_connectivity(element_id: str, hops: int = 2) -> str:
+    """
+    Trace an element's connections through bim-normalizer's own DB-backed
+    connectivity graph — no model load required (unlike ifc_dependency_graph,
+    which needs speckle_load()/ifc_load() first and only resolves IFC-sourced
+    models). Combines speckle_element_relationships' parent/room/space links,
+    real IFC relationships where the model has a usable IFC representation
+    (aggregation, spatial containment, physical connections, openings —
+    extracted at ingest time), and geometric bounding-box "touching" — the
+    one signal available for every model regardless of source. Walks
+    multiple hops outward, grouped by hop distance, unlike
+    speckle_element_relationships (one hop only).
+
+    Use the element_id UUID from speckle_query_elements() results.
+    hops: relationship hops to follow outward (default 2, clamped 1-3).
+    """
+    resp = _requests_with_retry(
+        "GET", f"{_NORMALIZER_URL}/elements/{element_id}/connectivity", params={"hops": hops}, timeout=30,
+    )
+    if resp.status_code == 404:
+        return f"Element {element_id} not found. Use speckle_query_elements() to find element IDs."
+    resp.raise_for_status()
+    graph = resp.json()
+    nodes_by_id = {n["element_id"]: n for n in graph.get("nodes", [])}
+    if len(nodes_by_id) <= 1:
+        return f"No connections found for element {element_id} within {hops} hop(s)."
+
+    by_hop: dict[int, list] = {}
+    for n in graph["nodes"]:
+        if n["hop"] > 0:
+            by_hop.setdefault(n["hop"], []).append(n)
+
+    lines = [f"Connectivity graph for element {element_id} ({len(nodes_by_id)} nodes, {len(graph['edges'])} edges):"]
+    for hop in sorted(by_hop):
+        lines.append(f"\n  Hop {hop} ({len(by_hop[hop])}):")
+        for n in by_hop[hop][:40]:
+            edge = next(
+                (e for e in graph["edges"] if element_id in (e["source"], e["target"])
+                 and n["element_id"] in (e["source"], e["target"])),
+                None,
+            )
+            rel = f" [{edge['type']}]" if edge else ""
+            lines.append(
+                f"    {n.get('name') or '(unnamed)'} [{n.get('ifc_class', '?')}/{n.get('category', '?')}]"
+                f"{rel}  speckle_id={n.get('speckle_id', '')}"
+            )
+        if len(by_hop[hop]) > 40:
+            lines.append(f"    ... and {len(by_hop[hop]) - 40} more at this hop")
+
     return "\n".join(lines)
 
 

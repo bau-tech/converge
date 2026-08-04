@@ -6,6 +6,7 @@ import 'react-grid-layout/css/styles.css'
 import 'react-resizable/css/styles.css'
 import { settingBtnCls, settingBtnInactive, settingBtnActive, settingInputCls, ColorRow } from './chartSettingsUI'
 import { COLOR_SCHEMES } from './AdaptiveCharts'
+import { useHeaderHeight } from '../utils/useHeaderHeight'
 
 const MOBILE_BREAKPOINT = 768
 // iPhone 7 reference viewport (375x667 CSS px) — mobile panel heights are
@@ -139,24 +140,6 @@ function useIsMobile() {
         return () => window.removeEventListener('resize', fn)
     }, [])
     return isMobile
-}
-
-// Measures the live <header>'s height so the mobile-pinned viewer (below) can
-// stick directly beneath it instead of overlapping it — unlike the desktop
-// pin feature, mobile's plain flex stack has no react-grid-layout fighting
-// `position: sticky`, so no portal is needed here, just the right `top` offset.
-function useHeaderHeight() {
-    const [height, setHeight] = useState(0)
-    useEffect(() => {
-        const headerEl = document.querySelector('header')
-        if (!headerEl) return
-        const update = () => setHeight(headerEl.getBoundingClientRect().height)
-        update()
-        const ro = new ResizeObserver(update)
-        ro.observe(headerEl)
-        return () => ro.disconnect()
-    }, [])
-    return height
 }
 
 function loadSavedLayout() {

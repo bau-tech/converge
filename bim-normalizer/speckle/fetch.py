@@ -414,8 +414,15 @@ def flatten_elements(
             # Tekla BIM elements are placed directly inside the type collections
             # by SendCollectionManager, so recursing here only creates duplicates
             # and Generic-Models noise.
+            #
+            # A leaf's own nested elements (e.g. a Revit Opening hosted inside a
+            # Floor's `.elements`) are NOT necessarily the same category as their
+            # host — drop the inherited hint rather than passing `_parent_name`
+            # through, so e.g. a floor-hosted Opening classifies from its own
+            # speckle_type instead of short-circuiting to "Floors" via
+            # classify_element()'s category_hint-first Revit branch.
             if getattr(child, "elements", None) and st != "Objects.Data.TeklaObject":
-                results.extend(flatten_elements(child, _depth + 1, _max_depth, _parent_name))
+                results.extend(flatten_elements(child, _depth + 1, _max_depth, ""))
 
     return results
 

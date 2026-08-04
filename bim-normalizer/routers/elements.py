@@ -99,6 +99,30 @@ def get_element_relationships_route(element_id: str):
         release_conn(conn)
 
 
+@router.get("/elements/{element_id}/connectivity")
+def get_element_connectivity_route(element_id: str, hops: int = 2):
+    """
+    Bounded-hop connectivity graph around element_id — structural/IFC
+    relationships (see get_element_relationships_route above; now also real
+    IFC relationships where a usable IFC representation exists, not just
+    Revit's parent/room/space) plus geometric bounding-box "touching" edges,
+    the one signal available for every model regardless of source — see
+    db/query.py's get_element_connectivity for the full algorithm.
+    """
+    from db.connection import get_conn, release_conn
+    from db.query import get_element_connectivity
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT model_id FROM bim_elements WHERE element_id = %s", (element_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Element not found")
+        return get_element_connectivity(conn, str(row[0]), element_id, hops=hops)
+    finally:
+        release_conn(conn)
+
+
 @router.get("/models/{model_id}/elements/flat")
 def get_elements_flat(
     model_id: str,

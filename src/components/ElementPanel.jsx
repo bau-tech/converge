@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     X, ChevronDown, ChevronRight, Copy, Check, Filter, Eye, MoreHorizontal, Loader2,
-    Paperclip, Link2, Unlink2, Plus, Search, FileText,
+    Paperclip, Link2, Unlink2, Plus, Search, FileText, Waypoints,
 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { DocumentPreview } from './DocumentPreview'
@@ -341,7 +341,7 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
     )
 }
 
-export default function ElementPanel({ element, onClose, onFilter, darkMode = true, normalizerUrl, streamId, onDocumentLinksChanged, documentLinksVersion, hideDocuments = false }) {
+export default function ElementPanel({ element, onClose, onFilter, darkMode = true, normalizerUrl, streamId, onDocumentLinksChanged, documentLinksVersion, hideDocuments = false, onOpenConnectivity }) {
     const [width, setWidth] = useState(400)
     const [isAutoWidth, setIsAutoWidth] = useState(false)
     const [isResizing, setIsResizing] = useState(false)
@@ -464,6 +464,15 @@ export default function ElementPanel({ element, onClose, onFilter, darkMode = tr
                     </button>
                     <button className="text-zinc-400 hover:text-white transition-colors" title="More" aria-label="More options" aria-haspopup="true">
                         <MoreHorizontal className="w-4 h-4" />
+                    </button>
+                    <button
+                        onClick={() => onOpenConnectivity?.(element)}
+                        disabled={!element?.element_id}
+                        className="text-zinc-400 hover:text-amber-400 disabled:opacity-30 disabled:hover:text-zinc-400 transition-colors"
+                        title="Show connectivity graph"
+                        aria-label="Show connectivity graph"
+                    >
+                        <Waypoints className="w-4 h-4" />
                     </button>
                     <div className="w-px h-4 bg-zinc-700 mx-1"></div>
                     <button onClick={onClose} aria-label="Close panel" className="text-zinc-400 hover:text-red-400 transition-colors">

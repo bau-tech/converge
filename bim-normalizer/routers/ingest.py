@@ -24,6 +24,19 @@ async def _run_embeddings(model_id: str) -> None:
         logger.warning("Background embedding generation failed for model %s: %s", model_id, exc)
 
 
+async def _run_ifc_relationships(model_id: str, token: str | None, server_url: str | None) -> None:
+    """Fire-and-forget background IFC relationship extraction (aggregation/
+    containment/connections/openings — see ifc/relationship_types.py) for a
+    just-ingested model, same treatment as _run_embeddings above: needs an
+    extra IFC export/parse, so it runs after the ingest job already reports
+    complete rather than adding latency or failure risk to ingest itself."""
+    from routers.ifc_export import extract_ifc_relationships
+    try:
+        await extract_ifc_relationships(model_id, token, server_url, coord_unit="mm")
+    except Exception as exc:
+        logger.warning("Background IFC relationship extraction failed for model %s: %s", model_id, exc)
+
+
 class IngestRequest(BaseModel):
     stream_id: str
     commit_id: str
@@ -142,6 +155,9 @@ async def ingest(request: IngestRequest):
             # here is logged, not surfaced as an ingest failure — the ingest
             # already succeeded by this point.
             fire_and_forget(_run_embeddings(result["model_id"]))
+            # Same treatment for real IFC relationship extraction — needs its
+            # own IFC export/parse, same "don't hold up ingest" reasoning.
+            fire_and_forget(_run_ifc_relationships(result["model_id"], request.token, request.server_url))
         except Exception as exc:
             logger.error("Background ingest error (job %s): %s", job_id, exc, exc_info=True)
             job_conn = _get_conn()

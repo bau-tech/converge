@@ -99,6 +99,10 @@ def _word_in(token: str, text: str, prefix: bool = False) -> bool:
 def _heuristic(speckle_type: str) -> dict:
     """Last-resort classification from type string tokens."""
     t = speckle_type.lower()
+    # Checked before wall/slab/floor: a name like "Floor Opening"/"Wall Opening"
+    # contains both an opening word and its host's word, and the opening is
+    # the more specific/correct classification of the two.
+    if _word_in("opening", t) or _word_in("shaft", t):       return {"ifc_class": "IfcOpeningElement", "category": "Openings"}
     if _word_in("wall", t):                                  return {"ifc_class": "IfcWall",         "category": "Walls"}
     if _word_in("slab", t) or _word_in("floor", t):          return {"ifc_class": "IfcSlab",         "category": "Floors"}
     if _word_in("beam", t):                                  return {"ifc_class": "IfcBeam",         "category": "Structural Framing"}
@@ -637,6 +641,18 @@ def classify_element(
     # Older connectors: obj.category attribute.
     # ══════════════════════════════════════════════════════════════════════
     if source == "Revit":
+        # 0. Name-based opening override. Confirmed against a real ingested
+        # model (Snowdon Towers): the v3 connector sends "Floor Opening"
+        # auxiliary DataObjects (speckle_type "Objects.Data.DataObject", no
+        # useful type/category attribute of their own) as direct children of
+        # the *same* "Floors" Collection as real floor slabs — so
+        # category_hint alone can't tell an opening from its host, and this
+        # must be checked before step 1 trusts the hint.
+        if obj is not None:
+            name = (getattr(obj, "name", None) or "").lower()
+            if _word_in("opening", name) or _word_in("shaft", name):
+                return {"ifc_class": "IfcOpeningElement", "category": "Openings"}
+
         # 1. category_hint — most reliable for Revit v3
         if category_hint:
             entry = _lookup_revit_cat(category_hint)
@@ -665,6 +681,17 @@ def classify_element(
                 cat_entry = _lookup_revit_cat(obj_cat)
                 if cat_entry:
                     return cat_entry
+
+        # 5. obj.name heuristic — covers elements the v3 connector sends as a
+        # generic 'Objects.Data.DataObject' with no category_hint/type signal
+        # at all (e.g. floor/wall-hosted "Floor Opening" objects), where
+        # steps 1-4 all have nothing to go on.
+        if obj is not None:
+            name = (getattr(obj, "name", None) or "").lower()
+            if name:
+                result = _heuristic(name)
+                if result != _FALLBACK:
+                    return result
 
         # fallthrough
         _log_generic_fallthrough(speckle_type, obj, category_hint, source="Revit")

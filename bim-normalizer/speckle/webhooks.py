@@ -185,6 +185,7 @@ def scan_server(server_url: str, token: str) -> int:
     removed = 0
     purged = 0
 
+    import asyncio
     from db.purge import purge_speckle_models, purge_project_documents
 
     conn = get_conn()
@@ -316,6 +317,7 @@ def scan_server(server_url: str, token: str) -> int:
         reconciled = 0
         import uuid
         from pipeline.normalize import ingest_commit, generate_embeddings_for_model
+        from routers.ifc_export import extract_ifc_relationships
         from db.jobs import create_job, update_job, find_running_job
         for stream_id in stream_ids:
             try:
@@ -384,6 +386,19 @@ def scan_server(server_url: str, token: str) -> int:
                     generate_embeddings_for_model(ingest_result["model_id"])
                 except Exception as exc:
                     logger.warning("Background embedding generation failed for model %s: %s",
+                                    ingest_result["model_id"], exc)
+
+                # Same treatment for real IFC relationship extraction —
+                # needs its own IFC export/parse, same "don't hold up
+                # reconciliation" reasoning. extract_ifc_relationships is
+                # async (awaits resolve_model_ifc_bytes/run_cpu_bound
+                # internally) — asyncio.run() is safe here since this
+                # function has no event loop of its own (it's a plain
+                # worker thread via asyncio.to_thread, same as above).
+                try:
+                    asyncio.run(extract_ifc_relationships(ingest_result["model_id"], token, server_url, "mm"))
+                except Exception as exc:
+                    logger.warning("Background IFC relationship extraction failed for model %s: %s",
                                     ingest_result["model_id"], exc)
 
                 reconciled += 1

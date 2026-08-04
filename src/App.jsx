@@ -54,6 +54,7 @@ import { BcfLogoIcon } from './components/BcfLogoIcon'
 import { IdsLogoIcon } from './components/IdsLogoIcon'
 import { IdsCheckPanel } from './components/IdsCheckPanel'
 import { ClashCheckPanel } from './components/ClashCheckPanel'
+import { ElementConnectivityPanel } from './components/ElementConnectivityPanel'
 import { CombineModelsPicker, nextCombineColor } from './components/CombineModelsPicker'
 import { FederatedClashPanel } from './components/FederatedClashPanel'
 import { DocumentsPanel } from './components/DocumentsPanel'
@@ -2178,6 +2179,9 @@ function Dashboard({ readOnly = false }) {
     const [showIdsCheck, setShowIdsCheck] = useState(false)
     const [showClashCheck, setShowClashCheck] = useState(false)
     const [showDocuments, setShowDocuments] = useState(false)
+    // Presence (not a separate boolean) drives whether ElementConnectivityPanel
+    // is shown — { elementId, name } for whichever element opened it.
+    const [connectivityTarget, setConnectivityTarget] = useState(null)
 
     // Distinct IFC classes in this model, for ClashCheckPanel's group dropdowns.
     // Memoized so the array reference is stable across unrelated re-renders
@@ -2968,6 +2972,7 @@ function Dashboard({ readOnly = false }) {
                             streamId={data?.project_id}
                             onDocumentLinksChanged={refreshDocumentPins}
                             documentLinksVersion={documentLinksVersion}
+                            onOpenConnectivity={(el) => setConnectivityTarget({ elementId: el.element_id, name: el.name })}
                             // Documents requires a login server-side (every route in
                             // routers/documents.py needs require_login at minimum) — skip
                             // rendering the section entirely for anonymous visitors rather
@@ -3034,6 +3039,18 @@ function Dashboard({ readOnly = false }) {
                             serverToken={activeServer.token}
                             ifcClasses={clashIfcClasses}
                             onClose={() => setShowClashCheck(false)}
+                        />
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {connectivityTarget && (
+                        <ElementConnectivityPanel
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            elementId={connectivityTarget.elementId}
+                            elementName={connectivityTarget.name}
+                            viewerRef={speckleViewerRef}
+                            onClose={() => setConnectivityTarget(null)}
                         />
                     )}
                 </AnimatePresence>

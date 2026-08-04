@@ -1232,6 +1232,121 @@ def get_element_relationships(conn, element_id: str) -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def get_element_connectivity(conn, model_id: str, element_id: str, hops: int = 2, max_nodes: int = 25) -> dict:
+    """
+    Bounded-hop connectivity graph around one element, combining:
+    - every bim_relationships row touching the frontier at each hop —
+      Revit-only parent/room/space (build_relationships()) plus, where a
+      model has a usable IFC representation, real IFC relationships
+      (aggregates/contained_in/connects/voids/fills — see
+      ifc/relationship_types.py and routers/ifc_export.py's
+      extract_ifc_relationships);
+    - geometric "touching" edges (zero-tolerance bounding-box overlap on
+      bim_geometry.bbox_min/bbox_max), the one signal available for every
+      model regardless of source or whether it has real IFC relationships.
+      Skipped for a pair that already has a real "connects" (or any other)
+      relationship — a geometric edge only fills the gap when nothing more
+      meaningful already links that pair.
+
+    hops is clamped to [1, 3]; the graph stops growing once max_nodes total
+    elements have been visited (frontier truncation, not an error — this is
+    meant to stay a small local-neighborhood view, not a full-model
+    traversal).
+
+    Returns {"nodes": [{element_id, speckle_id, name, category, ifc_class,
+    hop}], "edges": [{source, target, type}]}. type is one of
+    "parent"/"room"/"space"/"aggregates"/"contained_in"/"connects"/"voids"/
+    "fills"/"touches".
+    """
+    hops = max(1, min(hops, 3))
+    visited: dict[str, int] = {element_id: 0}
+    frontier = [element_id]
+    edges: list[dict] = []
+    seen_edge_keys: set[tuple] = set()
+    linked_pairs: set[tuple] = set()  # pairs already covered by a real relationship — blocks a redundant "touches"
+
+    with conn.cursor() as cur:
+        for hop in range(1, hops + 1):
+            if not frontier or len(visited) >= max_nodes:
+                break
+
+            cur.execute(
+                "SELECT element_id::text, related_id::text, relation_type FROM bim_relationships "
+                "WHERE element_id = ANY(%s::uuid[]) OR related_id = ANY(%s::uuid[])",
+                (frontier, frontier),
+            )
+            rel_rows = cur.fetchall()
+
+            cur.execute(
+                "SELECT e.element_id::text, g.bbox_min, g.bbox_max FROM bim_elements e "
+                "JOIN bim_geometry g ON g.element_id = e.element_id "
+                "WHERE e.element_id = ANY(%s::uuid[]) AND g.bbox_min IS NOT NULL AND g.bbox_max IS NOT NULL",
+                (frontier,),
+            )
+            frontier_bboxes = cur.fetchall()
+            touch_pairs: list[tuple[str, str]] = []
+            for eid, bmin, bmax in frontier_bboxes:
+                cur.execute(
+                    "SELECT e2.element_id::text FROM bim_elements e2 "
+                    "JOIN bim_geometry g2 ON g2.element_id = e2.element_id "
+                    "WHERE e2.model_id = %s AND e2.element_id != %s::uuid "
+                    "AND g2.bbox_min[1] <= %s AND g2.bbox_max[1] >= %s "
+                    "AND g2.bbox_min[2] <= %s AND g2.bbox_max[2] >= %s "
+                    "AND g2.bbox_min[3] <= %s AND g2.bbox_max[3] >= %s "
+                    "LIMIT 50",
+                    (model_id, eid, bmax[0], bmin[0], bmax[1], bmin[1], bmax[2], bmin[2]),
+                )
+                touch_pairs.extend((eid, other_id) for (other_id,) in cur.fetchall())
+
+            next_frontier: list[str] = []
+
+            def _visit(x: str) -> None:
+                if x not in visited:
+                    visited[x] = hop
+                    next_frontier.append(x)
+
+            for a, b, rtype in rel_rows:
+                pair = (min(a, b), max(a, b))
+                edge_key = (*pair, rtype)
+                if edge_key not in seen_edge_keys:
+                    seen_edge_keys.add(edge_key)
+                    linked_pairs.add(pair)
+                    edges.append({"source": a, "target": b, "type": rtype})
+                _visit(a)
+                _visit(b)
+                if len(visited) >= max_nodes:
+                    break
+
+            if len(visited) < max_nodes:
+                for a, b in touch_pairs:
+                    pair = (min(a, b), max(a, b))
+                    if pair in linked_pairs:
+                        continue
+                    edge_key = (*pair, "touches")
+                    if edge_key not in seen_edge_keys:
+                        seen_edge_keys.add(edge_key)
+                        edges.append({"source": a, "target": b, "type": "touches"})
+                    _visit(a)
+                    _visit(b)
+                    if len(visited) >= max_nodes:
+                        break
+
+            frontier = next_frontier
+
+        cur.execute(
+            "SELECT element_id::text, speckle_id, name, category, ifc_class "
+            "FROM bim_elements WHERE element_id = ANY(%s::uuid[])",
+            (list(visited),),
+        )
+        info_by_id = {r[0]: {"speckle_id": r[1], "name": r[2], "category": r[3], "ifc_class": r[4]} for r in cur.fetchall()}
+
+    nodes = [
+        {"element_id": eid, "hop": hop, **info_by_id.get(eid, {"speckle_id": None, "name": None, "category": None, "ifc_class": None})}
+        for eid, hop in visited.items()
+    ]
+    return {"nodes": nodes, "edges": edges}
+
+
 # ---------------------------------------------------------------------------
 # Semantic search — see search/embeddings.py for the embedding model itself
 # ---------------------------------------------------------------------------

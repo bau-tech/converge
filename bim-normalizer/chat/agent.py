@@ -41,6 +41,7 @@ from db.query import (
     semantic_search_elements,
     _steel_element_ids,
     get_element_relationships,
+    get_element_connectivity,
     get_model_diff,
     get_quantity_takeoff,
 )
@@ -357,6 +358,35 @@ _TOOLS = [
                     "reference": {
                         "type": "string",
                         "description": "Speckle ID or (partial) name of the element to look up relationships for.",
+                    },
+                },
+                "required": ["reference"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_connectivity",
+            "description": (
+                "Trace what an element is connected to, possibly through intermediate elements — "
+                "e.g. 'what's connected to this beam', 'trace this duct run', 'what's near this wall "
+                "structurally and physically'. Combines get_related_elements' parent/room/space links, "
+                "real IFC relationships where the model has a usable IFC representation (aggregation, "
+                "spatial containment, physical connections, openings), and geometric bounding-box "
+                "touching — the one signal available for every model regardless of source. Walks "
+                "multiple hops outward, unlike get_related_elements (one hop only)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "Speckle ID or (partial) name of the element to trace connectivity from.",
+                    },
+                    "hops": {
+                        "type": "integer",
+                        "description": "How many relationship hops to walk outward (default 2, clamped 1-3).",
                     },
                 },
                 "required": ["reference"],
@@ -1359,6 +1389,20 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
         ids = [r["speckle_id"] for r in rels if r.get("speckle_id")]
         return _jdump(rels), (ids or None)
 
+    if fn == "get_connectivity":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        element = get_element_details(conn, model_id, reference)
+        if not element:
+            return f"No element found matching '{reference}'.", None
+        hops = args.get("hops") or 2
+        graph = get_element_connectivity(conn, model_id, element["element_id"], hops=int(hops))
+        if len(graph["nodes"]) <= 1:
+            return f"No connections found for '{reference}' within {hops} hop(s).", None
+        ids = [n["speckle_id"] for n in graph["nodes"] if n.get("speckle_id")]
+        return _jdump(graph), (ids or None)
+
     if fn == "semantic_search":
         query = args.get("query", "")
         if not query:
@@ -1728,6 +1772,8 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
         "- get_version_history: element-count/volume/area trend (overall + per category) across all ingested versions of this model\n"
         "- find_nearby_elements: find elements within a radius (meters) of a reference element or coordinate\n"
         "- get_related_elements: parent/room/space relationships (host wall, room contents, etc.) for an element\n"
+        "- get_connectivity: multi-hop connectivity graph for an element — structural/IFC relationships plus "
+        "physical touching, e.g. 'trace this duct run' or 'what's connected to this beam'\n"
         "- get_qa_elements: drill into a specific data-quality issue and highlight the affected elements\n"
         "- get_element_details: full details (geometry, all parameters) for one specific element\n"
         "- semantic_search: find elements by meaning/description rather than exact text match\n"
