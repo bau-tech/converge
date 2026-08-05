@@ -1,0 +1,438 @@
+<title>CDE Platform Comparison — Converge vs. ACC, Trimble Connect, Revizto, BIG</title>
+<style>
+  :root {
+    --paper: #F1F3F1;
+    --paper-raised: #FAFBFA;
+    --ink: #171B23;
+    --ink-dim: #565F6B;
+    --line: #D5DAD6;
+    --line-strong: #B7BEBB;
+    --accent: #C85A28;
+    --accent-soft: #C85A2814;
+    --accent-ink: #7A3714;
+    --good: #3E8462;
+    --good-bg: #3E846217;
+    --warn: #A6771F;
+    --warn-bg: #A6771F17;
+    --absent: #8B94A0;
+    --absent-bg: #8B94A012;
+    --unverified: #7C7690;
+    --unverified-bg: #7C769012;
+    --home-col: #C85A280B;
+    --shadow: 0 1px 2px rgba(23,27,35,0.06);
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #12151A;
+    --paper-raised: #191D24;
+    --ink: #E7E9E7;
+    --ink-dim: #9BA3AC;
+    --line: #2B3038;
+    --line-strong: #3A404A;
+    --accent: #E38048;
+    --accent-soft: #E3804822;
+    --accent-ink: #F3B084;
+    --good: #5FAF87;
+    --good-bg: #5FAF8722;
+    --warn: #D1A24A;
+    --warn-bg: #D1A24A22;
+    --absent: #6C7580;
+    --absent-bg: #6C758022;
+    --unverified: #9C94B8;
+    --unverified-bg: #9C94B822;
+    --home-col: #E3804810;
+    --shadow: 0 1px 2px rgba(0,0,0,0.35);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #12151A;
+      --paper-raised: #191D24;
+      --ink: #E7E9E7;
+      --ink-dim: #9BA3AC;
+      --line: #2B3038;
+      --line-strong: #3A404A;
+      --accent: #E38048;
+      --accent-soft: #E3804822;
+      --accent-ink: #F3B084;
+      --good: #5FAF87;
+      --good-bg: #5FAF8722;
+      --warn: #D1A24A;
+      --warn-bg: #D1A24A22;
+      --absent: #6C7580;
+      --absent-bg: #6C758022;
+      --unverified: #9C94B8;
+      --unverified-bg: #9C94B822;
+      --home-col: #E3804810;
+      --shadow: 0 1px 2px rgba(0,0,0,0.35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.45;
+  }
+
+  .mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 56px 32px 96px;
+  }
+
+  header.masthead {
+    margin-bottom: 40px;
+  }
+
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin: 0 0 14px;
+  }
+
+  h1 {
+    font-size: clamp(28px, 3.6vw, 40px);
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+    font-weight: 650;
+  }
+
+  h1 em {
+    font-style: normal;
+    /* converge's actual brand gradient — src/index.css's .gradient-text,
+       blue -> cyan -> indigo -> violet, kept identical across themes since
+       it's the wordmark, not page chrome. */
+    background: linear-gradient(90deg, #136CFF 0%, #38BDF8 25%, #818CF8 55%, #A855F7 80%, #C084FC 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .dek {
+    max-width: 62ch;
+    color: var(--ink-dim);
+    font-size: 15.5px;
+    margin: 0 0 22px;
+  }
+
+  .caveat {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    max-width: 74ch;
+    padding: 12px 16px;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--unverified);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--ink-dim);
+  }
+
+  .caveat b { color: var(--ink); font-weight: 600; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin: 28px 0 8px;
+    font-size: 12.5px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--ink-dim);
+  }
+
+  .table-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    background: var(--paper-raised);
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 880px;
+    font-size: 13.5px;
+  }
+
+  thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--paper-raised);
+    border-bottom: 1px solid var(--line-strong);
+    padding: 16px 14px 13px;
+    text-align: left;
+    vertical-align: bottom;
+  }
+
+  thead th.feature-head {
+    left: 0;
+    z-index: 4;
+    min-width: 260px;
+  }
+
+  .product-name {
+    font-weight: 650;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+
+  .product-sub {
+    display: block;
+    font-size: 10.5px;
+    letter-spacing: 0.03em;
+    color: var(--ink-dim);
+    margin-top: 3px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+
+  th.home .product-name { color: var(--accent-ink); }
+  th.home .product-sub { color: var(--accent); }
+
+  td.home, th.home {
+    background: var(--home-col);
+  }
+
+  tbody tr.group-row td {
+    padding: 12px 14px 6px;
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--paper);
+    border-top: 1px solid var(--line);
+    border-bottom: none;
+  }
+
+  tbody tr.group-row:first-child td { border-top: none; }
+
+  tbody tr.feature-row td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+
+  tbody tr.feature-row:last-child td { border-bottom: none; }
+
+  td.feature-name {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--paper-raised);
+    font-weight: 500;
+    color: var(--ink);
+    border-right: 1px solid var(--line);
+  }
+
+  td.feature-name .fnote {
+    display: block;
+    font-size: 11px;
+    color: var(--ink-dim);
+    font-weight: 400;
+    margin-top: 2px;
+  }
+
+  tbody tr.feature-row:hover td { background: var(--paper); }
+  tbody tr.feature-row:hover td.feature-name { background: var(--paper); }
+  tbody tr.feature-row:hover td.home { background: var(--home-col); }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px 3px 7px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+
+  .pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .pill.full { background: var(--good-bg); color: var(--good); }
+  .pill.full .dot { background: var(--good); }
+
+  .pill.partial { background: var(--warn-bg); color: var(--warn); }
+  .pill.partial .dot { background: var(--warn); }
+
+  .pill.none { background: var(--absent-bg); color: var(--absent); }
+  .pill.none .dot { background: var(--absent); }
+
+  .pill.unverified {
+    background: var(--unverified-bg);
+    color: var(--unverified);
+    border: 1px dashed var(--unverified);
+    padding: 2px 8px 2px 6px;
+  }
+  .pill.unverified .dot { background: var(--unverified); }
+
+  footer {
+    margin-top: 28px;
+    font-size: 12px;
+    color: var(--ink-dim);
+    max-width: 74ch;
+  }
+
+  footer a { color: var(--ink-dim); }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 36px 16px 64px; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow mono">CDE capability audit &middot; Aug 2026</p>
+    <h1>Where <em>converge</em> stands next to the commercial CDEs</h1>
+    <p class="dek">A row-by-row comparison against Autodesk Construction Cloud, Trimble Connect, Revizto, and BIG (Kaulquappe) — the ISO&nbsp;19650 workflow mechanics, coordination tooling, and platform tradeoffs that actually differ between them.</p>
+    <div class="caveat">
+      <span class="mono" style="color:var(--unverified); font-size:15px; line-height:1;">&#9888;</span>
+      <span><b>Read this before you cite it.</b> Converge's row is first-hand — it's the codebase this session worked in. The other four are compiled from public documentation, product marketing, and review sites, not hands-on testing or a live account. Capabilities vary by plan tier and region; anything marked <span class="pill unverified" style="vertical-align:1px;"><span class="dot"></span>unverified</span> means the public record didn't give a confident answer either way.</span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <div class="legend-item"><span class="pill full"><span class="dot"></span>full</span> native, first-class support</div>
+    <div class="legend-item"><span class="pill partial"><span class="dot"></span>partial</span> exists, but limited or bolted-on</div>
+    <div class="legend-item"><span class="pill none"><span class="dot"></span>none</span> not offered</div>
+    <div class="legend-item"><span class="pill unverified"><span class="dot"></span>unverified</span> couldn't confirm from public sources</div>
+  </div>
+
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th class="feature-head">Capability</th>
+          <th class="home">
+            <span class="product-name">Converge</span>
+            <span class="product-sub">self-hosted &middot; OSS</span>
+          </th>
+          <th>
+            <span class="product-name">ACC</span>
+            <span class="product-sub">Autodesk Construction Cloud</span>
+          </th>
+          <th>
+            <span class="product-name">Trimble Connect</span>
+            <span class="product-sub">Trimble</span>
+          </th>
+          <th>
+            <span class="product-name">Revizto</span>
+            <span class="product-sub">Revizto Inc.</span>
+          </th>
+          <th>
+            <span class="product-name">BIG</span>
+            <span class="product-sub">Kaulquappe AG</span>
+          </th>
+        </tr>
+      </thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    Sources: Autodesk's BSI Kitemark ISO&nbsp;19650 certification announcement; Trimble Connect product &amp; developer docs; Revizto's product and clash-automation pages; Kaulquappe/bigcde.com product pages. Converge's row reflects the codebase as of this session (naming/suitability codes, org-scoped WIP visibility, and notifications all shipped in the two sessions preceding this comparison).
+  </footer>
+</div>
+
+<script>
+const DATA = [
+  { group: "CDE core — ISO 19650 delivery workflow" },
+  { name: "WIP &rarr; Shared &rarr; Published &rarr; Archived states", note: "the four container states themselves",
+    vals: ["full","full","full","partial","full"] },
+  { name: "Reviewed &rarr; approved &rarr; verified gate", note: "named sign-off per forward transition",
+    vals: ["full","full","partial","partial","full"] },
+  { name: "Suitability / purpose-of-issue codes", note: "S0&ndash;S4, A1/A2, B1/B2, C1, D1",
+    vals: ["full","partial","unverified","none","full"] },
+  { name: "ISO 19650 filename convention", note: "Project-Originator-Volume-Level-Type-Role-Number",
+    vals: ["full","full","partial","none","full"] },
+  { name: "Contractual/org separation", note: "one task team can't see another's WIP",
+    vals: ["full","full","full","partial","full"] },
+  { name: "Append-only audit trail", note: "who did what, when",
+    vals: ["full","full","full","partial","full"] },
+  { name: "In-app / email notifications", note: "review-waiting, approved, revised, &hellip;",
+    vals: ["full","full","full","full","unverified"] },
+  { name: "Independent ISO 19650 certification", note: "e.g. BSI Kitemark",
+    vals: ["none","full","unverified","none","unverified"] },
+
+  { group: "Coordination" },
+  { name: "3D/2D model viewer", vals: ["full","full","full","full","partial"] },
+  { name: "Clash detection", vals: ["full","full","full","full","full"] },
+  { name: "IDS checking", note: "Information Delivery Specification validation",
+    vals: ["full","unverified","unverified","none","unverified"] },
+  { name: "BCF issue tracking", note: "open buildingSMART format",
+    vals: ["full","partial","full","full","unverified"] },
+  { name: "VR / field walkthrough", vals: ["none","none","partial","full","unverified"] },
+
+  { group: "Data & scheduling" },
+  { name: "4D scheduling", note: "native Gantt + build-sequence playback",
+    vals: ["full","full","partial","none","unverified"] },
+  { name: "5D quantities / cost", vals: ["full","partial","none","none","unverified"] },
+  { name: "Multi-source ingestion", note: "Revit, Tekla, IFC, Navisworks, Rhino, Blender, Grasshopper",
+    vals: ["full","partial","full","partial","unverified"] },
+  { name: "IFC export", vals: ["full","full","full","partial","unverified"] },
+
+  { group: "Platform" },
+  { name: "Self-hosted deployment", vals: ["full","none","partial","none","none"] },
+  { name: "Open source", vals: ["full","none","none","none","none"] },
+  { name: "Native AI / LLM query interface", note: "ask your BIM data questions directly",
+    vals: ["full","partial","none","none","none"] },
+  { name: "Pricing", note: "at time of writing",
+    vals: ["free (infra only)","paid, per-seat","paid, per-seat","paid, per-seat","paid, enterprise"] },
+];
+
+const LABELS = { full: "full", partial: "partial", none: "none", unverified: "unverified" };
+
+function cell(val, isHome) {
+  const cls = isHome ? " home" : "";
+  if (val in LABELS) {
+    return `<td class="${cls.trim()}"><span class="pill ${val}"><span class="dot"></span>${LABELS[val]}</span></td>`;
+  }
+  // free-text cell (pricing row)
+  return `<td class="${cls.trim()}" style="font-size:12.5px; color:var(--ink-dim);">${val}</td>`;
+}
+
+const body = document.getElementById("table-body");
+let rows = "";
+for (const row of DATA) {
+  if (row.group) {
+    rows += `<tr class="group-row"><td colspan="6">${row.group}</td></tr>`;
+    continue;
+  }
+  const noteHtml = row.note ? `<span class="fnote">${row.note}</span>` : "";
+  rows += `<tr class="feature-row">
+    <td class="feature-name">${row.name}${noteHtml}</td>
+    ${row.vals.map((v, i) => cell(v, i === 0)).join("")}
+  </tr>`;
+}
+body.innerHTML = rows;
+</script>
