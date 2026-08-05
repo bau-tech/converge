@@ -4,7 +4,7 @@
 
 # Converge
 
-A React dashboard for BIM analysis, coordination, and validation connected to a self-hosted [Speckle](https://speckle.systems/) server. It ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper, normalises them to an IFC-aligned PostgreSQL schema, and exposes analytics, 3D visualisation, model comparison, BCF issue collaboration, clash detection, IDS (Information Delivery Specification) checking, document management backed by a dedicated Nextcloud instance (WIP → Shared → Published → Archived, with an app-enforced reviewed → approved → verified gate), and an MCP server that lets Claude query and reason over your BIM data.
+A React dashboard for BIM analysis, coordination, and validation connected to a self-hosted [Speckle](https://speckle.systems/) server. It ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper, normalises them to an IFC-aligned PostgreSQL schema, and exposes analytics, 3D visualisation, model comparison, BCF issue collaboration, clash detection, IDS (Information Delivery Specification) checking, and an ISO 19650 Common Data Environment for documents — WIP → Shared → Published → Archived with an app-enforced reviewed → approved → verified gate, purpose-of-issue suitability codes, advisory filename-convention checking, org-scoped WIP visibility for multi-contractor projects, and an in-app/email notification feed — backed by a dedicated Nextcloud instance, plus an MCP server that lets Claude query and reason over your BIM data.
 
 ---
 
@@ -22,7 +22,9 @@ Browser — React + Vite
       │                       experimental IFC5/.ifcx)
       │                     Clash check (ifcclash) · IDS check (ifctester)
       │                     Documents (Nextcloud) — reviewed → approved →
-      │                       verified gate · Auth (dashboard login)
+      │                       verified gate, suitability codes, org-scoped
+      │                       WIP · Notifications (in-app + email) · Auth
+      │                       (dashboard login)
       │                       │
       │                       ├─ specklepy + GraphQL ─► Speckle server
       │                       │                          (streams/commits/blobs)
@@ -129,7 +131,7 @@ Every environment variable (required and optional) is documented inline in `.env
 
 ## bim-normalizer
 
-FastAPI backend (`:8002`) that ingests Speckle commits into a normalised PostgreSQL schema and serves ~70 REST routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export (the mature IFC4X3/STEP export, plus an experimental IFC5/`.ifcx` export — buildingSMART's unratified next-gen JSON-based format), IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (the ISO 19650 reviewed → approved → verified gate), dashboard layout/sharing, and debug utilities.
+FastAPI backend (`:8002`) that ingests Speckle commits into a normalised PostgreSQL schema and serves ~75 REST routes across ingest/sync, models, elements, analytics, filters, 4D timeline/schedule, IFC export (the mature IFC4X3/STEP export, plus an experimental IFC5/`.ifcx` export — buildingSMART's unratified next-gen JSON-based format), IDS checking, clash detection, AI chat, dashboard auth, Nextcloud-backed documents (ISO 19650 reviewed → approved → verified gate, purpose-of-issue suitability codes, advisory filename-convention checking, and org-scoped WIP visibility so one contractor's work-in-progress stays invisible to another's), a document-workflow notification feed (in-app, plus email if `SMTP_HOST` is configured), dashboard layout/sharing, and debug utilities.
 
 Ingest pipeline: `fetch_commit` (specklepy GraphQL) → `flatten_elements` → `detect_source` (Revit/Tekla/IFC/Navisworks/Blender/Rhino/Grasshopper) → `classify_element` → geometry/parameter extraction → PostgreSQL upsert → best-effort embedding build for semantic search. Re-running `/ingest` for an already-stored commit is an idempotent fast path (`force: true` to re-classify). Speckle webhooks can drive ingestion automatically with nobody's browser open, and the same webhooks — plus a periodic reconciliation scan as a safety net for missed deliveries — mirror deletions back: a project/branch/commit removed on Speckle is purged locally too, including its documents and Nextcloud group folder. Speckle is always the source of truth; converge never deletes anything there on its own.
 
@@ -146,7 +148,7 @@ docker compose logs -f bim-normalizer
 
 A standalone FastAPI process (`bcf_server.py`, separate container) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` (BIMcollab ZOOM only understands 2.1). Shares the same Postgres instance as bim-normalizer. Topics carry a status field rendered as a drag-and-drop Kanban board (`BcfKanbanBoard.jsx`) alongside the standard topic list/detail view (`BcfTopicPanel.jsx`).
 
-A standalone, session-authenticated admin panel (`/admin`, linked from the "Admin" button in `BcfKanbanBoard.jsx`) manages `bcf_users`, active OAuth sessions, and ingested models/BCF topics — including permanently purging a project: local models, BCF topics, roles/status, documents, and its Nextcloud group folder, all without touching the source project on Speckle.
+A standalone, session-authenticated admin panel (`/admin`, linked from the "Admin" button in `BcfKanbanBoard.jsx`) manages `bcf_users` and their ISO 19650 organization membership (contractual-container separation — which company's WIP a user can see), document-workflow role grants, active OAuth sessions, and ingested models/BCF topics — including permanently purging a project: local models, BCF topics, roles/status, documents, and its Nextcloud group folder, all without touching the source project on Speckle.
 
 **Full module map and the 2.1/3.0 schema differences:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#bcf-server-modules).
 
@@ -196,7 +198,7 @@ npm run preview   # Serve production build locally
 npm run lint      # ESLint
 ```
 
-Major pieces: the 3D viewer (`SpeckleViewer`) and adaptive charts/metrics/tables synced to it by `speckle_id`; clash (`ClashCheckPanel`) and IDS (`IdsCheckPanel`/`IdsGraphEditor`) checking with viewer highlight and optional BCF topic creation; BCF issue collaboration (`BcfTopicPanel`, `BcfKanbanBoard`); Nextcloud-backed document management (`DocumentsPanel`, multi-format `DocumentPreview`); a native 4D planner (`SchedulePanel` — Gantt + build-up playback); federated multi-model views and cross-model clash checks; dashboard login (`LoginScreen`/`AuthContext`); and a drag-and-drop, per-project widget layout (`DashboardGrid`).
+Major pieces: the 3D viewer (`SpeckleViewer`) and adaptive charts/metrics/tables synced to it by `speckle_id`; clash (`ClashCheckPanel`) and IDS (`IdsCheckPanel`/`IdsGraphEditor`) checking with viewer highlight and optional BCF topic creation; BCF issue collaboration (`BcfTopicPanel`, `BcfKanbanBoard`); Nextcloud-backed document management with ISO 19650 suitability codes and org-scoped WIP visibility (`DocumentsPanel`, multi-format `DocumentPreview`); a document-workflow notification bell (`NotificationBell`); a native 4D planner (`SchedulePanel` — Gantt + build-up playback); federated multi-model views and cross-model clash checks; dashboard login (`LoginScreen`/`AuthContext`); and a drag-and-drop, per-project widget layout (`DashboardGrid`).
 
 **Full component list:** [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#frontend-components).
 
