@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role, require_role
 from db.jobs import create_job, update_job, get_job, prune_jobs
-from job_registry import fire_and_forget
+from job_registry import fire_and_forget, fire_and_forget_sync
 from nextcloud.groupfolders import STATUS_FOLDERS as _STATUS_FOLDERS
 
 router = APIRouter(tags=["documents"])
@@ -72,10 +72,16 @@ def _latest_model_id(conn, stream_id: str) -> str | None:
     return str(row[0]) if row else None
 
 
-def _require_doc(conn, doc_id: str) -> dict:
+def _require_doc(conn, doc_id: str, user: CurrentUser) -> dict:
+    """404s (not 403 — don't leak existence) if doc_id doesn't exist, is
+    soft-deleted, or is a WIP document scoped to an org the caller isn't in.
+    Mirrors list_documents' visibility filter (db/documents.py) so a
+    guessed/bookmarked doc_id can't see more than the list endpoint does."""
     from db.documents import get_document
     doc = get_document(conn, doc_id)
     if doc is None or doc["deleted_at"] is not None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc["status"] == "WIP" and doc["org_id"] and user.org_id and doc["org_id"] != user.org_id:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
 
@@ -97,7 +103,7 @@ def list_documents(stream_id: str, status: str | None = None, linked_element: st
     from db.documents import list_documents as _list
     conn = get_conn()
     try:
-        return _list(conn, stream_id, status=status, linked_element=linked_element)
+        return _list(conn, stream_id, status=status, linked_element=linked_element, viewer_org_id=user.org_id)
     finally:
         release_conn(conn)
 
@@ -158,7 +164,7 @@ def get_document_detail(stream_id: str, doc_id: str, user: CurrentUser = Depends
     from db.documents import list_events
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         doc["events"] = list_events(conn, doc_id)
         return doc
     finally:
@@ -175,7 +181,7 @@ def download_document(stream_id: str, doc_id: str, inline: bool = False, user: C
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
     finally:
         release_conn(conn)
 
@@ -200,7 +206,7 @@ def preview_dwg_as_dxf(stream_id: str, doc_id: str, user: CurrentUser = Depends(
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
     finally:
         release_conn(conn)
 
@@ -230,7 +236,7 @@ def thumbnail_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
     finally:
         release_conn(conn)
 
@@ -344,7 +350,7 @@ async def upload_document(
             conn, stream_id=stream_id, model_id=model_id,
             nc_fileid=meta["fileid"], nc_path=meta["path"], nc_group_folder=group_folder,
             filename=meta["name"], mime_type=meta.get("mime_type"), size_bytes=meta.get("size"),
-            etag=meta.get("etag"), status="WIP", doc_type=doc_type,
+            etag=meta.get("etag"), status="WIP", doc_type=doc_type, org_id=user.org_id,
         )
         record_event(conn, doc["doc_id"], "created", to_value="WIP", actor=user.name, actor_guid=user.guid)
     finally:
@@ -414,7 +420,11 @@ def delete_folder(stream_id: str, path: str, user: CurrentUser = Depends(require
     group_folder = _group_folder(stream_id)
     conn = get_conn()
     try:
-        docs = _list_docs(conn, stream_id)
+        # viewer_org_id here isn't just a display filter — it keeps a user
+        # scoped to one org from bulk-deleting another org's WIP documents
+        # just because they happen to sit under a folder path this user can
+        # otherwise reach.
+        docs = _list_docs(conn, stream_id, viewer_org_id=user.org_id)
         # Prefix match (not equality) so a nested subfolder's documents are
         # caught too — deleting "Structural" must also remove anything
         # under "Structural/SubA".
@@ -524,7 +534,7 @@ def move_document(stream_id: str, doc_id: str, body: MoveRequest, user: CurrentU
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         if body.status == doc["status"]:
             return doc
 
@@ -588,6 +598,8 @@ def move_document(stream_id: str, doc_id: str, body: MoveRequest, user: CurrentU
 
         updated = set_status(conn, doc_id, body.status, new_path)
         record_event(conn, doc_id, "moved", from_value=doc["status"], to_value=body.status, actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "moved", body.status, user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -603,9 +615,11 @@ def review_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(req
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = set_reviewed(conn, doc_id, user.name, user.guid)
         record_event(conn, doc_id, "reviewed", actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "reviewed", None, user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -618,7 +632,7 @@ def unreview_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(r
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = clear_reviewed(conn, doc_id)
         record_event(conn, doc_id, "unreviewed", actor=user.name, actor_guid=user.guid)
         return updated
@@ -633,9 +647,11 @@ def approve_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(re
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = set_approved(conn, doc_id, user.name, user.guid)
         record_event(conn, doc_id, "approved", actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "approved", None, user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -648,7 +664,7 @@ def unapprove_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = clear_approved(conn, doc_id)
         record_event(conn, doc_id, "unapproved", actor=user.name, actor_guid=user.guid)
         return updated
@@ -666,9 +682,11 @@ def verify_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(req
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = set_verified(conn, doc_id, user.name, user.guid)
         record_event(conn, doc_id, "verified", actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "verified", None, user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -681,9 +699,40 @@ def unverify_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(r
 
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = clear_verified(conn, doc_id)
         record_event(conn, doc_id, "unverified", actor=user.name, actor_guid=user.guid)
+        return updated
+    finally:
+        release_conn(conn)
+
+
+class SuitabilityRequest(BaseModel):
+    code: str
+
+
+@router.patch("/projects/{stream_id}/documents/{doc_id}/suitability")
+def set_document_suitability(stream_id: str, doc_id: str, body: SuitabilityRequest,
+                              user: CurrentUser = Depends(require_role("approver"))):
+    """ISO 19650 'purpose of issue' suitability code — advisory, distinct
+    from both `status` (container state) and `revision` (plain version
+    counter). Gated to approver, same tier as approve/verify. Reset to NULL
+    on every bump_revision() (see db/documents.py) — a new revision must be
+    re-declared, not inherit its predecessor's code."""
+    from naming.suitability import SUITABILITY_CODES
+    from db.connection import get_conn, release_conn
+    from db.documents import set_suitability_code, record_event
+
+    if body.code not in SUITABILITY_CODES:
+        raise HTTPException(status_code=400, detail=f"Invalid suitability code, must be one of {list(SUITABILITY_CODES)}")
+
+    conn = get_conn()
+    try:
+        doc = _require_doc(conn, doc_id, user)
+        updated = set_suitability_code(conn, doc_id, body.code, user.name, user.guid)
+        record_event(conn, doc_id, "suitability_set", from_value=doc.get("suitability_code"), to_value=body.code, actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "suitability_set", body.code, user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -705,13 +754,15 @@ async def revise_document(
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         try:
             meta = upload_bytes(doc["nc_path"], content, overwrite=True)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Nextcloud upload failed: {exc}")
         updated = bump_revision(conn, doc_id, nc_path=doc["nc_path"], size_bytes=meta.get("size"), etag=meta.get("etag"))
         record_event(conn, doc_id, "revised", to_value=f"revision {updated['revision']}", actor=user.name, actor_guid=user.guid)
+        from notifications.dispatch import notify_document_event
+        fire_and_forget_sync(notify_document_event, stream_id, doc_id, "revised", f"revision {updated['revision']}", user.guid)
         return updated
     finally:
         release_conn(conn)
@@ -724,7 +775,7 @@ def list_versions(stream_id: str, doc_id: str, user: CurrentUser = Depends(requi
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
     finally:
         release_conn(conn)
     return nc_list_versions(doc["nc_fileid"])
@@ -738,7 +789,7 @@ def download_version(stream_id: str, doc_id: str, version_id: str, user: Current
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
     finally:
         release_conn(conn)
     content = nc_download_version(doc["nc_fileid"], version_id)
@@ -758,7 +809,7 @@ def delete_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(req
 
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         try:
             nc_delete(doc["nc_path"])
         except Exception as exc:
@@ -780,7 +831,7 @@ def link_topic(stream_id: str, doc_id: str, body: LinkTopicRequest, user: Curren
     from db.documents import link_topic as _link, record_event
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = _link(conn, doc_id, body.topic_guid)
         record_event(conn, doc_id, "linked_topic", to_value=body.topic_guid, actor=user.name, actor_guid=user.guid)
         return updated
@@ -794,7 +845,7 @@ def unlink_topic(stream_id: str, doc_id: str, user: CurrentUser = Depends(requir
     from db.documents import unlink_topic as _unlink, record_event
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         updated = _unlink(conn, doc_id)
         record_event(conn, doc_id, "unlinked_topic", from_value=doc["linked_bcf_topic"], actor=user.name, actor_guid=user.guid)
         return updated
@@ -812,7 +863,7 @@ def link_element(stream_id: str, doc_id: str, body: LinkElementRequest, user: Cu
     from db.documents import link_element as _link, record_event
     conn = get_conn()
     try:
-        _require_doc(conn, doc_id)
+        _require_doc(conn, doc_id, user)
         updated = _link(conn, doc_id, body.speckle_id)
         record_event(conn, doc_id, "linked_element", to_value=body.speckle_id, actor=user.name, actor_guid=user.guid)
         return updated
@@ -826,7 +877,7 @@ def unlink_element(stream_id: str, doc_id: str, user: CurrentUser = Depends(requ
     from db.documents import unlink_element as _unlink, record_event
     conn = get_conn()
     try:
-        doc = _require_doc(conn, doc_id)
+        doc = _require_doc(conn, doc_id, user)
         updated = _unlink(conn, doc_id)
         record_event(conn, doc_id, "unlinked_element", from_value=doc["linked_element"], actor=user.name, actor_guid=user.guid)
         return updated

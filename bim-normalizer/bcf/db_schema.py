@@ -129,6 +129,20 @@ CREATE TABLE IF NOT EXISTS bcf_users (
     password_hash  TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ISO 19650 contractual-container separation: a user's employer/company.
+-- Nullable and additive on purpose — NULL means "unscoped", which is both
+-- the default for every existing account and the intended behaviour for a
+-- coordinating role (e.g. Lead Appointed Party) that needs to see every
+-- org's WIP, not just one. See bim_documents.org_id (db/models.py) for the
+-- document-side half of this; a real FK is safe here (unlike that soft
+-- reference) since both tables are created by this same schema-init.
+CREATE TABLE IF NOT EXISTS bcf_organizations (
+    org_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES bcf_organizations(org_id) ON DELETE SET NULL;
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by

@@ -22,15 +22,23 @@ class LoginRequest(BaseModel):
 
 @router.post("/auth/login")
 def login(body: LoginRequest, request: Request, response: Response):
-    user = fetch_one("SELECT guid, email, name, password_hash FROM bcf_users WHERE email = %s", (body.email,))
+    user = fetch_one(
+        """
+        SELECT u.guid, u.email, u.name, u.password_hash, u.org_id, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        WHERE u.email = %s
+        """,
+        (body.email,),
+    )
     if user is None or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_session_token(str(user["guid"]), user["email"], user["name"])
+    org_id = str(user["org_id"]) if user["org_id"] else None
+    token = create_session_token(str(user["guid"]), user["email"], user["name"], org_id, user["org_name"])
     response.set_cookie(
         SESSION_COOKIE, token, max_age=SESSION_TTL_SECONDS, httponly=True,
         samesite="lax", secure=request.url.scheme == "https",
     )
-    return {"guid": str(user["guid"]), "email": user["email"], "name": user["name"]}
+    return {"guid": str(user["guid"]), "email": user["email"], "name": user["name"], "org_id": org_id, "org_name": user["org_name"]}
 
 
 @router.post("/auth/logout")
@@ -41,4 +49,4 @@ def logout(response: Response):
 
 @router.get("/auth/me")
 def me(user: CurrentUser = Depends(require_login)):
-    return {"guid": user.guid, "email": user.email, "name": user.name}
+    return {"guid": user.guid, "email": user.email, "name": user.name, "org_id": user.org_id, "org_name": user.org_name}

@@ -1,11 +1,16 @@
 import asyncio
+import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 # Async job state (ingest/export/IDS-check/clash-check/filter-publish) lives
 # in the bim_jobs DB table — see db/jobs.py — not in in-memory dicts here, so
 # a backend restart doesn't strand a polling client with an unrecoverable 404.
 
+logger = logging.getLogger(__name__)
+
 _background_tasks: set = set()
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fire-and-forget")
 
 
 def fire_and_forget(coro) -> asyncio.Task:
@@ -15,11 +20,33 @@ def fire_and_forget(coro) -> asyncio.Task:
     this, a long-running background job (ingest, export, clash/IDS check...)
     can silently vanish after its work finishes but before it records that
     in bim_jobs, leaving a client polling a job stuck at "running" forever
-    with no error anywhere."""
+    with no error anywhere.
+
+    Requires a running event loop *in the calling thread* — safe from an
+    `async def` route (FastAPI runs those directly on the event loop), but
+    NOT from a plain `def` route (FastAPI dispatches those to its own
+    worker thread pool, which has no event loop at all). Use
+    fire_and_forget_sync() below for that case."""
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+def fire_and_forget_sync(fn, *args, **kwargs) -> None:
+    """Background a plain blocking function from any context, sync or async
+    — unlike fire_and_forget()/asyncio.create_task, this doesn't need a
+    running event loop in the calling thread, so it's the one safe to call
+    from a plain `def` FastAPI route (see fire_and_forget's docstring).
+    Errors are the callee's own responsibility to catch and log (see
+    notifications/dispatch.py's notify_document_event) — a bare exception
+    here would otherwise vanish silently since nothing awaits this Future."""
+    def _log_if_failed(future):
+        exc = future.exception()
+        if exc is not None:
+            logger.error("fire_and_forget_sync task failed", exc_info=exc)
+
+    _executor.submit(fn, *args, **kwargs).add_done_callback(_log_if_failed)
 
 
 def _is_uuid(value: str) -> bool:

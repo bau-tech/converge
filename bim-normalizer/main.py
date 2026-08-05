@@ -25,6 +25,7 @@ from routers.ids_check import router as ids_check_router
 from routers.ifc_export import router as ifc_export_router
 from routers.ingest import router as ingest_router
 from routers.models import router as models_router
+from routers.notifications import router as notifications_router
 from routers.overrides import router as overrides_router
 from routers.sync import router as sync_router
 from routers.timeline import router as timeline_router
@@ -177,3 +178,4 @@ app.include_router(ifc_export_router)
 app.include_router(ids_check_router)
 app.include_router(clash_check_router)
 app.include_router(documents_router)
+app.include_router(notifications_router)

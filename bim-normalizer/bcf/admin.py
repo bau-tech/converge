@@ -26,7 +26,7 @@ from bcf.oauth import list_active_sessions, revoke_session
 from bcf.password import hash_password, verify_password
 from bcf.projects import EXTENSION_KINDS, default_extension_values, extension_value_lists
 from bcf.request_log import recent as recent_requests
-from bcf.schemas import DocumentRoleCreate, ExtensionValueCreate, UserCreate
+from bcf.schemas import DocumentRoleCreate, ExtensionValueCreate, OrganizationCreate, UserCreate, UserOrgUpdate
 from db.purge import purge_speckle_models, purge_project_documents
 
 router = APIRouter(tags=["bcf-admin"])
@@ -184,6 +184,18 @@ def _admin_page_html(email: str) -> str:
     <span class="muted">{_esc(email)} &middot; <a href="/admin/logout">log out</a></span>
   </div>
 
+  <h2>Organizations</h2>
+  <p class="muted">ISO 19650 contractual-container separation — a user's employer/company. Gates which
+    org's WIP documents they can see on the main dashboard (Shared/Published/Archived stay visible to
+    every project member regardless). A user with no organization is "unscoped" and sees every org's
+    WIP — the default for every account, and the right setting for a coordinating role.</p>
+  <form class="inline" id="create-org-form">
+    <input type="text" name="name" placeholder="Organization name" required>
+    <button type="submit">Add organization</button>
+  </form>
+  <table id="orgs-table"><thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
+    <tbody></tbody></table>
+
   <h2>Users</h2>
   <form class="inline" id="create-user-form">
     <input type="email" name="email" placeholder="Email" required>
@@ -191,7 +203,7 @@ def _admin_page_html(email: str) -> str:
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Add user</button>
   </form>
-  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Created</th><th></th></tr></thead>
+  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
 
   <h2>Document roles (ISO 19650)</h2>
@@ -259,14 +271,56 @@ function esc(s) {{
     return (s ?? '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 }}
 
+let orgsCache = [];
+
+async function loadOrganizations() {{
+    orgsCache = await api('/admin/api/organizations');
+    const tbody = document.querySelector('#orgs-table tbody');
+    tbody.innerHTML = orgsCache.map(o => `<tr>
+        <td>${{esc(o.name)}}</td>
+        <td>${{esc(new Date(o.created_at).toLocaleString())}}</td>
+        <td><button class="danger" data-org="${{o.org_id}}" onclick="deleteOrganization(this)">Delete</button></td>
+    </tr>`).join('') || '<tr><td colspan="3" class="muted">No organizations yet.</td></tr>';
+    loadUsers();
+}}
+
+async function deleteOrganization(btn) {{
+    if (!confirm("Delete this organization? Members fall back to unscoped (see every org's WIP).")) return;
+    await api(`/admin/api/organizations/${{btn.dataset.org}}`, {{ method: 'DELETE' }});
+    loadOrganizations();
+}}
+
+document.getElementById('create-org-form').addEventListener('submit', async (e) => {{
+    e.preventDefault();
+    const f = e.target;
+    await api('/admin/api/organizations', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ name: f.name.value }}),
+    }});
+    f.reset();
+    loadOrganizations();
+}});
+
+async function setUserOrg(sel) {{
+    await api(`/admin/api/users/${{sel.dataset.guid}}/org`, {{
+        method: 'PATCH',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ org_id: sel.value || null }}),
+    }});
+}}
+
 async function loadUsers() {{
     const users = await api('/admin/api/users');
     const tbody = document.querySelector('#users-table tbody');
+    const orgOptions = (current) => '<option value="">— none (unscoped) —</option>' + orgsCache.map(o =>
+        `<option value="${{o.org_id}}" ${{o.org_id === current ? 'selected' : ''}}>${{esc(o.name)}}</option>`).join('');
     tbody.innerHTML = users.map(u => `<tr>
         <td>${{esc(u.name)}}</td><td>${{esc(u.email)}}</td>
+        <td><select data-guid="${{u.guid}}" onchange="setUserOrg(this)">${{orgOptions(u.org_id)}}</select></td>
         <td>${{esc(new Date(u.created_at).toLocaleString())}}</td>
         <td><button class="danger" data-guid="${{u.guid}}" onclick="deleteUser(this)">Delete</button></td>
-    </tr>`).join('') || '<tr><td colspan="4" class="muted">No users yet.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">No users yet.</td></tr>';
     document.getElementById('grant-role-user').innerHTML = users.map(u =>
         `<option value="${{u.guid}}">${{esc(u.name)}} &lt;${{esc(u.email)}}&gt;</option>`).join('');
 }}
@@ -530,7 +584,7 @@ function scheduleRequestsRefresh() {{
 document.getElementById('requests-auto').addEventListener('change', scheduleRequestsRefresh);
 document.getElementById('requests-refresh').addEventListener('click', loadRequests);
 
-loadUsers();
+loadOrganizations();
 loadProjectOptions();
 loadSessions();
 loadOverview();
@@ -559,13 +613,82 @@ def _serialize_user(row: dict) -> dict:
         "email": row["email"],
         "name": row["name"],
         "created_at": row["created_at"].isoformat(),
+        "org_id": str(row["org_id"]) if row.get("org_id") else None,
+        "org_name": row.get("org_name"),
     }
 
 
 @router.get("/admin/api/users")
 def admin_list_users(_email: str = Depends(require_admin_session)):
-    rows = fetch_all("SELECT guid, email, name, created_at FROM bcf_users ORDER BY created_at")
+    rows = fetch_all(
+        """
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        ORDER BY u.created_at
+        """
+    )
     return [_serialize_user(r) for r in rows]
+
+
+@router.patch("/admin/api/users/{user_guid}/org")
+def admin_set_user_org(user_guid: str, body: UserOrgUpdate, _email: str = Depends(require_admin_session)):
+    """ISO 19650 contractual-container separation — which org a user belongs
+    to, gating which org's WIP documents they can see (db/documents.py's
+    list_documents, routers/documents.py's _require_doc). org_id=None clears
+    it back to unscoped (sees every org's WIP, today's default behaviour)."""
+    row = fetch_one("SELECT guid FROM bcf_users WHERE guid = %s", (user_guid,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if body.org_id is not None:
+        org = fetch_one("SELECT org_id FROM bcf_organizations WHERE org_id = %s", (body.org_id,))
+        if org is None:
+            raise HTTPException(status_code=404, detail="Organization not found")
+    execute("UPDATE bcf_users SET org_id = %s WHERE guid = %s", (body.org_id, user_guid))
+    updated = fetch_one(
+        """
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        WHERE u.guid = %s
+        """,
+        (user_guid,),
+    )
+    return _serialize_user(updated)
+
+
+def _serialize_org(row: dict) -> dict:
+    return {"org_id": str(row["org_id"]), "name": row["name"], "created_at": row["created_at"].isoformat()}
+
+
+@router.get("/admin/api/organizations")
+def admin_list_organizations(_email: str = Depends(require_admin_session)):
+    rows = fetch_all("SELECT org_id, name, created_at FROM bcf_organizations ORDER BY name")
+    return [_serialize_org(r) for r in rows]
+
+
+@router.post("/admin/api/organizations", status_code=201)
+def admin_create_organization(body: OrganizationCreate, _email: str = Depends(require_admin_session)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required")
+    existing = fetch_one("SELECT org_id FROM bcf_organizations WHERE name = %s", (name,))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An organization with this name already exists")
+    row = execute_returning(
+        "INSERT INTO bcf_organizations (name) VALUES (%s) RETURNING org_id, name, created_at",
+        (name,),
+    )
+    return _serialize_org(row)
+
+
+@router.delete("/admin/api/organizations/{org_id}", status_code=204)
+def admin_delete_organization(org_id: str, _email: str = Depends(require_admin_session)):
+    """Members fall back to unscoped (ON DELETE SET NULL on bcf_users.org_id,
+    bcf/db_schema.py) rather than being blocked or cascaded — losing an
+    organization shouldn't lock its members out of every project."""
+    row = fetch_one("SELECT org_id FROM bcf_organizations WHERE org_id = %s", (org_id,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    execute("DELETE FROM bcf_organizations WHERE org_id = %s", (org_id,))
 
 
 @router.post("/admin/api/users", status_code=201)

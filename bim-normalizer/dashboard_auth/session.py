@@ -19,11 +19,12 @@ SESSION_TTL_SECONDS = 8 * 3600
 _SIGNING_KEY = hashlib.sha256(f"{settings.DASHBOARD_SESSION_SECRET}:dashboard".encode()).digest()
 
 
-def create_session_token(user_guid: str, email: str, name: str) -> str:
+def create_session_token(user_guid: str, email: str, name: str, org_id: str | None = None, org_name: str | None = None) -> str:
     now = int(time.time())
     return jwt.encode(
         {
             "sub": user_guid, "email": email, "name": name,
+            "org_id": org_id, "org_name": org_name,
             "iat": now, "exp": now + SESSION_TTL_SECONDS,
             "purpose": "dashboard_session",
         },

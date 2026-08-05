@@ -58,6 +58,7 @@ import { ElementConnectivityPanel } from './components/ElementConnectivityPanel'
 import { CombineModelsPicker, nextCombineColor } from './components/CombineModelsPicker'
 import { FederatedClashPanel } from './components/FederatedClashPanel'
 import { DocumentsPanel } from './components/DocumentsPanel'
+import { NotificationBell } from './components/NotificationBell'
 import { SchedulePanel } from './components/SchedulePanel'
 import { SchedulePlaybackView } from './components/SchedulePlaybackView'
 import PublishSelectionButton from './components/PublishSelectionButton'
@@ -2512,9 +2513,11 @@ function Dashboard({ readOnly = false }) {
                                         <ClashLogoIcon className="w-7 h-7" />
                                     </motion.button>
                                 )}
-                                {/* Documents requires a login server-side (routers/documents.py — every
-                                    route there needs require_login at minimum) — hidden entirely for
-                                    anonymous share visitors rather than left to 401. */}
+                                {/* Documents/notifications both require a login server-side — hidden
+                                    entirely for anonymous share visitors rather than left to 401. */}
+                                {!anonymous && (
+                                <NotificationBell normalizerUrl={CONFIG.normalizerUrl} />
+                                )}
                                 {!anonymous && (
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                                     onClick={() => setShowDocuments(true)}

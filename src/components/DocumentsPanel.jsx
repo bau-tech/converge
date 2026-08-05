@@ -3,11 +3,17 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import {
     X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, UploadCloud, GitBranch, Ruler,
-    LayoutGrid, List, Folder, FolderPlus, Pencil,
+    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag,
 } from 'lucide-react'
 import { DocumentPreview } from './DocumentPreview'
 import { SpeckleModelsList } from './SpeckleModelsList'
 import { useAuth } from '../contexts/AuthContext'
+import { SUITABILITY_CODES, SUITABILITY_COLOR } from '../utils/suitabilityCodes'
+
+// ISO 19650 filename convention template shown near the upload control —
+// purely informational, never validated/blocked client-side (see
+// bim-normalizer/naming/iso19650.py for the actual advisory check).
+const NAMING_TEMPLATE = 'PROJECT-ORIGINATOR-VOLUME-LEVEL-TYPE-ROLE-NUMBER'
 
 const PREVIEWABLE_EXT = new Set(['pdf', 'ifc', 'dxf', 'dwg', 'docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'txt', 'md'])
 function isPreviewable(filename) {
@@ -544,6 +550,24 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         return updated
     }
 
+    // Sets the ISO 19650 "purpose of issue" suitability code — approver
+    // only server-side, same error/state-update shape as clearGate above.
+    const setSuitability = async (doc, code) => {
+        const res = await fetch(`${base}/projects/${streamId}/documents/${doc.doc_id}/suitability`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+        })
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error(body.detail || `Setting suitability failed (${res.status})`)
+        }
+        const updated = await res.json()
+        setDocuments(prev => prev.map(d => d.doc_id === doc.doc_id ? updated : d))
+        setSelectedDoc(prev => prev?.doc_id === doc.doc_id ? updated : prev)
+        return updated
+    }
+
     // Runs the gate for `targetStatus` (review/approve/verify) then moves
     // the document into it — used both by the pending-gate prompt after a
     // drag-and-drop, and could be reused for a one-click "gate & move".
@@ -662,7 +686,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 <div className="flex items-center gap-2">
                     <FileText className="w-5 h-5 text-[var(--speckle-foreground)]" />
                     <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">Documents</h2>
-                    {user && <span className="text-[10px] text-[var(--speckle-foreground-3)] ml-1">as {user.name}{!canAct && ' (read-only)'}</span>}
+                    {user && <span className="text-[10px] text-[var(--speckle-foreground-3)] ml-1">as {user.name}{user.org_name && ` (${user.org_name})`}{!canAct && ' (read-only)'}</span>}
                     {error && <span className="text-[11px] text-red-400 ml-2">{error}</span>}
                 </div>
                 <div className="flex items-center gap-2">
@@ -707,6 +731,12 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                             >
                                 <Upload className="w-3.5 h-3.5" /> {uploading ? 'Uploading…' : 'Upload'}
                             </button>
+                            <span
+                                title={`ISO 19650 naming (optional): ${NAMING_TEMPLATE}\ne.g. PRJ-ABC-00-00-DR-A-000001.pdf`}
+                                className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] cursor-help"
+                            >
+                                <Info className="w-3.5 h-3.5" />
+                            </span>
                         </>
                     )}
                     {activeTab === 'models' && canAct && (
@@ -896,6 +926,22 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]">rev {selectedDoc.revision}</span>
                         </div>
 
+                        {selectedDoc.naming_compliant ? (
+                            <div
+                                className="flex items-center gap-1.5 text-[11px] text-emerald-300 cursor-help"
+                                title={Object.entries(selectedDoc.naming_fields || {}).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                            >
+                                <Check className="w-3.5 h-3.5" /> ISO 19650 naming
+                            </div>
+                        ) : (
+                            <div
+                                className="flex items-center gap-1.5 text-[11px] text-[var(--speckle-foreground-3)] cursor-help"
+                                title={`Expected pattern: ${NAMING_TEMPLATE}`}
+                            >
+                                <Info className="w-3.5 h-3.5" /> Non-standard filename
+                            </div>
+                        )}
+
                         {selectedDoc.status === 'WIP' && (
                             selectedDoc.reviewed ? (
                                 <div className="flex items-center gap-1.5 text-[11px] text-blue-300">
@@ -938,6 +984,32 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                 </button>
                             )
                         )}
+
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                            <Tag className="w-3.5 h-3.5 text-[var(--speckle-foreground-3)] shrink-0" />
+                            {selectedDoc.suitability_code ? (
+                                <span
+                                    className={`text-[10px] px-1.5 py-0.5 rounded cursor-help ${SUITABILITY_COLOR[selectedDoc.suitability_code]}`}
+                                    title={SUITABILITY_CODES[selectedDoc.suitability_code]}
+                                >
+                                    {selectedDoc.suitability_code}
+                                </span>
+                            ) : (
+                                <span className="text-[10px] text-[var(--speckle-foreground-3)]">No suitability code</span>
+                            )}
+                            {canApprove && (
+                                <select
+                                    value={selectedDoc.suitability_code || ''}
+                                    onChange={(e) => e.target.value && setSuitability(selectedDoc, e.target.value)}
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]"
+                                >
+                                    <option value="" disabled>Set code…</option>
+                                    {Object.entries(SUITABILITY_CODES).map(([code, label]) => (
+                                        <option key={code} value={code}>{code} — {label}</option>
+                                    ))}
+                                </select>
+                            )}
+                        </div>
 
                         {isPreviewable(selectedDoc.filename) && (
                             <button

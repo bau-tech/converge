@@ -153,7 +153,8 @@ stage independently settable/clearable and attributed to an actor, not a single 
 | `POST` / `DELETE` | `/projects/{stream_id}/documents/{doc_id}/review` | Set/clear the reviewed stage |
 | `POST` / `DELETE` | `/projects/{stream_id}/documents/{doc_id}/approve` | Set/clear the approved stage |
 | `POST` / `DELETE` | `/projects/{stream_id}/documents/{doc_id}/verify` | Set/clear the verified stage |
-| `POST` | `/projects/{stream_id}/documents/{doc_id}/revise` | Upload a new version — status unchanged, approval reset, Nextcloud auto-versions the prior content |
+| `PATCH` | `/projects/{stream_id}/documents/{doc_id}/suitability` | Body: `{code}`. Set the ISO 19650 "purpose of issue" suitability code (S0-S4/A1/A2/B1/B2/C1/D1) — approver only |
+| `POST` | `/projects/{stream_id}/documents/{doc_id}/revise` | Upload a new version — status unchanged, approval + suitability reset, Nextcloud auto-versions the prior content |
 | `GET` | `/projects/{stream_id}/documents/{doc_id}/versions` | List prior versions (Nextcloud's WebDAV versions API) |
 | `GET` | `/projects/{stream_id}/documents/{doc_id}/versions/{version_id}/download` | Download one prior version |
 | `DELETE` | `/projects/{stream_id}/documents/{doc_id}` | Nextcloud delete + local soft-delete tombstone (audit trail survives) |
@@ -162,6 +163,28 @@ stage independently settable/clearable and attributed to an actor, not a single 
 | `GET` | `/projects/{stream_id}/documents/backfill/{job_id}/status` | Poll backfill job |
 | `GET` | `/projects/{stream_id}/my-roles` | Current user's ISO 19650 author/reviewer/approver roles on this project |
 | `GET` | `/projects/{stream_id}/documents/linked-positions` | Positions (elements/topics) already linked to at least one document, for UI badge display |
+
+`GET .../documents` and every single-document route additionally enforce ISO 19650 contractual-container
+separation: a WIP-status document tagged to an organization (`org_id`, set from the uploader's org at
+upload time) is invisible to a viewer in a different org — 404, not 403, so existence isn't leaked. An
+unscoped viewer or an unscoped document (the default until organizations are configured) stays visible
+to everyone. Shared/Published/Archived documents are never org-filtered. See `bcf-server/admin` for
+managing organizations and assigning users to one.
+
+#### Notifications
+
+Personal to the logged-in user across every project (not stream-scoped). Written by
+`notifications/dispatch.py`, fired in the background right after a document is moved to Shared,
+reviewed, approved, verified, given a suitability code, or revised — see the recipient table in
+`notifications/dispatch.py`. Also emailed if `SMTP_HOST` is configured (optional, see Environment
+variables below); otherwise in-app only.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/notifications` | List, newest first. Optional `?unread_only=true&limit=` |
+| `GET` | `/notifications/unread-count` | `{count}` — polled by the dashboard's bell icon |
+| `POST` | `/notifications/{id}/read` | Mark one notification read |
+| `POST` | `/notifications/read-all` | Mark every unread notification read |
 
 #### Dashboard layout & sharing
 
@@ -206,17 +229,29 @@ bim_jobs             job_id, job_type, status, payload, result, error (async job
 bim_documents         stream_id-scoped (survives re-ingestion, unlike model_id), Nextcloud-backed
                      document metadata — status (WIP/Shared/Published/Archived), doc_type
                      (document/drawing), a reviewed/approved/verified triad (each with its own
-                     *_by/*_at attribution), revision, linked_bcf_topic, linked_element
+                     *_by/*_at attribution), revision, linked_bcf_topic, linked_element,
+                     naming_compliant/naming_fields (advisory ISO 19650 filename check,
+                     naming/iso19650.py), suitability_code (ISO 19650 purpose-of-issue,
+                     naming/suitability.py — reset on every revision, like the gate triad),
+                     org_id (ISO 19650 contractual-container separation — soft ref to
+                     bcf_organizations, set from the uploader's org; gates WIP visibility only)
                      (db/documents.py, nextcloud/)
-  └── bim_document_events  append-only audit trail — created/moved/reviewed/approved/verified/revised/deleted/linked
+  └── bim_document_events  append-only audit trail — created/moved/reviewed/approved/verified/suitability_set/revised/deleted/linked
 
 bim_document_roles   stream_id-scoped author/reviewer/approver RBAC backing the /my-roles endpoint
+
+bim_notifications    in-app notification feed for document-workflow events — user_guid, stream_id,
+                     doc_id, event_type, message, read_at (db/notifications.py, notifications/)
 
 bim_dashboard_layouts        per-project drag-and-drop widget layout (GET/PUT /dashboard-layout)
 bim_classification_overrides manual property overrides (POST /models/{id}/overrides)
 bim_ids_specs                stored IDS specifications (POST /models/{id}/ids-specs)
 auto_sync_servers            watched Speckle servers for webhook-driven auto-sync (GET/POST /auto-sync/servers)
 stream_webhooks               registered Speckle webhook rows (speckle/webhooks.py)
+
+bcf_organizations    a user's employer/company (ISO 19650 contractual-container separation) — name,
+                     created_at (bcf/db_schema.py). bcf_users.org_id soft-links into this table
+                     (nullable, ON DELETE SET NULL — unscoped is always a safe fallback)
 ```
 
 ---
@@ -235,7 +270,7 @@ A standalone FastAPI process (`bcf_server.py`, same `bim-normalizer/` build cont
 | `bcf/users.py` (`/bcf-bridge/users`) | `bcf_users` CRUD, backing both the admin panel and OAuth login |
 | `bcf/password.py` | bcrypt password hashing/verification for `bcf_users` |
 | `bcf/oauth.py` | Real OAuth2/OIDC login against `bcf_users` — some clients (confirmed: BIMcollab ZOOM) refuse the spec's Basic-Auth fallback and require a real-looking Authorization Code + PKCE flow with an `openid` scope. Issued tokens/sessions are in-memory only (lost on every restart) |
-| `bcf/admin.py` (`/admin`) | Standalone session-cookie-authenticated admin page (plain HTML/JS, no build step) — manage `bcf_users`, view/revoke active OAuth sessions, browse ingested models with their BCF topics (incl. snapshot thumbnails) and per-project `bcf_extensions` value lists, purge a single model/version, or fully purge a project (models, BCF topics, document roles/status, documents — actual files deleted too — and the Nextcloud group folder, via `db/purge.py`'s `purge_speckle_models`/`purge_project_documents`; never touches the project on Speckle itself), and tail the last 100 non-`/health` requests this process has handled. Proxied at `/admin` by `nginx.conf.template` (same pattern as `/bcf/` and `/bcf-bridge/`) so it's reachable from the dashboard's own origin — linked from the "Admin" button in `BcfKanbanBoard.jsx`'s header, which opens it in a new tab |
+| `bcf/admin.py` (`/admin`) | Standalone session-cookie-authenticated admin page (plain HTML/JS, no build step) — manage `bcf_users` (including their ISO 19650 `bcf_organizations` membership, gating WIP document visibility), manage organizations themselves, view/revoke active OAuth sessions, browse ingested models with their BCF topics (incl. snapshot thumbnails) and per-project `bcf_extensions` value lists, purge a single model/version, or fully purge a project (models, BCF topics, document roles/status, documents — actual files deleted too — and the Nextcloud group folder, via `db/purge.py`'s `purge_speckle_models`/`purge_project_documents`; never touches the project on Speckle itself), and tail the last 100 non-`/health` requests this process has handled. Proxied at `/admin` by `nginx.conf.template` (same pattern as `/bcf/` and `/bcf-bridge/`) so it's reachable from the dashboard's own origin — linked from the "Admin" button in `BcfKanbanBoard.jsx`'s header, which opens it in a new tab |
 | `bcf/request_log.py` | In-memory ring buffer feeding the admin page's request log, fed by a middleware in `bcf_server.py` |
 | `bcf/bridge.py` (`/bcf-bridge/*`) | Resolves a Speckle `stream_id` to an ingested `model_id`, linking BCF projects to this app's own models |
 | `bcf/bcfxml.py` | `.bcfzip` file import/export (BCF-XML interop format every major BIM tool supports) |
@@ -322,6 +357,8 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `NEXTCLOUD_APP_PASSWORD` | No | WebDAV service account password for bim-normalizer's document uploads/moves/deletes (generate via Nextcloud Settings > Security > "Create new app password"). Falls back to the admin password above if unset |
 | `NEXTCLOUD_PORT` | No | Admin/debug port only — never proxied by this dashboard's nginx. Default `8005` |
 | `NEXTCLOUD_URL` / `NEXTCLOUD_USER` | No | Only override if bim-normalizer should talk to a Nextcloud instance other than the bundled container, or use a dedicated WebDAV account instead of the admin one |
+| `SMTP_HOST` | No | Email side of the notification feed (`notifications/`). Leave unset to run in-app-notifications-only |
+| `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_USE_TLS` | No | Standard SMTP relay settings, only read when `SMTP_HOST` is set. `SMTP_PORT` defaults `587`, `SMTP_USE_TLS` defaults `true` |
 | `VITE_OPENAI_API_KEY` | No | OpenAI key for the AI chat agent (also becomes `OPENAI_API_KEY` server-side) |
 | `VITE_OLLAMA_BASE_URL` / `VITE_OLLAMA_MODEL` | No | Local Ollama endpoint and model name |
 | `VITE_LMSTUDIO_BASE_URL` / `VITE_LMSTUDIO_MODEL` | No | LM Studio endpoint and model name |

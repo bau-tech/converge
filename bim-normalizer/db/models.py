@@ -346,6 +346,46 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- ISO 19650 filename convention (Project-Originator-Volume-Level-Type-Role-
+-- Number, see naming/iso19650.py) — advisory only, recomputed on every
+-- upsert_document call (upload, revise, reconcile's drift-scan), never
+-- blocks a write. naming_fields is NULL whenever the filename doesn't match.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS naming_compliant BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS naming_fields    JSONB;
+
+-- ISO 19650 "purpose of issue" suitability code (naming/suitability.py) —
+-- distinct from both `status` (container state) and `revision` (plain
+-- version counter). Settable only by an approver (routers/documents.py's
+-- suitability endpoint), reset to NULL on every bump_revision() the same
+-- way reviewed/approved/verified already reset: a new revision must be
+-- re-declared, not inherit its predecessor's sign-off.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS suitability_code        TEXT;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS suitability_set_by      TEXT;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS suitability_set_by_guid UUID;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS suitability_set_at      TIMESTAMPTZ;
+DO $$ BEGIN
+    ALTER TABLE bim_documents ADD CONSTRAINT bim_documents_suitability_check
+        CHECK (suitability_code IS NULL OR suitability_code IN
+            ('S0', 'S1', 'S2', 'S3', 'S4', 'A1', 'A2', 'B1', 'B2', 'C1', 'D1'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ISO 19650 contractual-container separation: the organization (see
+-- bcf_organizations, bcf/db_schema.py) that owns this document, set from
+-- the uploader's org at upload time. Soft reference, no FK — same
+-- cross-process reasoning as bim_document_roles.user_guid below (bcf_users/
+-- bcf_organizations are created by bcf-server's separate schema-init).
+-- NULL = unscoped, visible to every project member regardless of status —
+-- the default for documents that predate this column and for anyone who
+-- hasn't configured organizations. Deliberately excluded from
+-- upsert_document's ON CONFLICT DO UPDATE SET, same treatment as doc_type
+-- above: reconcile.py's drift-scan must never blank out a value set at
+-- first upload. Enforcement (WIP visible only to the same org, or to an
+-- unscoped viewer) lives in db/documents.py's list_documents() and
+-- routers/documents.py's _require_doc().
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS org_id UUID;
+CREATE INDEX IF NOT EXISTS idx_bim_documents_org ON bim_documents(org_id) WHERE org_id IS NOT NULL;
+
 -- Per-project (stream_id) document-workflow role grants — ISO 19650 RBAC.
 -- Soft reference to bcf_users.guid, no FK: bcf_users is created by
 -- bcf-server's own init_bcf_schema() (a separate process, `python
@@ -382,6 +422,27 @@ CREATE TABLE IF NOT EXISTS bim_model_status (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (stream_id, branch_name)
 );
+
+-- In-app notification feed for document-workflow events (moved to Shared,
+-- reviewed, approved, verified, suitability_set, revised — see
+-- notifications.py's dispatch, fired via job_registry.fire_and_forget right
+-- after each routers/documents.py record_event call). user_guid is a soft
+-- reference to bcf_users.guid, same cross-process reasoning as
+-- bim_document_roles. doc_id cascades on delete, same as
+-- bim_document_events. message is precomputed at insert time (not
+-- reconstructed from event_type on read) purely to keep the read path a
+-- single flat SELECT with no joins.
+CREATE TABLE IF NOT EXISTS bim_notifications (
+    id          BIGSERIAL PRIMARY KEY,
+    user_guid   UUID NOT NULL,
+    stream_id   TEXT NOT NULL,
+    doc_id      UUID REFERENCES bim_documents(doc_id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    read_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_bim_notifications_unread ON bim_notifications(user_guid) WHERE read_at IS NULL;
 """
 
 

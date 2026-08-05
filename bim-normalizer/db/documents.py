@@ -4,6 +4,10 @@ matching db/jobs.py, shared by routers/documents.py.
 """
 import logging
 
+from psycopg2.extras import Json
+
+from naming.iso19650 import parse_filename
+
 logger = logging.getLogger(__name__)
 
 _COLUMNS = """
@@ -12,7 +16,11 @@ _COLUMNS = """
     approved, approved_by, approved_by_guid, approved_at, revision,
     reviewed, reviewed_by, reviewed_by_guid, reviewed_at,
     verified, verified_by, verified_by_guid, verified_at,
-    linked_bcf_topic, linked_element, doc_type, deleted_at, created_at, updated_at
+    linked_bcf_topic, linked_element, doc_type,
+    naming_compliant, naming_fields,
+    suitability_code, suitability_set_by, suitability_set_by_guid, suitability_set_at,
+    org_id,
+    deleted_at, created_at, updated_at
 """
 
 
@@ -22,7 +30,11 @@ def _row_to_doc(row) -> dict:
      approved, approved_by, approved_by_guid, approved_at, revision,
      reviewed, reviewed_by, reviewed_by_guid, reviewed_at,
      verified, verified_by, verified_by_guid, verified_at,
-     linked_bcf_topic, linked_element, doc_type, deleted_at, created_at, updated_at) = row
+     linked_bcf_topic, linked_element, doc_type,
+     naming_compliant, naming_fields,
+     suitability_code, suitability_set_by, suitability_set_by_guid, suitability_set_at,
+     org_id,
+     deleted_at, created_at, updated_at) = row
     return {
         "doc_id": str(doc_id),
         "stream_id": stream_id,
@@ -52,6 +64,13 @@ def _row_to_doc(row) -> dict:
         "linked_bcf_topic": str(linked_bcf_topic) if linked_bcf_topic else None,
         "linked_element": linked_element,
         "doc_type": doc_type,
+        "naming_compliant": naming_compliant,
+        "naming_fields": naming_fields,
+        "suitability_code": suitability_code,
+        "suitability_set_by": suitability_set_by,
+        "suitability_set_by_guid": str(suitability_set_by_guid) if suitability_set_by_guid else None,
+        "suitability_set_at": suitability_set_at.isoformat() if suitability_set_at else None,
+        "org_id": str(org_id) if org_id else None,
         "deleted_at": deleted_at.isoformat() if deleted_at else None,
         "created_at": created_at.isoformat() if created_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
@@ -78,30 +97,42 @@ def upsert_document(
     conn, *, stream_id: str, model_id: str | None, nc_fileid: int, nc_path: str,
     nc_group_folder: str, filename: str, mime_type: str | None, size_bytes: int | None,
     etag: str | None, status: str, nc_last_modified=None, doc_type: str = "document",
+    org_id: str | None = None,
 ) -> dict:
     """Insert a new document, or update path/metadata for one Nextcloud
     already knows about (matched by (nc_group_folder, nc_fileid), which is
     stable across renames/moves) — used both by the upload route and
     reconcile.py's drift-detector.
 
-    doc_type is intentionally absent from ON CONFLICT DO UPDATE SET:
-    reconcile.py calls this with the 'document' default for every file it
-    finds, and must never be able to reclassify an existing 'drawing' row
-    back to 'document' on a routine rescan — the column is set once, at
-    first insert, and left alone on every subsequent upsert."""
+    doc_type and org_id are both intentionally absent from ON CONFLICT DO
+    UPDATE SET: reconcile.py calls this with the 'document' default and no
+    org context for every file it finds, and must never be able to
+    reclassify an existing 'drawing' back to 'document' or blank out an
+    org_id set at first upload — both columns are set once, at first
+    insert, and left alone on every subsequent upsert.
+
+    naming_compliant/naming_fields are recomputed from filename on every
+    call (insert and conflict-update alike) — advisory ISO 19650 naming
+    convention check, see naming/iso19650.py."""
+    fields = parse_filename(filename)
+    naming_compliant = fields is not None
+    naming_fields = Json(fields) if fields else None
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 INSERT INTO bim_documents (
                     stream_id, model_id, nc_fileid, nc_path, nc_group_folder,
-                    filename, mime_type, size_bytes, etag, status, nc_last_modified, doc_type
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    filename, mime_type, size_bytes, etag, status, nc_last_modified, doc_type,
+                    naming_compliant, naming_fields, org_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (nc_group_folder, nc_fileid) DO UPDATE SET
                     nc_path = EXCLUDED.nc_path,
                     filename = EXCLUDED.filename,
                     mime_type = EXCLUDED.mime_type,
                     size_bytes = EXCLUDED.size_bytes,
+                    naming_compliant = EXCLUDED.naming_compliant,
+                    naming_fields = EXCLUDED.naming_fields,
                     etag = EXCLUDED.etag,
                     status = EXCLUDED.status,
                     nc_last_modified = EXCLUDED.nc_last_modified,
@@ -110,7 +141,8 @@ def upsert_document(
                 RETURNING {_COLUMNS}
                 """,
                 (stream_id, model_id, nc_fileid, nc_path, nc_group_folder,
-                 filename, mime_type, size_bytes, etag, status, nc_last_modified, doc_type),
+                 filename, mime_type, size_bytes, etag, status, nc_last_modified, doc_type,
+                 naming_compliant, naming_fields, org_id),
             )
             row = cur.fetchone()
         conn.commit()
@@ -120,7 +152,15 @@ def upsert_document(
         raise
 
 
-def list_documents(conn, stream_id: str, status: str | None = None, linked_element: str | None = None) -> list[dict]:
+def list_documents(
+    conn, stream_id: str, status: str | None = None, linked_element: str | None = None,
+    viewer_org_id: str | None = None,
+) -> list[dict]:
+    """viewer_org_id enforces ISO 19650 contractual-container separation: a
+    WIP document tagged to an org is hidden from viewers in a different org.
+    NULL on either side (an unscoped viewer, or a doc that predates/never
+    got an org) stays visible — additive/back-compat by design, see
+    org_id's schema comment in db/models.py."""
     where = ["stream_id = %s", "deleted_at IS NULL"]
     params: list = [stream_id]
     if status:
@@ -129,6 +169,8 @@ def list_documents(conn, stream_id: str, status: str | None = None, linked_eleme
     if linked_element:
         where.append("linked_element = %s")
         params.append(linked_element)
+    where.append("(status != 'WIP' OR org_id IS NULL OR %s IS NULL OR org_id = %s)")
+    params.extend([viewer_org_id, viewer_org_id])
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT {_COLUMNS} FROM bim_documents WHERE {' AND '.join(where)} ORDER BY filename",
@@ -323,9 +365,31 @@ def clear_verified(conn, doc_id: str) -> dict:
         raise
 
 
+def set_suitability_code(conn, doc_id: str, code: str, actor: str, actor_guid: str | None = None) -> dict:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE bim_documents
+                SET suitability_code = %s, suitability_set_by = %s, suitability_set_by_guid = %s,
+                    suitability_set_at = NOW(), updated_at = NOW()
+                WHERE doc_id = %s
+                RETURNING {_COLUMNS}
+                """,
+                (code, actor, actor_guid, doc_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return _row_to_doc(row)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def bump_revision(conn, doc_id: str, *, nc_path: str, size_bytes: int | None, etag: str | None) -> dict:
     """A revised document must re-earn every downstream ISO 19650 gate again —
-    increments revision and resets reviewed/approved/verified to false."""
+    increments revision and resets reviewed/approved/verified/suitability_code
+    to false/NULL."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -335,6 +399,8 @@ def bump_revision(conn, doc_id: str, *, nc_path: str, size_bytes: int | None, et
                     reviewed = FALSE, reviewed_by = NULL, reviewed_by_guid = NULL, reviewed_at = NULL,
                     approved = FALSE, approved_by = NULL, approved_by_guid = NULL, approved_at = NULL,
                     verified = FALSE, verified_by = NULL, verified_by_guid = NULL, verified_at = NULL,
+                    suitability_code = NULL, suitability_set_by = NULL,
+                    suitability_set_by_guid = NULL, suitability_set_at = NULL,
                     nc_last_modified = NOW(), updated_at = NOW()
                 WHERE doc_id = %s
                 RETURNING {_COLUMNS}
@@ -436,3 +502,18 @@ def list_events(conn, doc_id: str) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def get_document_author_guid(conn, doc_id: str) -> str | None:
+    """Resolves "who uploaded this" from the append-only audit trail rather
+    than a redundant created_by column — used by notifications/dispatch.py
+    to know who to notify on approved/verified/suitability_set. None if the
+    document predates actor_guid attribution (pre-login-era rows, see
+    bim_document_events' actor_guid comment in db/models.py)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT actor_guid FROM bim_document_events WHERE doc_id = %s AND event_type = 'created' ORDER BY id LIMIT 1",
+            (doc_id,),
+        )
+        row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None

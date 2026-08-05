@@ -97,3 +97,11 @@ class DocumentRoleCreate(BaseModel):
     # instead of picking specific projects from the multi-select.
     stream_ids: list[str]
     roles: list[str]
+
+
+class OrganizationCreate(BaseModel):
+    name: str
+
+
+class UserOrgUpdate(BaseModel):
+    org_id: str | None = None

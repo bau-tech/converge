@@ -18,3 +18,22 @@ def get_user_roles(conn, user_guid: str, stream_id: str) -> set[str]:
             (user_guid, stream_id),
         )
         return {row[0] for row in cur.fetchall()}
+
+
+def get_users_with_role(conn, stream_id: str, roles: tuple[str, ...]) -> list[dict]:
+    """Mirror image of get_user_roles() — everyone holding any of `roles` on
+    a project, for notification recipient resolution (notifications.py).
+    Same stream_id='*' union as get_user_roles(). DISTINCT because a user
+    holding e.g. both 'reviewer' and 'approver' would otherwise appear once
+    per matching role row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT u.guid, u.email, u.name
+            FROM bim_document_roles r
+            JOIN bcf_users u ON u.guid = r.user_guid
+            WHERE r.stream_id IN (%s, '*') AND r.role = ANY(%s)
+            """,
+            (stream_id, list(roles)),
+        )
+        return [{"guid": str(g), "email": e, "name": n} for g, e, n in cur.fetchall()]

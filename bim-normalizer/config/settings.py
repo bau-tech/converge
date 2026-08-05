@@ -123,3 +123,16 @@ NEXTCLOUD_ADMIN_PASSWORD: str = os.getenv("NEXTCLOUD_ADMIN_PASSWORD", "")
 # BCF_OIDC_SECRET falling back to BCF_API_KEY above.
 NEXTCLOUD_APP_PASSWORD: str = os.getenv("NEXTCLOUD_APP_PASSWORD") or NEXTCLOUD_ADMIN_PASSWORD
 DOCUMENT_SYNC_SCAN_INTERVAL_S: int = int(os.getenv("DOCUMENT_SYNC_SCAN_INTERVAL_S", str(60 * 60)))
+
+# Email side of the document-workflow notification feed (notifications.py,
+# db/notifications.py). Every var is optional and empty/blank by default —
+# leaving SMTP_HOST unset degrades cleanly to in-app-only notifications
+# (notifications/email.py's send_email() no-ops), so this never blocks a
+# deployment that hasn't set up an SMTP relay. PUBLIC_BASE_URL (above) is
+# reused to build a link back to the app in the email body, if set.
+SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER: str = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM: str = os.getenv("SMTP_FROM", "")
+SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").strip().lower() in ("1", "true", "yes")

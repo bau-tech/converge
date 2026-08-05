@@ -16,6 +16,11 @@ class CurrentUser:
     guid: str
     email: str
     name: str
+    # ISO 19650 contractual-container separation — which org (bcf_organizations)
+    # this user belongs to, or None if unscoped (sees every org's WIP; also
+    # the default for every account until organizations are configured).
+    org_id: str | None = None
+    org_name: str | None = None
 
 
 def require_login(request: Request) -> CurrentUser:
@@ -24,7 +29,10 @@ def require_login(request: Request) -> CurrentUser:
     payload = decode_session(request.cookies.get(SESSION_COOKIE))
     if not payload:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return CurrentUser(guid=payload["sub"], email=payload["email"], name=payload["name"])
+    return CurrentUser(
+        guid=payload["sub"], email=payload["email"], name=payload["name"],
+        org_id=payload.get("org_id"), org_name=payload.get("org_name"),
+    )
 
 
 # Any CDE role at all — used where an endpoint just needs "some standing on
