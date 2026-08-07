@@ -102,20 +102,22 @@ def delete_schedule(model_id: str):
 
 @router.post("/models/{model_id}/schedule/import")
 async def import_schedule(model_id: str, file: UploadFile):
-    """Import a schedule into bim_tasks, from either an IFC file containing
-    IfcWorkSchedule or a Microsoft Project XML (MSPDI) export."""
+    """Import a schedule into bim_tasks, from an IFC file containing
+    IfcWorkSchedule, a Microsoft Project XML (MSPDI) export, or a CSV export."""
     from db.connection import get_conn, release_conn
-    from db.schedule import import_from_ifc, import_from_mspdi
+    from db.schedule import import_from_ifc, import_from_mspdi, import_from_csv
 
     filename = (file.filename or '').lower()
-    if not (filename.endswith('.ifc') or filename.endswith('.xml')):
-        raise HTTPException(status_code=400, detail='Unsupported file type. Upload an IFC file containing IfcWorkSchedule, or an MS Project XML (MSPDI) export.')
+    if not (filename.endswith('.ifc') or filename.endswith('.xml') or filename.endswith('.csv')):
+        raise HTTPException(status_code=400, detail='Unsupported file type. Upload an IFC file containing IfcWorkSchedule, an MS Project XML (MSPDI) export, or a CSV export.')
 
     content = await file.read()
     conn = get_conn()
     try:
         if filename.endswith('.xml'):
             return import_from_mspdi(conn, model_id, content)
+        if filename.endswith('.csv'):
+            return import_from_csv(conn, model_id, content)
 
         import tempfile, os
         with tempfile.NamedTemporaryFile(suffix='.ifc', delete=False) as f:

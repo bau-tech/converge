@@ -76,7 +76,7 @@ All routes below are served by `bim-normalizer` (`:8002`). See [`bim-normalizer/
 | `GET` | `/models/{id}/timeline/data` | Elements grouped by parameter value |
 | `GET` | `/models/{id}/schedule` | Return full task tree with linked element `speckle_id`s for viewer sync |
 | `DELETE` | `/models/{id}/schedule` | Delete the model's schedule (all tasks) |
-| `POST` | `/models/{id}/schedule/import` | Import a schedule file (`multipart/form-data`). Accepts `.ifc` (IfcWorkSchedule) or `.xml` (MS Project XML / MSPDI) |
+| `POST` | `/models/{id}/schedule/import` | Import a schedule file (`multipart/form-data`). Accepts `.ifc` (IfcWorkSchedule), `.xml` (MS Project XML / MSPDI), or `.csv` |
 | `GET` | `/models/{id}/schedule/export-ifc` | Export the schedule as an IFC work schedule file |
 | `POST` | `/models/{id}/schedule/tasks` | Create a task |
 | `PATCH` | `/models/{id}/schedule/tasks/{task_id}` | Update a task |
@@ -216,7 +216,7 @@ bim_models          stream_id, commit_id, branch_name, source, author, ingested_
 
 bim_model_status     stream_id-scoped model/document status tracking (db/model_status.py)
 
-bim_tasks            4D schedule tasks — name, dates, IFC/MSPDI-imported or manually created (db/schedule.py)
+bim_tasks            4D schedule tasks — name, dates, IFC/MSPDI/CSV-imported or manually created (db/schedule.py)
   ├── bim_task_elements      task_id ↔ element_id links, for viewer sync
   └── bim_task_dependencies  task_id → predecessor_id (schedule sequencing)
 
@@ -529,7 +529,7 @@ converge/
 │   │   ├── jobs.py                    DB-backed async job tracking (bim_jobs table)
 │   │   ├── purge.py                   Deletes local models (+ cascaded data) mirroring a Speckle-side deletion
 │   │   ├── timeline.py                4D parameter discovery
-│   │   ├── schedule.py                4D schedule: IFC work schedule + MS Project XML (MSPDI) import, task/dependency CRUD
+│   │   ├── schedule.py                4D schedule: IFC work schedule + MS Project XML (MSPDI) + CSV import, task/dependency CRUD
 │   │   ├── cpm.py                     Critical Path Method engine (forward/backward pass, float, critical path)
 │   │   ├── roles.py                   ISO 19650 author/reviewer/approver role checks
 │   │   └── model_status.py            Model/document status tracking

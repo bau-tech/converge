@@ -552,6 +552,189 @@ def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
     return {'schedules': 1, 'tasks': sort_order}
 
 
+_CSV_HEADER_ALIASES = {
+    'name': 'name', 'task name': 'name', 'task': 'name',
+    'wbs': 'wbs', 'wbs code': 'wbs', 'outline number': 'wbs',
+    'outline level': 'level', 'level': 'level',
+    'start': 'start', 'planned start': 'start',
+    'finish': 'finish', 'end': 'finish', 'planned finish': 'finish',
+    'actual start': 'actual_start',
+    'actual finish': 'actual_finish', 'actual end': 'actual_finish',
+    'duration': 'duration', 'duration (days)': 'duration', 'duration days': 'duration',
+    '% complete': 'pct_complete', 'percent complete': 'pct_complete', 'percentcomplete': 'pct_complete',
+    'milestone': 'milestone',
+    'status': 'status',
+}
+
+
+def _parse_csv_duration(val) -> float | None:
+    """Plain day count, optionally suffixed like '5d' or '5 days'."""
+    if not val:
+        return None
+    m = re.match(r'\s*(\d+(?:\.\d+)?)', str(val))
+    return float(m.group(1)) if m else None
+
+
+def _parse_csv_bool(val) -> bool:
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'y')
+
+
+_ISO_DATE = re.compile(r'^\d{4}-\d{2}-\d{2}')
+
+
+def _detect_csv_date_format(raw_values: list) -> str:
+    """CSV dates are frequently ambiguous slash-dates ('01/05/2026') where D/M
+    vs M/D depends on the exporting tool's locale. Scan every date-shaped
+    value in the file for one where a component is unambiguously > 12 (e.g.
+    '13' can only be a month in DD/MM), and lock the whole file to that
+    format. Raises if different values imply different formats - a single
+    export shouldn't mix locales, so that means the guess can't be trusted.
+    Defaults to month-first (MM/DD/YYYY) when nothing settles it, matching
+    the common Excel/MS Project US export convention."""
+    verdict = None
+    example = None
+    for raw in raw_values:
+        if not raw or _ISO_DATE.match(str(raw)):
+            continue
+        parts = re.split(r'[/.]', str(raw).strip())
+        if len(parts) != 3:
+            continue
+        try:
+            a, b = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if a > 12 and b <= 12:
+            this = 'DMY'
+        elif b > 12 and a <= 12:
+            this = 'MDY'
+        else:
+            continue
+        if verdict is None:
+            verdict, example = this, raw
+        elif verdict != this:
+            fmt_name = {'DMY': 'DD/MM/YYYY', 'MDY': 'MM/DD/YYYY'}
+            raise ValueError(
+                f"Inconsistent date format in CSV: '{raw}' looks like {fmt_name[this]}, but "
+                f"'{example}' earlier in the file looks like {fmt_name[verdict]}. "
+                f"Use a consistent date format (ISO 'YYYY-MM-DD' is unambiguous)."
+            )
+    return verdict or 'MDY'
+
+
+def _parse_csv_date(val, date_fmt: str) -> date | None:
+    if not val:
+        return None
+    s = str(val).strip()[:10]
+    if _ISO_DATE.match(s):
+        try:
+            return datetime.strptime(s, '%Y-%m-%d').date()
+        except ValueError:
+            return None
+    normalized = s.replace('.', '/')
+    fmt = '%d/%m/%Y' if date_fmt == 'DMY' else '%m/%d/%Y'
+    try:
+        return datetime.strptime(normalized, fmt).date()
+    except ValueError:
+        return None
+
+
+def import_from_csv(conn, model_id: str, csv_bytes: bytes) -> dict:
+    """Extract tasks from a CSV schedule export into bim_tasks.
+
+    Column names are matched case-insensitively against _CSV_HEADER_ALIASES;
+    only a Name column is required. Hierarchy is rebuilt from an Outline
+    Level column the same way as MSPDI, when present - otherwise every row
+    is a top-level task in file order."""
+    import csv
+    import io
+
+    try:
+        text = csv_bytes.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        text = csv_bytes.decode('latin-1')
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError('Empty CSV file')
+
+    field_map = {}
+    for raw in reader.fieldnames:
+        key = _CSV_HEADER_ALIASES.get(raw.strip().lower())
+        if key:
+            field_map[key] = raw
+    if 'name' not in field_map:
+        raise ValueError('No "Name" column found - expected a header like "Name" or "Task Name"')
+
+    rows = list(reader)
+
+    if not rows:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+        conn.commit()
+        return {'schedules': 1, 'tasks': 0}
+
+    def get(row, key):
+        col = field_map.get(key)
+        val = row.get(col) if col else None
+        return val.strip() if isinstance(val, str) else val
+
+    date_keys = ('start', 'finish', 'actual_start', 'actual_finish')
+    date_fmt = _detect_csv_date_format(
+        get(row, key) for row in rows for key in date_keys
+    )
+
+    with conn.cursor() as cur:
+        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+
+    has_level = 'level' in field_map
+    level_stack: list[tuple[int, str]] = []
+    sort_order = 0
+
+    for row in rows:
+        name = get(row, 'name')
+        if not name:
+            continue
+
+        planned_start  = _parse_csv_date(get(row, 'start'), date_fmt)
+        planned_finish = _parse_csv_date(get(row, 'finish'), date_fmt)
+        actual_start   = _parse_csv_date(get(row, 'actual_start'), date_fmt)
+        actual_finish  = _parse_csv_date(get(row, 'actual_finish'), date_fmt)
+        duration_days  = _parse_csv_duration(get(row, 'duration'))
+        wbs = get(row, 'wbs')
+        is_milestone = _parse_csv_bool(get(row, 'milestone'))
+
+        status = (get(row, 'status') or '').upper()
+        if status not in ('NOTSTARTED', 'INPROGRESS', 'DONE'):
+            pct_raw = get(row, 'pct_complete')
+            try:
+                pct = float(str(pct_raw).rstrip('%')) if pct_raw else 0
+            except ValueError:
+                pct = 0
+            status = 'DONE' if pct >= 100 else ('INPROGRESS' if pct > 0 else 'NOTSTARTED')
+
+        parent_db_id = None
+        level = 1
+        if has_level:
+            try:
+                level = int(get(row, 'level') or 1)
+            except ValueError:
+                level = 1
+            while level_stack and level_stack[-1][0] >= level:
+                level_stack.pop()
+            parent_db_id = level_stack[-1][1] if level_stack else None
+
+        db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
+                             planned_start, planned_finish, actual_start, actual_finish,
+                             duration_days, None, parent_db_id, wbs, sort_order)
+        sort_order += 1
+        if has_level and db_id:
+            level_stack.append((level, db_id))
+
+    recompute_and_persist_cpm(conn, model_id)
+    conn.commit()
+    return {'schedules': 1, 'tasks': sort_order}
+
+
 def _would_create_cycle(conn, model_id: str, predecessor_task_id: str, successor_task_id: str) -> bool:
     """BFS forward from successor_task_id over existing dependency edges; if
     predecessor_task_id is reachable, adding predecessor->successor would

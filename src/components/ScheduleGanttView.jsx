@@ -925,14 +925,14 @@ export function ScheduleGanttView({ normalizerModelId, normalizerUrl, onFilterEl
                 <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading || loading}
-                    aria-label={uploading ? 'Importing schedule…' : 'Import an IFC file (IfcWorkSchedule) or MS Project XML (MSPDI) export'}
+                    aria-label={uploading ? 'Importing schedule…' : 'Import an IFC file (IfcWorkSchedule), MS Project XML (MSPDI) export, or CSV export'}
                     aria-busy={uploading}
                     className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/40 text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)] border border-[var(--speckle-outline-3)] transition-colors disabled:opacity-50 shrink-0"
                 >
                     <Upload className="w-3 h-3" />
                     {uploading ? 'Importing…' : 'Import Schedule'}
                 </button>
-                <input ref={fileInputRef} type="file" accept=".ifc,.xml" className="hidden" onChange={handleUpload} />
+                <input ref={fileInputRef} type="file" accept=".ifc,.xml,.csv" className="hidden" onChange={handleUpload} />
                 {hasTasks && (
                     <button
                         onClick={handleExportIfc}
@@ -1218,7 +1218,7 @@ export function ScheduleGanttView({ normalizerModelId, normalizerUrl, onFilterEl
                     <p className="text-xs text-[var(--speckle-foreground-3)] max-w-xs">
                         Click <span className="text-amber-400">Generate Schedule</span> to auto-build one from this
                         model's storeys, or upload an IFC file containing an <code className="text-[var(--speckle-foreground-2)]">IfcWorkSchedule</code>,
-                        or an MS Project XML (MSPDI) export, to enable 4D construction simulation.
+                        an MS Project XML (MSPDI) export, or a CSV export, to enable 4D construction simulation.
                     </p>
                 </div>
             ) : (
