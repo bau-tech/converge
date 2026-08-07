@@ -51,6 +51,10 @@ const COLUMN_COLOR = {
 const GATE_ENDPOINT = { Shared: 'review', Published: 'approve', Archived: 'verify' }
 const GATE_LABEL = { Shared: 'Review & Share', Published: 'Approve & Publish', Archived: 'Verify & Archive' }
 const GATE_ROLES = { Shared: ['author', 'reviewer', 'approver'], Published: ['approver'], Archived: ['approver'] }
+// The bim_documents flag that GATE_ENDPOINT[status] sets — lets bulk-move
+// (below) tell whether a doc still needs that gate before it can land on
+// `status`, without a round-trip to the server first.
+const READY_FLAG = { Shared: 'reviewed', Published: 'approved', Archived: 'verified' }
 
 function formatSize(bytes) {
     if (!bytes && bytes !== 0) return ''
@@ -83,18 +87,18 @@ function Column({ id, title, count, children, emptyLabel = 'No documents', viewM
     )
 }
 
-function CardContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, onGate, pendingGate, canGate, grabbing }) {
+function CardContent({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, pendingGate, canGate, grabbing, versionLabel, selected, onCardClick }) {
     return (
-        <div className={`glass-card p-0 overflow-hidden group ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'}`}>
+        <div className={`glass-card p-0 overflow-hidden group ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'} ${selected ? 'ring-2 ring-amber-400' : ''}`}>
             <div
                 className="aspect-video bg-[var(--speckle-outline-3)] flex items-center justify-center overflow-hidden"
-                onClick={() => onOpen?.(doc)}
+                onClick={e => onCardClick?.(doc, e)}
             >
                 {thumbUrl
                     ? <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
                     : <FileText className="w-6 h-6 text-[var(--speckle-foreground-disabled)]" />}
             </div>
-            <div className="p-2.5" onClick={() => onOpen?.(doc)}>
+            <div className="p-2.5" onClick={e => onCardClick?.(doc, e)}>
                 <div className="flex items-start justify-between gap-2">
                     <p className="text-xs font-medium text-[var(--speckle-foreground)] line-clamp-2 break-all">{doc.filename}</p>
                     <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
@@ -129,6 +133,11 @@ function CardContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, 
                     {doc.approved
                         ? <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-300 flex items-center gap-0.5"><ShieldCheck className="w-2.5 h-2.5" /> Approved</span>
                         : <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]">Not approved</span>}
+                    {versionLabel && (
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] flex items-center gap-0.5" title={versionLabel.tooltip}>
+                            <History className="w-2.5 h-2.5" /> {versionLabel.short}
+                        </span>
+                    )}
                 </div>
                 {pendingGate && canGate && (
                     <button
@@ -144,18 +153,18 @@ function CardContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, 
     )
 }
 
-function ListRowContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, onGate, pendingGate, canGate, grabbing }) {
+function ListRowContent({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, pendingGate, canGate, grabbing, versionLabel, selected, onCardClick }) {
     return (
-        <div className={`glass-card p-2 flex items-center gap-3 group ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'}`}>
+        <div className={`glass-card p-2 flex items-center gap-3 group ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'} ${selected ? 'ring-2 ring-amber-400' : ''}`}>
             <div
                 className="w-9 h-9 shrink-0 rounded bg-[var(--speckle-outline-3)] flex items-center justify-center overflow-hidden"
-                onClick={() => onOpen?.(doc)}
+                onClick={e => onCardClick?.(doc, e)}
             >
                 {thumbUrl
                     ? <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
                     : <FileText className="w-4 h-4 text-[var(--speckle-foreground-disabled)]" />}
             </div>
-            <div className="flex-1 min-w-0 flex items-center gap-2" onClick={() => onOpen?.(doc)}>
+            <div className="flex-1 min-w-0 flex items-center gap-2" onClick={e => onCardClick?.(doc, e)}>
                 <p className="text-xs font-medium text-[var(--speckle-foreground)] truncate">{doc.filename}</p>
                 <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] shrink-0">{formatSize(doc.size_bytes)}</span>
                 {doc.revision > 1 && (
@@ -164,6 +173,11 @@ function ListRowContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelet
                 {doc.approved
                     ? <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-300 flex items-center gap-0.5 shrink-0"><ShieldCheck className="w-2.5 h-2.5" /> Approved</span>
                     : <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] shrink-0">Not approved</span>}
+                {versionLabel && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] flex items-center gap-0.5 shrink-0" title={versionLabel.tooltip}>
+                        <History className="w-2.5 h-2.5" /> {versionLabel.short}
+                    </span>
+                )}
             </div>
             {pendingGate && canGate && (
                 <button
@@ -201,14 +215,15 @@ function ListRowContent({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelet
     )
 }
 
-function Card({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, onGate, pendingGate, canGate, viewMode = 'grid' }) {
+function Card({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, pendingGate, canGate, viewMode = 'grid', versionLabel, selected, onCardClick }) {
     const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: doc.doc_id })
     const Content = viewMode === 'list' ? ListRowContent : CardContent
     return (
         <div ref={setNodeRef} {...listeners} {...attributes} className={isDragging ? 'opacity-30' : ''}>
             <Content
-                doc={doc} thumbUrl={thumbUrl} downloadUrl={downloadUrl} onOpen={onOpen}
+                doc={doc} thumbUrl={thumbUrl} downloadUrl={downloadUrl}
                 onDelete={onDelete} canDelete={canDelete} onGate={onGate} pendingGate={pendingGate} canGate={canGate}
+                versionLabel={versionLabel} selected={selected} onCardClick={onCardClick}
             />
         </div>
     )
@@ -217,14 +232,17 @@ function Card({ doc, thumbUrl, downloadUrl, onOpen, onDelete, canDelete, onGate,
 // Full-screen document workflow overlay — mirrors BcfKanbanBoard.jsx's
 // layout (fixed inset-0 + 360px detail drawer), not IdsCheckPanel's
 // right-docked drawer, since this is a multi-column board like the BCF one.
-export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged }) {
+export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged, activeModelId }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
     const { user } = useAuth()
     const [activeTab, setActiveTab] = useState('documents') // 'documents' | 'drawings' | 'models'
     const [viewMode, setViewMode] = useState('grid') // 'grid' | 'list' — applies to documents & drawings tabs
     const [documents, setDocuments] = useState([])
-    const [drawingModels, setDrawingModels] = useState([])
-    const [selectedDrawingModel, setSelectedDrawingModel] = useState('')
+    // model_id -> {branch_name, commit_id, ingested_at} for every ingested
+    // model in this project — lets the Drawings tab group by branch ("model")
+    // while still knowing which specific version each drawing belongs to.
+    // Not a picker (removed — see git history): read-only lookup only.
+    const [modelsById, setModelsById] = useState({})
     const [thumbs, setThumbs] = useState({})
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
@@ -255,6 +273,22 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     const [renamingFolder, setRenamingFolder] = useState(false)
     const [deleteFolderTarget, setDeleteFolderTarget] = useState(null)
     const [deletingFolder, setDeletingFolder] = useState(false)
+    // Bulk move: shift-click extends a range within a column, ctrl/cmd-click
+    // toggles one doc, both without opening the detail drawer (see
+    // handleCardClick below). Dragging any selected card then moves the
+    // whole selection together (handleDragEnd), and the toolbar bar (below
+    // the folder breadcrumb) offers the same as explicit buttons for
+    // discoverability. Either path funnels through bulkMoveTo, which calls
+    // moveDocument one doc at a time — reusing the existing per-doc
+    // gate/role/Nextcloud-move logic in routers/documents.py rather than a
+    // dedicated bulk backend route, and sequentially (not Promise.all) so a
+    // large selection doesn't hammer Nextcloud with a burst of concurrent
+    // MOVEs.
+    const [selectedIds, setSelectedIds] = useState(() => new Set())
+    const [bulkMoving, setBulkMoving] = useState(false)
+    const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+    const [bulkDeleting, setBulkDeleting] = useState(false)
+    const selectionAnchorRef = useRef(null)
     const fileInputRef = useRef(null)
     const reviseInputRef = useRef(null)
     const modelsListRef = useRef(null)
@@ -270,11 +304,36 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     // Drawings and generic documents share one Kanban render (below) and one
     // underlying `documents` fetch — split here by doc_type rather than a
     // separate endpoint/state, since bim_documents already carries it.
+    // Drawings are additionally scoped to whichever *model* (Speckle branch)
+    // is active in the main viewer — not the exact version. A drawing is
+    // tagged with the specific version it was uploaded against (its
+    // model_id), so re-ingesting a newer version of the same branch doesn't
+    // make older drawings disappear; describeDrawingVersion (below) flags
+    // them instead so they stay visible but visibly distinguishable.
     const wantDrawings = activeTab === 'drawings'
+    const activeBranch = activeModelId ? modelsById[activeModelId]?.branch_name : undefined
+    // Compares ingested_at, not just "is it the active model_id" — the
+    // active version isn't guaranteed to be the newest one ingested (e.g.
+    // the viewer can be pinned to an older commit), so the badge must say
+    // which direction the difference actually goes rather than assuming.
+    const describeDrawingVersion = d => {
+        if (!d.model_id || d.model_id === activeModelId) return null
+        const docModel = modelsById[d.model_id]
+        const activeModel = activeModelId ? modelsById[activeModelId] : null
+        const docDate = docModel?.ingested_at ? new Date(docModel.ingested_at) : null
+        const activeDate = activeModel?.ingested_at ? new Date(activeModel.ingested_at) : null
+        let short = 'different version'
+        if (docDate && activeDate) short = docDate < activeDate ? 'older version' : 'newer version'
+        const tooltip = docDate
+            ? `From a ${short} of this model — ingested ${docDate.toLocaleDateString()}`
+            : `From a different version of this model`
+        return { short, tooltip }
+    }
     const columns = COLUMNS.reduce((acc, status) => {
         acc[status] = documents.filter(d =>
             d.status === status &&
             ((d.doc_type || 'document') === 'drawing') === wantDrawings &&
+            (!wantDrawings || !activeBranch || modelsById[d.model_id]?.branch_name === activeBranch) &&
             docFolderPath(d) === folderPath
         )
         return acc
@@ -300,6 +359,9 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     // A folderPath from a previous project would be meaningless (or worse,
     // coincidentally valid but wrong) after switching streams.
     useEffect(() => { setFolderPath('') }, [streamId])
+    // Cards leave view on a tab/folder switch, so any selection made in the
+    // previous view no longer corresponds to what's visible — drop it.
+    useEffect(() => { setSelectedIds(new Set()) }, [activeTab, folderPath])
 
     const loadSubfolders = useCallback(async () => {
         if (!streamId || !base) return
@@ -322,19 +384,14 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
             .catch(() => setMyRoles([]))
     }, [streamId, base])
 
-    // For the drawings-upload model picker — a drawing's model_id is a
-    // deliberate choice, not the "latest ingested" guess generic documents
-    // get server-side, so the UI needs the actual list to choose from.
     useEffect(() => {
         if (!streamId || !base) return
         fetch(`${base}/models/by-stream/${streamId}`)
             .then(res => res.ok ? res.json() : [])
-            .then(data => {
-                setDrawingModels(data)
-                setSelectedDrawingModel(prev => prev || (data[0]?.model_id ?? ''))
-            })
-            .catch(() => setDrawingModels([]))
+            .then(data => setModelsById(Object.fromEntries(data.map(m => [m.model_id, m]))))
+            .catch(() => setModelsById({}))
     }, [streamId, base])
+
 
     // Lazy-load each document's thumbnail once, tolerating 404 (no preview
     // available for CAD formats) by just leaving the icon fallback in place.
@@ -390,7 +447,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     const uploadFiles = async (files, opts) => {
         if (!files.length || !streamId) return
         if (opts?.docType === 'drawing' && !opts.modelId) {
-            setError('Pick a model before uploading a drawing')
+            setError('No model loaded in the viewer — load a model before uploading a drawing')
             return
         }
         setUploading(true)
@@ -407,7 +464,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     }
 
     const uploadOptsForActiveTab = () =>
-        activeTab === 'drawings' ? { docType: 'drawing', modelId: selectedDrawingModel } : undefined
+        activeTab === 'drawings' ? { docType: 'drawing', modelId: activeModelId } : undefined
 
     const handleUpload = (e) => {
         const files = Array.from(e.target.files || [])
@@ -532,6 +589,107 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         return { needsGate: false }
     }
 
+    const toggleSelected = (doc) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev)
+            if (next.has(doc.doc_id)) next.delete(doc.doc_id)
+            else next.add(doc.doc_id)
+            return next
+        })
+    }
+
+    // File-explorer-style multi-select on the cards themselves, no separate
+    // "select mode" toggle needed: shift-click extends a range from the last
+    // clicked card (within the same column, since that's the only order the
+    // board actually shows), ctrl/cmd-click toggles one card in/out. A plain
+    // click keeps its existing job of opening the detail drawer, and clears
+    // any selection first since opening one document implies "just this one".
+    const handleCardClick = (doc, event) => {
+        if (event.shiftKey && selectionAnchorRef.current) {
+            const colDocs = columns[doc.status] || []
+            const anchorIdx = colDocs.findIndex(d => d.doc_id === selectionAnchorRef.current)
+            const targetIdx = colDocs.findIndex(d => d.doc_id === doc.doc_id)
+            if (anchorIdx !== -1 && targetIdx !== -1) {
+                const [lo, hi] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx]
+                const rangeIds = colDocs.slice(lo, hi + 1).map(d => d.doc_id)
+                setSelectedIds(prev => new Set([...prev, ...rangeIds]))
+                return
+            }
+        }
+        if (event.metaKey || event.ctrlKey) {
+            selectionAnchorRef.current = doc.doc_id
+            toggleSelected(doc)
+            return
+        }
+        selectionAnchorRef.current = doc.doc_id
+        setSelectedIds(new Set())
+        openDoc(doc)
+    }
+
+    // Moves every id in `ids` (defaults to the current selection) to
+    // `targetStatus`, one request at a time. For each doc that's exactly one
+    // column behind the target and still missing the flag that column's
+    // gate sets (READY_FLAG), this runs that gate first — same "Review &
+    // Share"-style action the single-card button offers, just applied
+    // across the whole batch instead of requiring a click per document.
+    // Skipped when the user lacks the gating role, or when the doc is more
+    // than one step behind (e.g. WIP straight to Published): those still go
+    // through moveDocument and, if the server rejects them, end up in
+    // `gated` below same as before. Docs that hit the 409 gate or fail
+    // outright stay selected afterward so the user can see what still needs
+    // attention — everything else is dropped from the selection.
+    const bulkMoveTo = async (targetStatus, idsOverride) => {
+        const candidateIds = idsOverride ?? Array.from(selectedIds)
+        const ids = candidateIds.filter(id => documents.find(d => d.doc_id === id)?.status !== targetStatus)
+        if (ids.length === 0 || bulkMoving) return
+        setBulkMoving(true)
+        setError(null)
+        const gated = []
+        const failed = []
+        for (const id of ids) {
+            const doc = documents.find(d => d.doc_id === id)
+            try {
+                const nextStatus = COLUMNS[COLUMNS.indexOf(doc.status) + 1]
+                if (nextStatus === targetStatus && !doc[READY_FLAG[targetStatus]] && GATE_CAN[targetStatus]) {
+                    const endpoint = GATE_ENDPOINT[targetStatus]
+                    const res = await fetch(`${base}/projects/${streamId}/documents/${id}/${endpoint}`, { method: 'POST' })
+                    if (res.ok) {
+                        const gatedDoc = await res.json()
+                        setDocuments(prev => prev.map(d => d.doc_id === id ? gatedDoc : d))
+                    }
+                }
+                const { needsGate } = await moveDocument(id, targetStatus)
+                if (needsGate) gated.push(id)
+            } catch {
+                failed.push(id)
+            }
+        }
+        setBulkMoving(false)
+        setSelectedIds(new Set([...gated, ...failed]))
+        const movedCount = ids.length - gated.length - failed.length
+        if (gated.length || failed.length) {
+            const parts = []
+            if (movedCount) parts.push(`${movedCount} moved to ${targetStatus}`)
+            if (gated.length) parts.push(`${gated.length} need review/approval first`)
+            if (failed.length) parts.push(`${failed.length} failed`)
+            setError(parts.join(' — '))
+        }
+    }
+
+    // Label reflects what bulkMoveTo will actually do for the current
+    // selection — if at least one selected doc will get auto-gated on the
+    // way, say so (mirrors GATE_LABEL's verb) rather than silently doing
+    // more than the button says.
+    const bulkButtonLabel = (status) => {
+        const willAutoGate = Array.from(selectedIds).some(id => {
+            const doc = documents.find(d => d.doc_id === id)
+            if (!doc) return false
+            const nextStatus = COLUMNS[COLUMNS.indexOf(doc.status) + 1]
+            return nextStatus === status && !doc[READY_FLAG[status]] && GATE_CAN[status]
+        })
+        return willAutoGate ? `${GATE_LABEL[status].split(' & ')[0]} & Move to ${status}` : `Move to ${status}`
+    }
+
     // Clears the gate for the document's *current* status (review while in
     // WIP, approve while in Shared, verify while in Published) without also
     // moving it — used by the detail drawer so a document can be gated
@@ -597,8 +755,17 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         const { active, over } = event
         if (!over) return
         const doc = documents.find(d => d.doc_id === active.id)
+        if (!doc) return
         const targetStatus = over.id
-        if (!doc || doc.status === targetStatus) return
+        // Dragging a card that's part of a multi-selection moves the whole
+        // selection together, via the same bulkMoveTo the toolbar buttons
+        // use (including its auto-gate step) — dragging a card outside the
+        // current selection is a normal single-doc move, same as before.
+        if (selectedIds.has(doc.doc_id) && selectedIds.size > 1) {
+            await bulkMoveTo(targetStatus, Array.from(selectedIds))
+            return
+        }
+        if (doc.status === targetStatus) return
         try {
             const { needsGate } = await moveDocument(doc.doc_id, targetStatus)
             if (needsGate) setPendingGate({ docId: doc.doc_id, targetStatus })
@@ -631,6 +798,39 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
             setDeleting(false)
             setConfirmDeleteDoc(null)
         }
+    }
+
+    // Deletes every selected document, one request at a time (same
+    // sequential-not-Promise.all reasoning as bulkMoveTo above). Docs that
+    // fail to delete stay selected afterward instead of being silently
+    // dropped, so the failure is visible and retryable.
+    const bulkDeleteSelected = async () => {
+        const ids = Array.from(selectedIds)
+        if (ids.length === 0 || bulkDeleting) return
+        const anyLinked = ids.some(id => documents.find(d => d.doc_id === id)?.linked_element)
+        setBulkDeleting(true)
+        setError(null)
+        const failed = []
+        for (const id of ids) {
+            try {
+                const res = await fetch(`${base}/projects/${streamId}/documents/${id}`, { method: 'DELETE' })
+                if (!res.ok) throw new Error()
+                setDocuments(prev => prev.filter(d => d.doc_id !== id))
+                setThumbs(prev => {
+                    const { [id]: removedUrl, ...rest } = prev
+                    if (removedUrl) URL.revokeObjectURL(removedUrl)
+                    return rest
+                })
+                if (selectedDoc?.doc_id === id) setSelectedDoc(null)
+            } catch {
+                failed.push(id)
+            }
+        }
+        setBulkDeleting(false)
+        setConfirmBulkDelete(false)
+        setSelectedIds(new Set(failed))
+        if (failed.length) setError(`${failed.length} of ${ids.length} failed to delete`)
+        if (anyLinked) onDocumentsChanged?.()
     }
 
     const openDoc = async (doc) => {
@@ -686,7 +886,11 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 <div className="flex items-center gap-2">
                     <FileText className="w-5 h-5 text-[var(--speckle-foreground)]" />
                     <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">Documents</h2>
-                    {user && <span className="text-[10px] text-[var(--speckle-foreground-3)] ml-1">as {user.name}{user.org_name && ` (${user.org_name})`}{!canAct && ' (read-only)'}</span>}
+                    {user && (
+                        <span className="text-xs text-[var(--speckle-foreground-2)] bg-[var(--speckle-outline-3)]/50 px-2 py-1 rounded-lg ml-1">
+                            as {user.name}{user.org_name && ` (${user.org_name})`}{!canAct && ' (read-only)'}
+                        </span>
+                    )}
                     {error && <span className="text-[11px] text-red-400 ml-2">{error}</span>}
                 </div>
                 <div className="flex items-center gap-2">
@@ -710,23 +914,11 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                     )}
                     {(activeTab === 'documents' || activeTab === 'drawings') && canAct && (
                         <>
-                            {activeTab === 'drawings' && (
-                                <select
-                                    value={selectedDrawingModel}
-                                    onChange={(e) => setSelectedDrawingModel(e.target.value)}
-                                    className="text-[11px] px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground)] max-w-[160px]"
-                                >
-                                    {drawingModels.length === 0 && <option value="">No models ingested</option>}
-                                    {drawingModels.map(m => (
-                                        <option key={m.model_id} value={m.model_id}>{m.branch_name || m.commit_id}</option>
-                                    ))}
-                                </select>
-                            )}
                             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUpload} />
                             <button
                                 onClick={() => fileInputRef.current?.click()}
-                                disabled={uploading || (activeTab === 'drawings' && !selectedDrawingModel)}
-                                title={activeTab === 'drawings' && !selectedDrawingModel ? 'Pick a model first' : undefined}
+                                disabled={uploading || (activeTab === 'drawings' && !activeModelId)}
+                                title={activeTab === 'drawings' && !activeModelId ? 'No model loaded in the viewer' : undefined}
                                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
                             >
                                 <Upload className="w-3.5 h-3.5" /> {uploading ? 'Uploading…' : 'Upload'}
@@ -816,6 +1008,39 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 </div>
             )}
 
+            {(activeTab === 'documents' || activeTab === 'drawings') && selectedIds.size > 0 && (
+                <div className="flex items-center gap-2 flex-wrap px-5 pt-2 shrink-0">
+                    <span className="text-[11px] text-[var(--speckle-foreground-3)]">
+                        {selectedIds.size} selected — shift-click to extend, ctrl/cmd-click to toggle, or drag any selected card
+                    </span>
+                    {COLUMNS.filter(status => status !== 'WIP').map(status => (
+                        <button
+                            key={status}
+                            onClick={() => bulkMoveTo(status)}
+                            disabled={bulkMoving}
+                            className={`text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-50 hover:opacity-80 ${COLUMN_COLOR[status].badge}`}
+                        >
+                            {bulkButtonLabel(status)}
+                        </button>
+                    ))}
+                    {canAct && (
+                        <button
+                            onClick={() => setConfirmBulkDelete(true)}
+                            disabled={bulkMoving}
+                            className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+                        >
+                            <Trash2 className="w-3 h-3" /> Delete
+                        </button>
+                    )}
+                    <button
+                        onClick={() => setSelectedIds(new Set())}
+                        className="text-[11px] px-2 py-1 rounded-lg text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]"
+                    >
+                        Clear
+                    </button>
+                </div>
+            )}
+
             {activeTab === 'models' ? (
                 <SpeckleModelsList
                     ref={modelsListRef}
@@ -865,20 +1090,22 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDoc(null)}>
                     <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-4 p-5">
                         {COLUMNS.map(status => (
-                            <Column key={status} id={status} title={status} count={columns[status].length} emptyLabel={wantDrawings ? 'No drawings' : 'No documents'} viewMode={viewMode}>
+                            <Column key={status} id={status} title={status} count={columns[status].length} emptyLabel={wantDrawings ? 'No drawings for this model' : 'No documents'} viewMode={viewMode}>
                                 {columns[status].map(d => (
                                     <Card
                                         key={d.doc_id}
                                         doc={d}
                                         thumbUrl={thumbs[d.doc_id]}
                                         downloadUrl={`${base}/projects/${streamId}/documents/${d.doc_id}/download`}
-                                        onOpen={openDoc}
                                         onDelete={setConfirmDeleteDoc}
                                         canDelete={canAct}
                                         onGate={(doc) => gateAndMove(doc, pendingGate.targetStatus)}
                                         pendingGate={pendingGate?.docId === d.doc_id ? GATE_LABEL[pendingGate.targetStatus] : null}
                                         canGate={pendingGate?.docId === d.doc_id ? GATE_CAN[pendingGate.targetStatus] : false}
                                         viewMode={viewMode}
+                                        versionLabel={wantDrawings ? describeDrawingVersion(d) : null}
+                                        selected={selectedIds.has(d.doc_id)}
+                                        onCardClick={handleCardClick}
                                     />
                                 ))}
                             </Column>
@@ -886,10 +1113,15 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                     </div>
                     <DragOverlay dropAnimation={null}>
                         {activeDoc && (
-                            <div className={viewMode === 'list' ? 'w-[300px]' : 'w-[220px]'}>
+                            <div className={`relative ${viewMode === 'list' ? 'w-[300px]' : 'w-[220px]'}`}>
                                 {viewMode === 'list'
                                     ? <ListRowContent doc={activeDoc} thumbUrl={thumbs[activeDoc.doc_id]} grabbing />
                                     : <CardContent doc={activeDoc} thumbUrl={thumbs[activeDoc.doc_id]} grabbing />}
+                                {selectedIds.has(activeDoc.doc_id) && selectedIds.size > 1 && (
+                                    <div className="absolute -top-2 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-amber-400 text-black text-[10px] font-bold flex items-center justify-center">
+                                        {selectedIds.size}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </DragOverlay>
@@ -1099,6 +1331,41 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                     className="flex-1 text-xs px-2 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
                                 >
                                     {deleting ? 'Deleting…' : 'Delete'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {confirmBulkDelete && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[215000] flex items-center justify-center bg-black/50"
+                        onClick={() => !bulkDeleting && setConfirmBulkDelete(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            className="glass-card w-[320px] p-4 space-y-3"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <p className="text-sm font-medium text-[var(--speckle-foreground)]">Delete {selectedIds.size} document{selectedIds.size === 1 ? '' : 's'}?</p>
+                            <p className="text-[11px] text-[var(--speckle-foreground-disabled)]">This removes them from Nextcloud. This cannot be undone.</p>
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    onClick={() => setConfirmBulkDelete(false)}
+                                    disabled={bulkDeleting}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={bulkDeleteSelected}
+                                    disabled={bulkDeleting}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-50"
+                                >
+                                    {bulkDeleting ? 'Deleting…' : 'Delete'}
                                 </button>
                             </div>
                         </motion.div>
