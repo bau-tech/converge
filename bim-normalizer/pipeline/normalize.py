@@ -26,7 +26,22 @@ from speckle.fetch import fetch_commit, flatten_elements, detect_source, collect
 
 logger = logging.getLogger(__name__)
 
-_EMBED_BATCH_SIZE = 256
+# 256 reliably OOM-killed the worker process — confirmed by direct RSS
+# measurement (resource.getrusage) in this deployment's own container: a
+# single embed_many() call for a 256-text batch climbed steadily from
+# ~280MB to ~4GB *within that one call*, well past search/embeddings.py's
+# per-batch session recycling (which only bounds growth *between* calls —
+# and even then only in principle, since discarding the Python model
+# object doesn't actually return memory to the OS; a freshly restarted
+# worker process measured the exact same climb again from scratch).
+# Almost certainly self-attention memory scaling with batch size and
+# padded-to-longest-in-batch sequence length (long element-description
+# texts push the padding length up, and attention cost is quadratic in
+# it) rather than a fixed per-text cost. 128 measured flat and fast
+# (~500MB total, no growth) against this same deployment's data — halving
+# batch size roughly quarters (or better, given the quadratic term) peak
+# memory, with proportionally more but individually cheaper DB round-trips.
+_EMBED_BATCH_SIZE = 128
 
 
 def _build_missing_embeddings(conn, model_id: str) -> tuple[int, int]:

@@ -104,7 +104,15 @@ services:
     image: bim-normalizer:latest
     pull_policy: build
     container_name: bim-normalizer
-    mem_limit: 3g
+    # 3g OOM-killed a pool worker mid-embedding-batch (search/embeddings.py's
+    # per-batch ONNX session recycling bounds *that* growth, but a
+    # long-lived worker's peak RSS across dissimilar prior tasks — e.g. a
+    # big ingest, glibc not always returning freed memory to the OS — isn't
+    # bounded by it) — confirmed via dmesg's oom-kill entry naming the
+    # python3.11 worker pid at ~3.05GB RSS while resuming an interrupted
+    # embedding job. 4g gives headroom; see process_pool.py's worker
+    # comment for the same "each worker can independently balloon" caveat.
+    mem_limit: 4g
     ports:
       - "8002:8002"
     environment:
