@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from bcf.auth import get_current_bcf_user
 from bcf.db import fetch_all, fetch_one, execute, execute_returning
 from bcf.schemas import TopicCreate, TopicUpdate
 from bcf.versions import is_bcf_v3
+from job_registry import fire_and_forget_sync
 
 router = APIRouter(tags=["bcf-topics"])
 
@@ -51,8 +53,13 @@ def get_topic(project_id: str, topic_guid: str, request: Request):
 
 
 @router.post("/projects/{project_id}/topics", status_code=201)
-def create_topic(project_id: str, body: TopicCreate, request: Request):
+def create_topic(project_id: str, body: TopicCreate, request: Request,
+                 user: dict = Depends(get_current_bcf_user)):
     project = _require_project(project_id)
+    # Real BCF clients don't send creation_author (it's server-assigned per
+    # spec) - fall back to the caller's authenticated identity. Internal
+    # callers that already pass it (bcfxml import, chat/agent, MCP) keep it.
+    creation_author = body.creation_author or user.get("email") or user.get("name") or "unknown"
     row = execute_returning(
         """
         -- pg_advisory_xact_lock serializes index assignment per model_id (released
@@ -80,13 +87,16 @@ def create_topic(project_id: str, body: TopicCreate, request: Request):
             body.priority,
             body.stage,
             body.labels,
-            body.creation_author,
+            creation_author,
             body.due_date,
             body.assigned_to,
             body.creation_date,
             project_id,
         ),
     )
+    if body.assigned_to:
+        from notifications.dispatch import notify_bcf_assignment
+        fire_and_forget_sync(notify_bcf_assignment, row, body.assigned_to, creation_author)
     return _with_server_assigned_id(row, request)
 
 
@@ -108,6 +118,10 @@ def update_topic(project_id: str, topic_guid: str, body: TopicUpdate, request: R
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Topic not found")
+    new_assignee = updates.get("assigned_to")
+    if new_assignee and new_assignee != existing.get("assigned_to"):
+        from notifications.dispatch import notify_bcf_assignment
+        fire_and_forget_sync(notify_bcf_assignment, row, new_assignee, body.modified_author)
     return _with_server_assigned_id(row, request)
 
 

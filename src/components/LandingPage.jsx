@@ -14,12 +14,12 @@ const features = [
   },
   {
     title: 'BCF collaboration',
-    description: 'Generate, review and track BCF topics, comments and viewpoints with BIMcollab-compatible API support.',
+    description: 'Generate, review and track BCF topics, comments and viewpoints with your own built-in BCF 2.1/3.0 server — compatible with BIMcollab ZOOM.',
     icon: CheckCircle2,
   },
   {
     title: 'Document control',
-    description: 'Nextcloud-backed CDE with a WIP → Shared → Published → Archived workflow and an enforced review/approval gate.',
+    description: 'An ISO 19650-aligned CDE — Nextcloud-backed WIP → Shared → Published → Archived workflow with suitability codes, org-scoped WIP visibility, and an in-app/email notification feed.',
     icon: FileText,
   },
   {

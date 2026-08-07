@@ -7,13 +7,14 @@ import {
     createTopic, updateTopic, deleteTopic,
     listComments, createComment,
     listTopics, listViewpoints, createViewpoint, getSnapshotUrl, blobUrlToBase64,
-    exportBcfzip, importBcfzip,
+    exportBcfzip, importBcfzip, listUsers,
 } from '../utils/bcfClient'
 import { archiveLinkedSpeckleComment } from '../utils/bcfSync'
 import { PRIORITIES, PRIORITY_COLOR } from '../utils/bcfWorkflow'
 import { useAuth } from '../contexts/AuthContext'
 
 const TOPIC_TYPES = ['Issue', 'Clash', 'Request', 'Remark']
+const TOPIC_STATUSES = ['Open', 'In Progress', 'Closed']
 
 const STATUS_COLOR = {
     Open: 'bg-amber-500/20 text-amber-400',
@@ -26,7 +27,7 @@ const STATUS_COLOR = {
 // display over that shared state, with manual create/delete/.bcfzip actions.
 export function BcfTopicPanel({
     projectId, viewerRef, topics = [], fullData = null, streamId = null, onTopicsChange, onRequestSync,
-    serverUrl, serverToken,
+    serverUrl, serverToken, autoOpenTopicGuid = null, onAutoOpenHandled,
 }) {
     const { user } = useAuth()
     const [isOpen, setIsOpen] = useState(false)
@@ -43,6 +44,17 @@ export function BcfTopicPanel({
     const [newDescription, setNewDescription] = useState('')
     const [newType, setNewType] = useState('Issue')
     const [newPriority, setNewPriority] = useState('Normal')
+    const [newStatus, setNewStatus] = useState('Open')
+    const [newAssignedTo, setNewAssignedTo] = useState('')
+    const [newDueDate, setNewDueDate] = useState('')
+
+    // Registered bcf_users, for the "Assigned to" datalist — free text is
+    // still accepted for assignees outside the system (matches openBCF/
+    // BIMcollab, which don't constrain this field either).
+    const [users, setUsers] = useState([])
+    useEffect(() => {
+        listUsers().then(setUsers).catch(() => setUsers([]))
+    }, [])
 
     const importInputRef = useRef(null)
 
@@ -105,6 +117,23 @@ export function BcfTopicPanel({
         }
     }
 
+    // Deep link from a BCF-assignment email (?layout=...&topic=<guid>) — once
+    // the right model has loaded and this guid shows up in the (async,
+    // App.jsx-owned) `topics` list, pop the panel straight to it. No-ops
+    // (harmlessly re-runs on every topics change) until either that happens
+    // or the guid is cleared — e.g. the email pointed at a topic whose model
+    // was never resolved, so `topics` here is scoped to a different project
+    // than the one the link was meant for.
+    useEffect(() => {
+        if (!autoOpenTopicGuid) return
+        const match = topics.find((t) => t.guid === autoOpenTopicGuid)
+        if (!match) return
+        openTopic(match)
+        setIsOpen(true)
+        onAutoOpenHandled?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoOpenTopicGuid, topics])
+
     const startCreating = async () => {
         setSelectedTopic(null)
         setCreating(true)
@@ -112,6 +141,9 @@ export function BcfTopicPanel({
         setNewDescription('')
         setNewType('Issue')
         setNewPriority('Normal')
+        setNewStatus('Open')
+        setNewAssignedTo('')
+        setNewDueDate('')
         setPendingViewpoint(null)
         try {
             const vp = await viewerRef.current?.captureViewpoint()
@@ -130,8 +162,10 @@ export function BcfTopicPanel({
                 description: newDescription.trim() || null,
                 creation_author: authorName,
                 topic_type: newType,
-                topic_status: 'Open',
+                topic_status: newStatus,
                 priority: newPriority,
+                assigned_to: newAssignedTo.trim() || null,
+                due_date: newDueDate ? new Date(newDueDate).toISOString() : null,
             })
             let viewpoint = null
             if (pendingViewpoint) {
@@ -333,6 +367,9 @@ export function BcfTopicPanel({
                                     <Upload className="w-3.5 h-3.5" />
                                 </button>
                                 <input ref={importInputRef} type="file" accept=".bcfzip,.zip" className="hidden" onChange={handleImportFile} />
+                                <datalist id="bcf-assignee-options">
+                                    {users.map((u) => <option key={u.guid} value={u.email} />)}
+                                </datalist>
                                 <button onClick={() => setIsOpen(false)} className="p-1 hover:bg-white/10 rounded-md transition-colors">
                                     <X className="w-3.5 h-3.5 text-zinc-400" />
                                 </button>
@@ -389,9 +426,27 @@ export function BcfTopicPanel({
                                         <select value={newType} onChange={(e) => setNewType(e.target.value)} className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10">
                                             {TOPIC_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                                         </select>
+                                        <select value={newStatus} onChange={(e) => setNewStatus(e.target.value)} className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10">
+                                            {TOPIC_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                                        </select>
                                         <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} className="flex-1 px-2 py-1 text-xs rounded bg-black/20 border border-white/10">
                                             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
                                         </select>
+                                    </div>
+                                    <div className="flex gap-1.5">
+                                        <input
+                                            value={newAssignedTo}
+                                            onChange={(e) => setNewAssignedTo(e.target.value)}
+                                            placeholder="Assigned to"
+                                            list="bcf-assignee-options"
+                                            className="flex-1 min-w-0 px-2 py-1 text-xs rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
+                                        />
+                                        <input
+                                            type="date"
+                                            value={newDueDate}
+                                            onChange={(e) => setNewDueDate(e.target.value)}
+                                            className="px-2 py-1 text-xs rounded bg-black/20 border border-white/10 focus:border-amber-500/50 outline-none"
+                                        />
                                     </div>
                                     <button
                                         onClick={submitNewTopic}
@@ -440,6 +495,16 @@ export function BcfTopicPanel({
                                                 due_date: e.target.value ? new Date(e.target.value).toISOString() : null,
                                             })}
                                             className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300 outline-none"
+                                        />
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <label className="text-[10px] text-zinc-500 shrink-0">Assigned to</label>
+                                        <input
+                                            value={selectedTopic.assigned_to || ''}
+                                            onChange={(e) => updateTopicField(selectedTopic, { assigned_to: e.target.value || null })}
+                                            placeholder="Unassigned"
+                                            list="bcf-assignee-options"
+                                            className="flex-1 text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-zinc-300 outline-none placeholder:text-zinc-500"
                                         />
                                     </div>
                                     {selectedTopic.description && <p className="text-xs text-zinc-400 whitespace-pre-wrap">{selectedTopic.description}</p>}
@@ -515,7 +580,9 @@ export function BcfTopicPanel({
                                                             {t.topic_status}
                                                         </span>
                                                     )}
-                                                    <span className="text-[10px] text-zinc-500">{t.creation_author}</span>
+                                                    <span className="text-[10px] text-zinc-500 truncate">
+                                                        {t.creation_author}{t.assigned_to ? ` → ${t.assigned_to}` : ''}
+                                                    </span>
                                                 </div>
                                             </div>
                                         </button>

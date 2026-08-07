@@ -126,3 +126,15 @@ def get_extensions(project_id: str, request: Request):
     user_key = "users" if is_bcf_v3(request) else "user_id_type"
     extensions[user_key] = _assignable_users()
     return extensions
+
+
+# Not part of the open BCF-API spec (absent from both the 2.1 and 3.0 JSON
+# schemas) - undocumented, presumably BIMcollab-proprietary. Observed BIMcollab
+# ZOOM calling this right after /extensions and /topics, then 404ing and
+# refusing to let the user create an issue ("no assignable team members"),
+# even though /extensions' user_id_type was correctly populated. Stubbed as
+# an empty list so a 404 here can't be why ZOOM blocks issue creation -
+# speculative (undocumented endpoint, exact semantics unconfirmed).
+@router.get("/projects/{project_id}/conflicts")
+def get_conflicts(project_id: str):
+    return []

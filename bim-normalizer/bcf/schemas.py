@@ -1,9 +1,14 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class TopicCreate(BaseModel):
     title: str
-    creation_author: str
+    # Per the BCF-API spec this is server-assigned from the authenticated
+    # identity, not client-supplied — real clients (BIMcollab ZOOM) never
+    # send it. Optional here so create_topic() can fall back to the
+    # Authorization header's identity; internal callers that already know
+    # the author (bcfxml import, chat/agent, MCP) can still pass it explicitly.
+    creation_author: str | None = None
     description: str | None = None
     topic_type: str | None = None
     topic_status: str | None = None
@@ -69,6 +74,25 @@ class ViewpointCreate(BaseModel):
     coloring: list[dict] = []  # [{"ifc_guid": "...", "color": "FF0000"}]
     # Raw PNG bytes, base64-encoded.
     snapshot_base64: str | None = None
+
+    # GET .../viewpoints enriches each ifc_guid into {"ifc_guid",
+    # "speckle_id"} (see bcf/viewpoints.py's _components_for) so a consumer
+    # has a ready-to-use speckle_id — but that means naively resubmitting a
+    # previously-fetched viewpoint's selection/visibility_exceptions (e.g.
+    # BcfTopicPanel/BcfKanbanBoard's "continue annotating this saved
+    # viewpoint" re-save) sends that same enriched shape back here. That used
+    # to 422 outright — this field only ever accepted bare strings, and every
+    # manually-created topic's viewpoint happens to have an empty selection
+    # (nothing was 3D-selected when it was captured), so this never surfaced
+    # until a clash-check-generated topic — whose viewpoint always has a real
+    # 2-element selection (the clashing pair) — got re-annotated. Unwrap
+    # objects back to their ifc_guid so both shapes work.
+    @field_validator("selection", "visibility_exceptions", mode="before")
+    @classmethod
+    def _unwrap_ifc_guid(cls, v):
+        if not v:
+            return v
+        return [item.get("ifc_guid") if isinstance(item, dict) else item for item in v]
 
 
 class ExtensionValueCreate(BaseModel):

@@ -355,6 +355,8 @@ async def upload_document(
         record_event(conn, doc["doc_id"], "created", to_value="WIP", actor=user.name, actor_guid=user.guid)
     finally:
         release_conn(conn)
+    from notifications.dispatch import notify_document_event
+    fire_and_forget_sync(notify_document_event, stream_id, doc["doc_id"], "created", None, user.guid)
     return doc
 
 

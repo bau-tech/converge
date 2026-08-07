@@ -6,6 +6,8 @@ cleanly to in-app-only notifications rather than failing.
 """
 import logging
 import smtplib
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from config import settings
@@ -13,11 +15,23 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-def send_email(to_email: str, subject: str, body: str) -> None:
+# attachments: [(filename, raw_bytes), ...] — currently just BCF viewpoint
+# snapshots (see notifications/dispatch.py's notify_bcf_assignment), always
+# PNG in practice (bcf/viewpoints.py hardcodes snapshot_format="png"), but
+# MIMEImage sniffs the actual subtype from the bytes rather than assuming.
+def send_email(to_email: str, subject: str, body: str, attachments: list[tuple[str, bytes]] | None = None) -> None:
     if not settings.SMTP_HOST:
         logger.debug("SMTP_HOST not configured, skipping email to %s", to_email)
         return
-    msg = MIMEText(body)
+    if attachments:
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(body))
+        for filename, data in attachments:
+            img = MIMEImage(data, name=filename)
+            img.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(img)
+    else:
+        msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = settings.SMTP_FROM or settings.SMTP_USER or "converge@localhost"
     msg["To"] = to_email

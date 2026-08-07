@@ -54,6 +54,20 @@ SPECKLE_SERVER_TOKENS: dict[str, str] = {
 # left empty by default since it depends on the deployer's own DNS/proxy setup.
 PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
+# Publicly reachable base URL for the *frontend* (site root, e.g.
+# "https://dashboard.example.com") — used to build clickable deep links in
+# notification emails (see notifications/dispatch.py's notify_bcf_assignment).
+# Deliberately separate from PUBLIC_BASE_URL above, which points at
+# bim-normalizer's own API path (nginx.conf.template proxies "/normalizer" to
+# it, while "/" serves the frontend build) — the two are the same host but
+# different paths on this deployment's nginx layout, and needn't be on
+# others. Falls back to stripping a trailing "/normalizer" off
+# PUBLIC_BASE_URL so existing deployments get a working link with zero new
+# config; set PUBLIC_APP_URL explicitly if that heuristic doesn't apply.
+PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "").rstrip("/") or (
+    PUBLIC_BASE_URL[: -len("/normalizer")] if PUBLIC_BASE_URL.endswith("/normalizer") else PUBLIC_BASE_URL
+)
+
 # How often the background task re-scans watched servers as a dormant-project
 # safety net for missed webhook deliveries (new-stream registration, missed
 # commits, missed deletions) — see speckle/webhooks.py's scan_server(). A

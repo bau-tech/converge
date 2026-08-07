@@ -443,6 +443,13 @@ CREATE TABLE IF NOT EXISTS bim_notifications (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_bim_notifications_unread ON bim_notifications(user_guid) WHERE read_at IS NULL;
+-- topic_guid is a soft reference to bcf_topics.guid, same cross-process/
+-- cross-schema-init-order reasoning as user_guid above (bcf_topics is
+-- created by bcf_server's own bcf/db_schema.py, a separate process that may
+-- not have run yet when this schema initializes) — used by BCF issue
+-- "assigned to" notifications (see notifications/dispatch.py's
+-- notify_bcf_assignment, fired from bcf/topics.py).
+ALTER TABLE bim_notifications ADD COLUMN IF NOT EXISTS topic_guid UUID;
 """
 
 

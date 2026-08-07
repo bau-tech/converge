@@ -4,7 +4,7 @@ import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, use
 import { X, Trash2, ImageOff, ChevronLeft, Send, ExternalLink, Camera, Pencil } from 'lucide-react'
 import {
     updateTopic, deleteTopic, listComments, createComment,
-    listViewpoints, createViewpoint, getSnapshotUrl, blobUrlToBase64,
+    listViewpoints, createViewpoint, getSnapshotUrl, blobUrlToBase64, listUsers,
 } from '../utils/bcfClient'
 import {
     COLUMNS, topicToColumn, columnToUpdates,
@@ -79,7 +79,9 @@ function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing }) {
                         </span>
                     )}
                 </div>
-                <p className="text-[10px] text-[var(--speckle-foreground-3)] mt-1 truncate">{topic.creation_author}</p>
+                <p className="text-[10px] text-[var(--speckle-foreground-3)] mt-1 truncate">
+                    {topic.creation_author}{topic.assigned_to ? ` → ${topic.assigned_to}` : ''}
+                </p>
             </div>
         </div>
     )
@@ -112,6 +114,13 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
     const [activeTopic, setActiveTopic] = useState(null)
     const [addingViewpoint, setAddingViewpoint] = useState(false) // markup editor open for selectedTopic
     const [addViewpointDraft, setAddViewpointDraft] = useState(null) // freshly captured viewpoint pending annotation
+
+    // Registered bcf_users, for the "Assigned to" datalist — same source as
+    // BcfTopicPanel's create form.
+    const [users, setUsers] = useState([])
+    useEffect(() => {
+        listUsers().then(setUsers).catch(() => setUsers([]))
+    }, [])
 
     // Lazy-load each topic's first viewpoint (snapshot + the raw viewpoint,
     // the latter so opening a card can fly the viewer there), once per topic
@@ -412,6 +421,19 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
                                 })}
                                 className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] outline-none"
                             />
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <label className="text-[10px] text-[var(--speckle-foreground-3)] shrink-0">Assigned to</label>
+                            <input
+                                value={selectedTopic.assigned_to || ''}
+                                onChange={(e) => updateTopicField(selectedTopic, { assigned_to: e.target.value || null })}
+                                placeholder="Unassigned"
+                                list="bcf-assignee-options"
+                                className="flex-1 text-[10px] px-1.5 py-0.5 rounded bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] outline-none placeholder:text-[var(--speckle-foreground-disabled)]"
+                            />
+                            <datalist id="bcf-assignee-options">
+                                {users.map((u) => <option key={u.guid} value={u.email} />)}
+                            </datalist>
                         </div>
                         {selectedTopic.description && <p className="text-xs text-[var(--speckle-foreground-3)] whitespace-pre-wrap">{selectedTopic.description}</p>}
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">{selectedTopic.creation_author} · {new Date(selectedTopic.creation_date).toLocaleString()}</p>

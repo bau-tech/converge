@@ -114,6 +114,14 @@ const _urlSeed = (() => {
     } catch { return null }
 })()
 
+// Parsed the same way as _shareId above — from a BCF "assigned to" email's
+// deep link (?layout=...&topic=<guid>, built server-side by
+// notifications/dispatch.py's notify_bcf_assignment). _urlSeed above gets
+// the project/model/version loaded; this guid is threaded down to
+// BcfTopicPanel so it can auto-open once that topic actually shows up in
+// its (async-loaded) topics list.
+const _topicGuidSeed = new URLSearchParams(window.location.search).get('topic') || null
+
 // Parse EXTRA_SPECKLE_SERVERS at module load — works without backend
 const ENV_EXTRA_SERVERS = ((raw) => {
     if (!raw) return []
@@ -408,6 +416,10 @@ function Dashboard({ readOnly = false }) {
 
     // BCF topics — owned/fetched by BcfTopicPanel, mirrored here so SpeckleViewer can render pins
     const [bcfTopics, setBcfTopics] = useState([])
+    // Topic guid from a BCF-assignment email's deep link (see _topicGuidSeed
+    // above) — cleared once BcfTopicPanel has auto-opened it, so it doesn't
+    // re-trigger the auto-open on later topic-list refreshes.
+    const [pendingBcfTopicGuid, setPendingBcfTopicGuid] = useState(_topicGuidSeed)
 
     // Elements with a linked document (bim_documents.linked_element) — { speckle_id, centroid, doc_count }[],
     // used to render the "has a document" pin overlay in SpeckleViewer.
@@ -2998,6 +3010,8 @@ function Dashboard({ readOnly = false }) {
                     onRequestSync={triggerBcfSync}
                     serverUrl={activeServer.url}
                     serverToken={activeServer.token}
+                    autoOpenTopicGuid={pendingBcfTopicGuid}
+                    onAutoOpenHandled={() => setPendingBcfTopicGuid(null)}
                 />
                 )}
 
@@ -3083,6 +3097,7 @@ function Dashboard({ readOnly = false }) {
                             normalizerUrl={CONFIG.normalizerUrl}
                             serverUrl={activeServer.url}
                             serverToken={activeServer.token}
+                            activeModelId={data?.normalizer_model_id}
                             onClose={() => setShowDocuments(false)}
                             onDocumentsChanged={refreshDocumentPins}
                             onLoadModel={(branchName, commitId) => {

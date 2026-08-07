@@ -46,7 +46,13 @@ services:
   nextcloud:
     image: nextcloud:apache
     container_name: nextcloud
-    mem_limit: 512m
+    # 512m OOM-killed the container under real use: previews (imagick +
+    # ghostscript) spike hard on multiple concurrent large PDFs, and an
+    # in-flight OOM-kill drops other simultaneous requests too (observed:
+    # a document-folders listing failing with a 502 while previews for a
+    # batch of PDFs were being generated). 1536m gives real headroom;
+    # confirmed via `docker inspect nextcloud --format '{{.State.OOMKilled}}'`.
+    mem_limit: 1536m
     ports:
       - "${NEXTCLOUD_PORT:-8005}:80"
     environment:
@@ -132,6 +138,16 @@ services:
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
       # DEV/TESTING ONLY — see the warning next to this var in .env.example.
       DASHBOARD_AUTH_BYPASS: ${DASHBOARD_AUTH_BYPASS:-}
+      # notifications/email.py's send_email(), used by the document-workflow
+      # notification feed (routers/documents.py -> notifications/dispatch.py).
+      # Was previously unset here even though .env defines it, so send_email()
+      # silently no-op'd (SMTP_HOST empty) for every deployed notification.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -207,6 +223,12 @@ services:
       PORT: 8004
       BCF_API_KEY: ${BCF_API_KEY:-}
       BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      # Deep-link base for BCF "assigned to" notification emails (see
+      # notifications/dispatch.py's notify_bcf_assignment, fired from
+      # bcf/topics.py — this is the only bcf-server code that needs either).
+      # PUBLIC_APP_URL derives from PUBLIC_BASE_URL if unset (config/settings.py).
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
       # Optional idempotent startup seed for one bcf_users account —
       # convenience only, the /admin panel is always reachable via
       # BCF_API_KEY regardless (see config/settings.py).
@@ -236,6 +258,15 @@ services:
       NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
       NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
       NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
+      # notifications/email.py's send_email(), used by BCF issue "assigned to"
+      # notifications (bcf/topics.py -> notifications/dispatch.py). Same vars
+      # bim-normalizer gets above.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
     depends_on:
       postgres:
         condition: service_healthy

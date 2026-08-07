@@ -158,3 +158,9 @@ export function recordCommentSync(projectId, commentGuid, speckleReplyId) {
         body: JSON.stringify({ comment_guid: commentGuid, speckle_reply_id: speckleReplyId }),
     })
 }
+
+// Registered bcf_users — used to populate the "Assigned to" picker, same
+// list the /admin panel draws from.
+export function listUsers() {
+    return bridge('/users')
+}
