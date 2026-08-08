@@ -26,7 +26,15 @@ from bcf.oauth import list_active_sessions, revoke_session
 from bcf.password import hash_password, verify_password
 from bcf.projects import EXTENSION_KINDS, default_extension_values, extension_value_lists
 from bcf.request_log import recent as recent_requests
-from bcf.schemas import DocumentRoleCreate, ExtensionValueCreate, OrganizationCreate, UserCreate, UserOrgUpdate
+from bcf.schemas import (
+    DocumentRoleCreate,
+    ExtensionValueCreate,
+    OrganizationCreate,
+    UserCreate,
+    UserNotifyEmailUpdate,
+    UserOrgUpdate,
+    UserPasswordReset,
+)
 from db.purge import purge_speckle_models, purge_project_documents
 
 router = APIRouter(tags=["bcf-admin"])
@@ -203,7 +211,7 @@ def _admin_page_html(email: str) -> str:
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Add user</button>
   </form>
-  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Created</th><th></th></tr></thead>
+  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Email notifications</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
 
   <h2>Document roles (ISO 19650)</h2>
@@ -310,6 +318,14 @@ async function setUserOrg(sel) {{
     }});
 }}
 
+async function setUserNotifyEmail(cb) {{
+    await api(`/admin/api/users/${{cb.dataset.guid}}/notify-email`, {{
+        method: 'PATCH',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ notify_email: cb.checked }}),
+    }});
+}}
+
 async function loadUsers() {{
     const users = await api('/admin/api/users');
     const tbody = document.querySelector('#users-table tbody');
@@ -318,9 +334,14 @@ async function loadUsers() {{
     tbody.innerHTML = users.map(u => `<tr>
         <td>${{esc(u.name)}}</td><td>${{esc(u.email)}}</td>
         <td><select data-guid="${{u.guid}}" onchange="setUserOrg(this)">${{orgOptions(u.org_id)}}</select></td>
+        <td><label class="checkbox-row"><input type="checkbox" data-guid="${{u.guid}}"
+            ${{u.notify_email ? 'checked' : ''}} onchange="setUserNotifyEmail(this)"> Email me</label></td>
         <td>${{esc(new Date(u.created_at).toLocaleString())}}</td>
-        <td><button class="danger" data-guid="${{u.guid}}" onclick="deleteUser(this)">Delete</button></td>
-    </tr>`).join('') || '<tr><td colspan="5" class="muted">No users yet.</td></tr>';
+        <td>
+            <button data-guid="${{u.guid}}" data-name="${{esc(u.name)}}" onclick="resetUserPassword(this)">Reset password</button>
+            <button class="danger" data-guid="${{u.guid}}" onclick="deleteUser(this)">Delete</button>
+        </td>
+    </tr>`).join('') || '<tr><td colspan="6" class="muted">No users yet.</td></tr>';
     document.getElementById('grant-role-user').innerHTML = users.map(u =>
         `<option value="${{u.guid}}">${{esc(u.name)}} &lt;${{esc(u.email)}}&gt;</option>`).join('');
 }}
@@ -391,6 +412,17 @@ async function deleteUser(btn) {{
     if (!confirm('Delete this user?')) return;
     await api(`/admin/api/users/${{btn.dataset.guid}}`, {{ method: 'DELETE' }});
     loadUsers();
+}}
+
+async function resetUserPassword(btn) {{
+    const password = prompt(`New password for ${{btn.dataset.name}}:`);
+    if (!password) return;
+    await api(`/admin/api/users/${{btn.dataset.guid}}/reset-password`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ password }}),
+    }});
+    alert('Password reset.');
 }}
 
 document.getElementById('create-user-form').addEventListener('submit', async (e) => {{
@@ -615,6 +647,7 @@ def _serialize_user(row: dict) -> dict:
         "created_at": row["created_at"].isoformat(),
         "org_id": str(row["org_id"]) if row.get("org_id") else None,
         "org_name": row.get("org_name"),
+        "notify_email": row["notify_email"],
     }
 
 
@@ -622,7 +655,7 @@ def _serialize_user(row: dict) -> dict:
 def admin_list_users(_email: str = Depends(require_admin_session)):
     rows = fetch_all(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         ORDER BY u.created_at
         """
@@ -646,7 +679,29 @@ def admin_set_user_org(user_guid: str, body: UserOrgUpdate, _email: str = Depend
     execute("UPDATE bcf_users SET org_id = %s WHERE guid = %s", (body.org_id, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        WHERE u.guid = %s
+        """,
+        (user_guid,),
+    )
+    return _serialize_user(updated)
+
+
+@router.patch("/admin/api/users/{user_guid}/notify-email")
+def admin_set_user_notify_email(
+    user_guid: str, body: UserNotifyEmailUpdate, _email: str = Depends(require_admin_session)
+):
+    """Per-user opt-out for the email half of notifications/dispatch.py's
+    document/BCF-assignment notifications — the in-app bell keeps working
+    either way, this only silences send_email()."""
+    row = fetch_one("SELECT guid FROM bcf_users WHERE guid = %s", (user_guid,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    execute("UPDATE bcf_users SET notify_email = %s WHERE guid = %s", (body.notify_email, user_guid))
+    updated = fetch_one(
+        """
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,
@@ -713,6 +768,26 @@ def admin_delete_user(user_guid: str, _email: str = Depends(require_admin_sessio
     if row is None:
         raise HTTPException(status_code=404, detail="User not found")
     execute("DELETE FROM bcf_users WHERE guid = %s", (user_guid,))
+
+
+@router.post("/admin/api/users/{user_guid}/reset-password", status_code=204)
+def admin_reset_user_password(
+    user_guid: str, body: UserPasswordReset, _email: str = Depends(require_admin_session)
+):
+    """Admin-initiated reset for a forgotten password — there's no
+    self-service "forgot password" email flow, so this is the only recovery
+    path. Doesn't touch bcf/oauth.py's session store: those tokens are
+    issued independent of the password, so an existing OAuth session (or
+    this same admin's own cookie) keeps working after the reset."""
+    row = fetch_one("SELECT guid FROM bcf_users WHERE guid = %s", (user_guid,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not body.password:
+        raise HTTPException(status_code=422, detail="Password is required")
+    execute(
+        "UPDATE bcf_users SET password_hash = %s WHERE guid = %s",
+        (hash_password(body.password), user_guid),
+    )
 
 
 _DOCUMENT_ROLES = ("author", "reviewer", "approver")

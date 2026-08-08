@@ -42,16 +42,16 @@ _EVENT_LABEL = {
 
 def _get_user(conn, guid: str) -> dict | None:
     with conn.cursor() as cur:
-        cur.execute("SELECT guid, email, name FROM bcf_users WHERE guid = %s", (guid,))
+        cur.execute("SELECT guid, email, name, notify_email FROM bcf_users WHERE guid = %s", (guid,))
         row = cur.fetchone()
-    return {"guid": str(row[0]), "email": row[1], "name": row[2]} if row else None
+    return {"guid": str(row[0]), "email": row[1], "name": row[2], "notify_email": row[3]} if row else None
 
 
 def _get_user_by_email(conn, email: str) -> dict | None:
     with conn.cursor() as cur:
-        cur.execute("SELECT guid, email, name FROM bcf_users WHERE email = %s", (email,))
+        cur.execute("SELECT guid, email, name, notify_email FROM bcf_users WHERE email = %s", (email,))
         row = cur.fetchone()
-    return {"guid": str(row[0]), "email": row[1], "name": row[2]} if row else None
+    return {"guid": str(row[0]), "email": row[1], "name": row[2], "notify_email": row[3]} if row else None
 
 
 def _recipients_for(conn, stream_id: str, doc_id: str, event_type: str, to_value: str | None) -> list[dict]:
@@ -94,6 +94,8 @@ def notify_document_event(stream_id: str, doc_id: str, event_type: str, to_value
                 conn, user_guid=recipient["guid"], stream_id=stream_id, doc_id=doc_id,
                 event_type=event_type, message=message,
             )
+            if not recipient.get("notify_email", True):
+                continue
             try:
                 send_email(recipient["email"], "Converge — document update", message)
             except Exception:
@@ -155,7 +157,9 @@ def _latest_snapshot(conn, topic_guid: str) -> bytes | None:
 # created or its assigned_to is changed via update. Unlike document events,
 # email always fires (best-effort) even for an assignee with no bcf_users
 # row — assigned_to is a real address either way, so there's no reason to
-# withhold the email just because there's nowhere to put an in-app row.
+# withhold the email just because there's nowhere to put an in-app row. If
+# there IS a matching bcf_users row, that row's notify_email opt-out
+# (admin.py's per-user toggle) still applies.
 def notify_bcf_assignment(topic: dict, assigned_to: str, actor: str | None) -> None:
     if not assigned_to:
         return
@@ -188,6 +192,8 @@ def notify_bcf_assignment(topic: dict, assigned_to: str, actor: str | None) -> N
                 conn, user_guid=recipient["guid"], stream_id=topic["stream_id"], topic_guid=topic["guid"],
                 event_type="bcf_assigned", message=short_message,
             )
+        if recipient is not None and not recipient.get("notify_email", True):
+            return
         snapshot = _latest_snapshot(conn, topic["guid"])
         attachments = [("viewpoint.png", snapshot)] if snapshot else None
         try:

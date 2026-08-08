@@ -129,3 +129,11 @@ class OrganizationCreate(BaseModel):
 
 class UserOrgUpdate(BaseModel):
     org_id: str | None = None
+
+
+class UserNotifyEmailUpdate(BaseModel):
+    notify_email: bool
+
+
+class UserPasswordReset(BaseModel):
+    password: str

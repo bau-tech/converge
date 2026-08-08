@@ -143,6 +143,13 @@ CREATE TABLE IF NOT EXISTS bcf_organizations (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES bcf_organizations(org_id) ON DELETE SET NULL;
+
+-- Per-user opt-out for the email half of notifications/dispatch.py's
+-- notify_document_event / notify_bcf_assignment (the in-app bell/
+-- bcf_notifications row is unaffected either way). Defaults to TRUE so
+-- existing behaviour — everyone gets emailed — doesn't change for accounts
+-- that never touch the new admin toggle.
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT TRUE;
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by

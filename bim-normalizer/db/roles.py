@@ -29,11 +29,11 @@ def get_users_with_role(conn, stream_id: str, roles: tuple[str, ...]) -> list[di
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DISTINCT u.guid, u.email, u.name
+            SELECT DISTINCT u.guid, u.email, u.name, u.notify_email
             FROM bim_document_roles r
             JOIN bcf_users u ON u.guid = r.user_guid
             WHERE r.stream_id IN (%s, '*') AND r.role = ANY(%s)
             """,
             (stream_id, list(roles)),
         )
-        return [{"guid": str(g), "email": e, "name": n} for g, e, n in cur.fetchall()]
+        return [{"guid": str(g), "email": e, "name": n, "notify_email": ne} for g, e, n, ne in cur.fetchall()]
