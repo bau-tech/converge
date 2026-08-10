@@ -17,5 +17,4 @@ bcrypt>=4.0.0
 numpy
 fastembed>=0.3.0
 ezdxf>=1.4.0
-matplotlib
 cairosvg>=2.9.0
