@@ -386,6 +386,36 @@ END $$;
 ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS org_id UUID;
 CREATE INDEX IF NOT EXISTS idx_bim_documents_org ON bim_documents(org_id) WHERE org_id IS NOT NULL;
 
+-- 2D-drawing-to-3D-model alignment (align 2D DXF/DWG drawings against the
+-- Speckle viewer, ACC-"Align Documents"-style): a saved 2D-similarity
+-- transform (translate/rotate/uniform-scale, computed client-side from a
+-- 2-point-pair calibration — see src/utils/alignmentTransform.js) plus a
+-- user-supplied Z elevation, letting the drawing render as a positioned
+-- overlay plane in the 3D viewer. A drawing has at most one active alignment
+-- at a time, so these are flat columns on bim_documents rather than a join
+-- table — same reasoning as doc_type/linked_element/suitability_code above.
+-- All nullable/additive: NULL align_transform means "not aligned yet".
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_transform JSONB;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_elevation_z DOUBLE PRECISION;
+-- Soft reference to bim_models.model_id, deliberately DISTINCT from this
+-- table's own model_id column above: that column's semantics are already
+-- "best-effort, orphaned on re-sync" (see its comment). align_model_id
+-- instead records which commit's world-space the transform was computed
+-- against, so the frontend can detect align_model_id != model_id (the
+-- project was re-ingested since this alignment was made, and — since
+-- nothing in this app guarantees stable world coordinates across
+-- re-ingestion — the overlay may now be mispositioned) and surface a
+-- "re-verify alignment" prompt instead of silently rendering a stale plane.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_model_id UUID REFERENCES bim_models(model_id) ON DELETE SET NULL;
+-- The raw 2 (drawing_point, world_point) pairs used to compute
+-- align_transform — kept alongside the derived transform for audit and so
+-- the calibration UI can preload/re-edit an existing alignment's points
+-- instead of forcing a from-scratch re-pick.
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_control_points JSONB;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_created_by TEXT;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_created_by_guid UUID;
+ALTER TABLE bim_documents ADD COLUMN IF NOT EXISTS align_created_at TIMESTAMPTZ;
+
 -- Per-project (stream_id) document-workflow role grants — ISO 19650 RBAC.
 -- Soft reference to bcf_users.guid, no FK: bcf_users is created by
 -- bcf-server's own init_bcf_schema() (a separate process, `python
