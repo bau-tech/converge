@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -53,15 +53,11 @@ import { BcfStatsWidget } from './components/BcfStatsWidget'
 import { BcfLogoIcon } from './components/BcfLogoIcon'
 import { IdsLogoIcon } from './components/IdsLogoIcon'
 import { IdsCheckPanel } from './components/IdsCheckPanel'
-import { ClashCheckPanel } from './components/ClashCheckPanel'
 import { ElementConnectivityPanel } from './components/ElementConnectivityPanel'
 import { CombineModelsPicker, nextCombineColor } from './components/CombineModelsPicker'
-import { FederatedClashPanel } from './components/FederatedClashPanel'
 import { DocumentsPanel } from './components/DocumentsPanel'
-import { AlignmentPanel } from './components/AlignmentPanel'
 import { NotificationBell } from './components/NotificationBell'
 import { SchedulePanel } from './components/SchedulePanel'
-import { SchedulePlaybackView } from './components/SchedulePlaybackView'
 import PublishSelectionButton from './components/PublishSelectionButton'
 import { IngestProgress } from './components/IngestProgress'
 import { flattenObject, getNestedValue } from './utils/propertyScanner'
@@ -73,6 +69,18 @@ import { LoginScreen } from './components/LoginScreen'
 import { ResetPasswordScreen } from './components/ResetPasswordScreen'
 import { LandingPage } from './components/LandingPage'
 import { RUNTIME_CONFIG } from './runtimeConfig'
+
+// Lazy-loaded: each is a substantial, rarely-opened panel gated behind its
+// own condition (showClashCheck/showFederatedClash/alignmentDoc/
+// playbackBarOpen below) — dynamic import() keeps them out of the initial
+// bundle download entirely until a user actually opens one, instead of
+// every visitor paying for code most sessions never touch. Named exports
+// need the .then(m => ({ default: m.X })) adapter since React.lazy() only
+// resolves a module's default export.
+const ClashCheckPanel = lazy(() => import('./components/ClashCheckPanel').then(m => ({ default: m.ClashCheckPanel })))
+const FederatedClashPanel = lazy(() => import('./components/FederatedClashPanel').then(m => ({ default: m.FederatedClashPanel })))
+const AlignmentPanel = lazy(() => import('./components/AlignmentPanel').then(m => ({ default: m.AlignmentPanel })))
+const SchedulePlaybackView = lazy(() => import('./components/SchedulePlaybackView').then(m => ({ default: m.SchedulePlaybackView })))
 
 const CONFIG = {
     normalizerUrl: RUNTIME_CONFIG.NORMALIZER_URL,
@@ -2133,12 +2141,14 @@ function Dashboard({ readOnly = false }) {
                 />
                 {playbackBarOpen && data?.normalizer_model_id && (
                     <div className="absolute bottom-3 left-3 right-3 z-20">
-                        <SchedulePlaybackView
-                            normalizerModelId={data.normalizer_model_id}
-                            normalizerUrl={CONFIG.normalizerUrl}
-                            onPlaybackChange={handleSchedulePlaybackChange}
-                            onClose={() => setPlaybackBarOpen(false)}
-                        />
+                        <Suspense fallback={null}>
+                            <SchedulePlaybackView
+                                normalizerModelId={data.normalizer_model_id}
+                                normalizerUrl={CONFIG.normalizerUrl}
+                                onPlaybackChange={handleSchedulePlaybackChange}
+                                onClose={() => setPlaybackBarOpen(false)}
+                            />
+                        </Suspense>
                     </div>
                 )}
             </div>
@@ -3159,19 +3169,21 @@ function Dashboard({ readOnly = false }) {
 
                 <AnimatePresence>
                     {showClashCheck && (
-                        <ClashCheckPanel
-                            projectId={data?.normalizer_model_id}
-                            streamId={data?.project_id}
-                            normalizerUrl={CONFIG.normalizerUrl}
-                            viewerRef={speckleViewerRef}
-                            topics={bcfTopics}
-                            onTopicsChange={setBcfTopics}
-                            onRequestSync={triggerBcfSync}
-                            serverUrl={activeServer.url}
-                            serverToken={activeServer.token}
-                            ifcClasses={clashIfcClasses}
-                            onClose={() => setShowClashCheck(false)}
-                        />
+                        <Suspense fallback={null}>
+                            <ClashCheckPanel
+                                projectId={data?.normalizer_model_id}
+                                streamId={data?.project_id}
+                                normalizerUrl={CONFIG.normalizerUrl}
+                                viewerRef={speckleViewerRef}
+                                topics={bcfTopics}
+                                onTopicsChange={setBcfTopics}
+                                onRequestSync={triggerBcfSync}
+                                serverUrl={activeServer.url}
+                                serverToken={activeServer.token}
+                                ifcClasses={clashIfcClasses}
+                                onClose={() => setShowClashCheck(false)}
+                            />
+                        </Suspense>
                     )}
                 </AnimatePresence>
 
@@ -3189,18 +3201,20 @@ function Dashboard({ readOnly = false }) {
 
                 <AnimatePresence>
                     {showFederatedClash && (
-                        <FederatedClashPanel
-                            projectId={data?.normalizer_model_id}
-                            combinedModels={combinedModels}
-                            normalizerUrl={CONFIG.normalizerUrl}
-                            viewerRef={speckleViewerRef}
-                            topics={bcfTopics}
-                            onTopicsChange={setBcfTopics}
-                            onRequestSync={triggerBcfSync}
-                            serverUrl={activeServer.url}
-                            serverToken={activeServer.token}
-                            onClose={() => setShowFederatedClash(false)}
-                        />
+                        <Suspense fallback={null}>
+                            <FederatedClashPanel
+                                projectId={data?.normalizer_model_id}
+                                combinedModels={combinedModels}
+                                normalizerUrl={CONFIG.normalizerUrl}
+                                viewerRef={speckleViewerRef}
+                                topics={bcfTopics}
+                                onTopicsChange={setBcfTopics}
+                                onRequestSync={triggerBcfSync}
+                                serverUrl={activeServer.url}
+                                serverToken={activeServer.token}
+                                onClose={() => setShowFederatedClash(false)}
+                            />
+                        </Suspense>
                     )}
                 </AnimatePresence>
 
@@ -3232,15 +3246,17 @@ function Dashboard({ readOnly = false }) {
                 <AnimatePresence>
                     {alignmentDoc && (
                         <ErrorBoundary>
-                        <AlignmentPanel
-                            doc={alignmentDoc}
-                            streamId={data?.project_id}
-                            normalizerUrl={CONFIG.normalizerUrl}
-                            modelId={data?.normalizer_model_id}
-                            viewerRef={speckleViewerRef}
-                            onClose={() => setAlignmentDoc(null)}
-                            onSaved={() => { setAlignmentDoc(null); refreshDocumentPins() }}
-                        />
+                        <Suspense fallback={null}>
+                            <AlignmentPanel
+                                doc={alignmentDoc}
+                                streamId={data?.project_id}
+                                normalizerUrl={CONFIG.normalizerUrl}
+                                modelId={data?.normalizer_model_id}
+                                viewerRef={speckleViewerRef}
+                                onClose={() => setAlignmentDoc(null)}
+                                onSaved={() => { setAlignmentDoc(null); refreshDocumentPins() }}
+                            />
+                        </Suspense>
                         </ErrorBoundary>
                     )}
                 </AnimatePresence>
