@@ -165,13 +165,28 @@ def upsert_document(
 
 def list_documents(
     conn, stream_id: str, status: str | None = None, linked_element: str | None = None,
-    viewer_org_id: str | None = None,
+    viewer_org_id: str | None = None, folder_path: str | None = None,
 ) -> list[dict]:
     """viewer_org_id enforces ISO 19650 contractual-container separation: a
     WIP document tagged to an org is hidden from viewers in a different org.
     NULL on either side (an unscoped viewer, or a doc that predates/never
     got an org) stays visible — additive/back-compat by design, see
-    org_id's schema comment in db/models.py."""
+    org_id's schema comment in db/models.py.
+
+    folder_path (None = no folder filter, "" = the folder root, matching
+    routers/documents.py's _sanitize_folder_path convention) scopes the
+    result to documents whose subfolder is exactly folder_path — mirrors the
+    frontend's own docFolderPath() equality check (DocumentsPanel.jsx), so a
+    project with many documents spread across subfolders no longer pulls
+    every one of them just to render the folder currently being viewed.
+    Matched per-status since a document's nc_path prefix depends on which
+    status subfolder (01_WIP/02_Shared/...) it currently sits in — a folder
+    is one logical thing spanning all 4 status roots (see create_folder),
+    not scoped to a single status. Direct children only (not nested
+    subfolders): NOT LIKE 'prefix/%/%' excludes anything with another '/'
+    after the folder prefix, same as the frontend's exact-match semantics
+    (folder navigation is a separate, explicit drill-down, not implied by
+    listing a parent)."""
     where = ["stream_id = %s", "deleted_at IS NULL"]
     params: list = [stream_id]
     if status:
@@ -180,6 +195,15 @@ def list_documents(
     if linked_element:
         where.append("linked_element = %s")
         params.append(linked_element)
+    if folder_path is not None:
+        from nextcloud.groupfolders import STATUS_FOLDERS, group_folder_mountpoint
+        group_folder = group_folder_mountpoint(stream_id)
+        per_status = []
+        for doc_status, subfolder in STATUS_FOLDERS.items():
+            prefix = f"{group_folder}/{subfolder}/{folder_path}" if folder_path else f"{group_folder}/{subfolder}"
+            per_status.append("(status = %s AND nc_path LIKE %s AND nc_path NOT LIKE %s)")
+            params.extend([doc_status, f"{prefix}/%", f"{prefix}/%/%"])
+        where.append("(" + " OR ".join(per_status) + ")")
     where.append("(status != 'WIP' OR org_id IS NULL OR %s IS NULL OR org_id = %s)")
     params.extend([viewer_org_id, viewer_org_id])
     with conn.cursor() as cur:

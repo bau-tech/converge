@@ -168,7 +168,17 @@ services:
       NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:-}
       NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
       NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-}
-      DOCUMENT_SYNC_SCAN_INTERVAL_S: ${DOCUMENT_SYNC_SCAN_INTERVAL_S:-3600}
+      # Same-Docker-network callback URL for Nextcloud's webhook_listeners
+      # app (see nextcloud/webhooks.py) — the default matches this service's
+      # own Compose service name, so this only needs overriding if that name
+      # ever changes. Requires Nextcloud's own allow_local_remote_servers
+      # config enabled (occ config:system:set allow_local_remote_servers
+      # --type=boolean --value=true) or Nextcloud's outgoing HTTP client
+      # refuses the call as a same-network SSRF guard.
+      BIM_NORMALIZER_INTERNAL_URL: ${BIM_NORMALIZER_INTERNAL_URL:-http://bim-normalizer:8002}
+      # Now just a daily safety-net sweep — the webhook path above handles
+      # same-day indexing of out-of-band Nextcloud changes.
+      DOCUMENT_SYNC_SCAN_INTERVAL_S: ${DOCUMENT_SYNC_SCAN_INTERVAL_S:-86400}
       # BCF_API_KEY/BCF_OIDC_SECRET were previously only passed to bcf-server
       # below — bim-normalizer needs them too now, since dashboard_auth's
       # session signing (DASHBOARD_SESSION_SECRET) falls back through

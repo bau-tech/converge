@@ -99,12 +99,22 @@ def my_roles(stream_id: str, user: CurrentUser = Depends(require_login)):
 
 
 @router.get("/projects/{stream_id}/documents")
-def list_documents(stream_id: str, status: str | None = None, linked_element: str | None = None, user: CurrentUser = Depends(require_login)):
+def list_documents(
+    stream_id: str, status: str | None = None, linked_element: str | None = None,
+    folder_path: str | None = None, user: CurrentUser = Depends(require_login),
+):
+    """folder_path (omitted = every folder, matching the pre-pagination
+    behavior any non-DocumentsPanel caller still relies on) scopes results
+    to one folder's direct contents — see db/documents.py::list_documents.
+    The Documents panel always passes it now, so a project with documents
+    spread across many subfolders no longer pulls the whole project on
+    every open."""
     from db.connection import get_conn, release_conn
     from db.documents import list_documents as _list
+    sub = _sanitize_folder_path(folder_path) if folder_path is not None else None
     conn = get_conn()
     try:
-        return _list(conn, stream_id, status=status, linked_element=linked_element, viewer_org_id=user.org_id)
+        return _list(conn, stream_id, status=status, linked_element=linked_element, viewer_org_id=user.org_id, folder_path=sub)
     finally:
         release_conn(conn)
 

@@ -136,7 +136,24 @@ NEXTCLOUD_ADMIN_PASSWORD: str = os.getenv("NEXTCLOUD_ADMIN_PASSWORD", "")
 # and set NEXTCLOUD_APP_PASSWORD once the container is up, same pattern as
 # BCF_OIDC_SECRET falling back to BCF_API_KEY above.
 NEXTCLOUD_APP_PASSWORD: str = os.getenv("NEXTCLOUD_APP_PASSWORD") or NEXTCLOUD_ADMIN_PASSWORD
-DOCUMENT_SYNC_SCAN_INTERVAL_S: int = int(os.getenv("DOCUMENT_SYNC_SCAN_INTERVAL_S", str(60 * 60)))
+
+# Same-Docker-network base URL Nextcloud's webhook_listeners app calls back
+# into (see nextcloud/webhooks.py) — distinct from PUBLIC_BASE_URL, since
+# Nextcloud reaches bim-normalizer directly by its Compose service name, not
+# through the public reverse proxy. Requires Nextcloud's own
+# allow_local_remote_servers config enabled (its outgoing HTTP client
+# otherwise refuses internal-looking hostnames as an SSRF guard — confirmed
+# live against this exact hostname before that setting was turned on).
+BIM_NORMALIZER_INTERNAL_URL: str = os.getenv("BIM_NORMALIZER_INTERNAL_URL", "http://bim-normalizer:8002")
+
+# Now just a safety-net fallback for document indexing — nextcloud/webhooks.py
+# + routers/nextcloud_webhook.py handle the common case (a file changed
+# somewhere) within a few minutes via Nextcloud's own webhook delivery, so
+# this full-tree walk-every-project sweep (nextcloud/reconcile.py) only
+# needs to catch what a webhook missed (a dropped delivery, a webhook
+# registration that failed at startup, etc.), not carry the whole workload
+# on an hourly cadence like it used to.
+DOCUMENT_SYNC_SCAN_INTERVAL_S: int = int(os.getenv("DOCUMENT_SYNC_SCAN_INTERVAL_S", str(24 * 60 * 60)))
 
 # Email side of the document-workflow notification feed (notifications.py,
 # db/notifications.py). Every var is optional and empty/blank by default —

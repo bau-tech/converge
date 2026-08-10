@@ -25,6 +25,7 @@ from routers.ids_check import router as ids_check_router
 from routers.ifc_export import router as ifc_export_router
 from routers.ingest import router as ingest_router
 from routers.models import router as models_router
+from routers.nextcloud_webhook import router as nextcloud_webhook_router
 from routers.notifications import router as notifications_router
 from routers.overrides import router as overrides_router
 from routers.sync import router as sync_router
@@ -83,9 +84,14 @@ async def _resume_incomplete_embeddings() -> None:
 
 
 async def _document_sync_loop():
-    """Drift detector for documents that reached Nextcloud some other way
-    than through routers/documents.py's own upload/move/revise/delete calls
-    (which already index as they go) — see nextcloud/reconcile.py."""
+    """Daily safety-net sweep for documents that reached Nextcloud some other
+    way than through routers/documents.py's own upload/move/revise/delete
+    calls (which already index as they go) — see nextcloud/reconcile.py.
+    routers/nextcloud_webhook.py now catches the common case (a file changed
+    out-of-band) within minutes via Nextcloud's own webhook delivery; this
+    loop only needs to catch what a webhook missed (a dropped delivery, a
+    registration that failed at startup, etc.), which is why its interval
+    moved from hourly to daily (DOCUMENT_SYNC_SCAN_INTERVAL_S)."""
     from config import settings
     from db.connection import get_conn, release_conn
     from nextcloud.reconcile import reconcile_all_projects
@@ -128,6 +134,8 @@ async def lifespan(app: FastAPI):
     finally:
         release_conn(conn)
     init_process_pool()
+    from nextcloud.webhooks import ensure_webhooks_registered
+    ensure_webhooks_registered()
     auto_sync_task = asyncio.create_task(_auto_sync_loop())
     document_sync_task = asyncio.create_task(_document_sync_loop())
     resume_embeddings_task = asyncio.create_task(_resume_incomplete_embeddings())
@@ -178,4 +186,5 @@ app.include_router(ifc_export_router)
 app.include_router(ids_check_router)
 app.include_router(clash_check_router)
 app.include_router(documents_router)
+app.include_router(nextcloud_webhook_router)
 app.include_router(notifications_router)
