@@ -12,7 +12,9 @@ use export_bcfxml() here; clashes are returned as plain JSON and turned into
 BCF topics by the frontend through the existing /bcf/2.1 REST API
 (bcfClient.createTopic), the same pattern ids_check.py uses.
 """
+import contextlib
 import logging
+import multiprocessing
 import os
 import tempfile
 
@@ -21,6 +23,35 @@ import ifcopenshell.util.selector
 from ifcclash.ifcclash import Clasher, ClashSettings
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _single_threaded_geometry_iterator():
+    """ifcclash's Clasher._add_objects always passes multiprocessing.
+    cpu_count() as the ifcopenshell.geom.iterator thread count (see
+    ifcclash/ifcclash.py — not our code, no local hook to configure this
+    otherwise). That's native multi-threaded C++ geometry iteration,
+    nested *inside* a worker that's already one of process_pool.py's own
+    spawned processes — confirmed via gdb backtraces on 8 accumulated core
+    dumps (all SIGSEGV inside ifcopenshell's _ifcopenshell_wrapper.so, same
+    offsets every time — one reproducible bug, not several flaky crashes)
+    that this is what actually crashes. IfcOpenShell's geometry kernel
+    isn't reliably thread-safe across every real-world model, and each
+    crash leaves a multi-GB core dump nothing cleans up — that's what
+    filled this host's disk and took Postgres down with it once. Pinning
+    to 1 thread for the duration of a clash check trades iterator speed
+    for not crashing, which given that cost is the right tradeoff.
+
+    Scoped to the calling process only (a spawned process_pool.py worker,
+    not the main process) and restored on exit, so it can't leak into any
+    other code path that happens to run in the same worker afterward.
+    """
+    original = multiprocessing.cpu_count
+    multiprocessing.cpu_count = lambda: 1
+    try:
+        yield
+    finally:
+        multiprocessing.cpu_count = original
 
 
 def _with_geometry_count(check_file, selector: str) -> int:
@@ -147,7 +178,8 @@ def _run_one_rule(
     _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
 
     clasher.clash_sets = [clash_set]
-    clasher.clash()
+    with _single_threaded_geometry_iterator():
+        clasher.clash()
 
     clashes = _extract_clashes(
         clash_set, check_file, resolve_application_ids, check_file, resolve_application_ids,
@@ -252,7 +284,8 @@ def _run_one_cross_rule(
     _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
 
     clasher.clash_sets = [clash_set]
-    clasher.clash()
+    with _single_threaded_geometry_iterator():
+        clasher.clash()
 
     clashes = _extract_clashes(clash_set, check_file_a, resolve_a, check_file_b, resolve_b, guid_map_a, guid_map_b)
     return {**base_result, "count": len(clashes), "clashes": clashes}

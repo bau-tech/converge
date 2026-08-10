@@ -13,7 +13,7 @@ const MODES = [
 
 let ruleIdSeq = 0
 function newRule() {
-    return { id: ++ruleIdSeq, name: '', selectorA: '', selectorB: '', mode: 'collision', tolerance: 0.01, clearance: 0.1 }
+    return { id: ++ruleIdSeq, name: '', classByModel: {}, mode: 'collision', tolerance: 0.01, clearance: 0.1 }
 }
 
 function pairKey(a, b) { return `${a.branchName} × ${b.branchName}` }
@@ -26,7 +26,15 @@ function pairKey(a, b) { return `${a.branchName} × ${b.branchName}` }
 // them, and renders one result section per pair plus a rolled-up total.
 // Kept as a sibling to ClashCheckPanel.jsx (not merged into it) so the
 // existing single-model/single-compare flow stays completely unchanged.
-export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, ifcClasses = [], onClose, serverUrl, serverToken, projectId }) {
+//
+// Each rule holds one class pick *per combined model* (`classByModel`),
+// not a fixed "Class A"/"Class B" pair — a model plays "first" in one pair
+// and "second" in another (e.g. structural is B in arc×structural but A in
+// structural×fm), so a single position-based selector pair silently meant
+// different things depending on which pair it was applied to. A rule only
+// applies to a given pair when it has a class picked for *both* sides —
+// see ruleAppliesToPair/activePairs below.
+export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, onClose, serverUrl, serverToken, projectId }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
     const { user } = useAuth()
     const [width, startResize] = useDrawerWidth()
@@ -50,26 +58,85 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
         pollTimersRef.current = []
     }, [])
 
-    const updateRule = (id, patch) => setRules((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
-    const addRule = () => setRules((prev) => [...prev, {
-        ...newRule(),
-        selectorA: ifcClasses[0] || '',
-        selectorB: ifcClasses[1] && ifcClasses[1] !== ifcClasses[0] ? ifcClasses[1] : '',
-    }])
-    const removeRule = (id) => setRules((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev))
-
     const entries = [...combinedModels.values()].filter((m) => m.normalizerModelId)
     const pairs = []
     for (let i = 0; i < entries.length; i++) {
         for (let j = i + 1; j < entries.length; j++) pairs.push([entries[i], entries[j]])
     }
+    const entryKey = entries.map((m) => m.normalizerModelId).sort().join(',')
+
+    // Each combined model's own real IFC classes — fetched from its already-
+    // normalised DB row (same lightweight query the dashboard's charts and
+    // ClashCheckPanel's compare-model picker use), not loaded into the
+    // viewer. Keyed by branchName, matching combinedModels' own key.
+    const [classesByModel, setClassesByModel] = useState({})          // { [branchName]: string[] }
+    const [classesLoadingByModel, setClassesLoadingByModel] = useState({})  // { [branchName]: bool }
+
+    useEffect(() => {
+        if (!base) return
+        let cancelled = false
+        entries.forEach((m) => {
+            if (classesByModel[m.branchName] !== undefined) return  // already fetched (or attempted)
+            setClassesLoadingByModel((prev) => ({ ...prev, [m.branchName]: true }))
+            fetch(`${base}/models/${m.normalizerModelId}/summary`)
+                .then((res) => (res.ok ? res.json() : null))
+                .then((summary) => {
+                    if (cancelled) return
+                    setClassesByModel((prev) => ({ ...prev, [m.branchName]: Object.keys(summary?.by_ifc_class || {}).sort() }))
+                })
+                .catch(() => { if (!cancelled) setClassesByModel((prev) => ({ ...prev, [m.branchName]: [] })) })
+                .finally(() => { if (!cancelled) setClassesLoadingByModel((prev) => ({ ...prev, [m.branchName]: false })) })
+        })
+        return () => { cancelled = true }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [base, entryKey])
+
+    // Seeds a still-untouched rule (freshly created, no picks at all) with
+    // the first two combined models' first available class each, once both
+    // are loaded — mirrors ClashCheckPanel's "seed blank rule once classes
+    // load" pattern. Only ever touches rules with an empty classByModel, so
+    // it never clobbers anything the user already picked.
+    useEffect(() => {
+        const first2 = entries.slice(0, 2)
+        if (first2.length < 2) return
+        if (!first2.every((m) => classesByModel[m.branchName] !== undefined)) return
+        setRules((prev) => prev.map((r) => {
+            if (Object.keys(r.classByModel).length > 0) return r
+            const seeded = {}
+            for (const m of first2) {
+                const classes = classesByModel[m.branchName] || []
+                if (classes.length > 0) seeded[m.branchName] = classes[0]
+            }
+            return Object.keys(seeded).length > 0 ? { ...r, classByModel: seeded } : r
+        }))
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [entryKey, classesByModel])
+
+    const updateRule = (id, patch) => setRules((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+    const updateRuleModelClass = (id, branchName, value) =>
+        setRules((prev) => prev.map((r) => (r.id === id ? { ...r, classByModel: { ...r.classByModel, [branchName]: value } } : r)))
+    // Clones the previous rule's model->class picks as the starting point —
+    // adding a rule to compare a *different* pair (e.g. A×C after a default
+    // A×B) is then "clear one model, pick another" instead of rebuilding
+    // every pick from scratch.
+    const addRule = () => setRules((prev) => [...prev, {
+        ...newRule(),
+        classByModel: prev.length > 0 ? { ...prev[prev.length - 1].classByModel } : {},
+    }])
+    const removeRule = (id) => setRules((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== id) : prev))
+
+    // A rule only contributes to a pair once it has a class picked for both
+    // sides — no fixed "A"/"B" fallback here (unlike ClashCheckPanel's
+    // single-compare "blank means same class as A"), since there's no
+    // single designated "primary" side across an N-way combined set.
+    const ruleAppliesToPair = (r, a, b) => Boolean(r.classByModel[a.branchName]) && Boolean(r.classByModel[b.branchName])
+    const activePairs = pairs.filter(([a, b]) => rules.some((r) => ruleAppliesToPair(r, a, b)))
 
     const totalClashes = pairJobs.reduce((sum, p) => sum + (p.result?.total_count || 0), 0)
     const allDone = pairJobs.length > 0 && pairJobs.every((p) => p.status === 'complete' || p.status === 'failed')
 
     const runCheck = async () => {
-        const validRules = rules.filter((r) => r.selectorA.trim())
-        if (validRules.length === 0 || pairs.length === 0) return
+        if (activePairs.length === 0) return
         pollTimersRef.current.forEach((t) => clearTimeout(t))
         pollTimersRef.current = []
         setChecking(true)
@@ -77,26 +144,34 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
         setSelected(new Set())
         setPushedMsg(null)
 
-        const ruleBody = validRules.map((r) => ({
-            name: r.name.trim() || null,
-            selector_a: r.selectorA.trim(),
-            selector_b: r.selectorB.trim() || null,
-            mode: r.mode,
-            tolerance: Number(r.tolerance),
-            clearance: Number(r.clearance),
-            allow_touching: true,
-        }))
+        // Built per pair, not once for all of them — a pair only gets the
+        // rules that actually picked a class on both of its sides, and
+        // those two classes (not a shared "selectorA/selectorB") are what
+        // gets sent as this pair's selector_a/selector_b.
+        const pairRuleBodies = activePairs.map(([a, b]) =>
+            rules
+                .filter((r) => ruleAppliesToPair(r, a, b))
+                .map((r) => ({
+                    name: r.name.trim() || null,
+                    selector_a: r.classByModel[a.branchName],
+                    selector_b: r.classByModel[b.branchName],
+                    mode: r.mode,
+                    tolerance: Number(r.tolerance),
+                    clearance: Number(r.clearance),
+                    allow_touching: true,
+                }))
+        )
 
-        const initialJobs = pairs.map(([a, b]) => ({ key: pairKey(a, b), a, b, jobId: null, status: 'starting', result: null, error: null }))
+        const initialJobs = activePairs.map(([a, b]) => ({ key: pairKey(a, b), a, b, jobId: null, status: 'starting', result: null, error: null }))
         setPairJobs(initialJobs)
 
-        const started = await Promise.all(pairs.map(async ([a, b], idx) => {
+        const started = await Promise.all(activePairs.map(async ([a, b], idx) => {
             try {
                 const startRes = await fetch(`${base}/models/${a.normalizerModelId}/clash-check`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        rules: ruleBody,
+                        rules: pairRuleBodies[idx],
                         server_url: serverUrl || undefined,
                         token: serverToken || undefined,
                         compare_model_id: b.normalizerModelId,
@@ -133,7 +208,7 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
             }, 1500)
             pollTimersRef.current.push(timer)
         }
-        started.forEach((s) => { if (s.status === 'pending') poll(s.idx, pairs[s.idx][0], s.jobId) })
+        started.forEach((s) => { if (s.status === 'pending') poll(s.idx, activePairs[s.idx][0], s.jobId) })
         setChecking(false)
     }
 
@@ -233,7 +308,9 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">
                             {pairs.length === 0
                                 ? 'Need at least 2 combined models to run a check.'
-                                : `Will run ${pairs.length} pairwise check${pairs.length === 1 ? '' : 's'}: ${pairs.map(([a, b]) => `${a.branchName}×${b.branchName}`).join(', ')}.`}
+                                : activePairs.length === 0
+                                    ? 'Pick a class for at least two models in a rule below to run a check.'
+                                    : `Will run ${activePairs.length} pairwise check${activePairs.length === 1 ? '' : 's'}: ${activePairs.map(([a, b]) => `${a.branchName}×${b.branchName}`).join(', ')}.`}
                         </p>
                     </div>
 
@@ -249,30 +326,29 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                                         className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-44"
                                     />
                                 </div>
-                                <div className="flex flex-col gap-1">
-                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Class A</label>
-                                    <select
-                                        value={rule.selectorA}
-                                        onChange={(e) => updateRule(rule.id, { selectorA: e.target.value })}
-                                        disabled={ifcClasses.length === 0}
-                                        className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-40 disabled:opacity-50"
-                                    >
-                                        {ifcClasses.length === 0 && <option value="">Loading classes…</option>}
-                                        {ifcClasses.map((c) => <option key={c} value={c}>{c}</option>)}
-                                    </select>
-                                </div>
-                                <div className="flex flex-col gap-1">
-                                    <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Class B (optional)</label>
-                                    <select
-                                        value={rule.selectorB}
-                                        onChange={(e) => updateRule(rule.id, { selectorB: e.target.value })}
-                                        disabled={ifcClasses.length === 0}
-                                        className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-52 disabled:opacity-50"
-                                    >
-                                        <option value="">— Same class as A —</option>
-                                        {ifcClasses.map((c) => <option key={c} value={c}>{c}</option>)}
-                                    </select>
-                                </div>
+                                {entries.map((m) => {
+                                    const modelClasses = classesByModel[m.branchName] || []
+                                    const modelLoading = classesLoadingByModel[m.branchName]
+                                    return (
+                                        <div key={m.branchName} className="flex flex-col gap-1">
+                                            <label className="text-[10px] uppercase tracking-wider flex items-center gap-1" style={{ color: m.color }}>
+                                                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: m.color }} />
+                                                <span className="truncate max-w-[8rem]">{m.branchName}</span>
+                                            </label>
+                                            <select
+                                                value={rule.classByModel[m.branchName] || ''}
+                                                onChange={(e) => updateRuleModelClass(rule.id, m.branchName, e.target.value)}
+                                                disabled={modelLoading}
+                                                className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-40 disabled:opacity-50"
+                                            >
+                                                {modelLoading
+                                                    ? <option value="">Loading classes…</option>
+                                                    : <option value="">— not included —</option>}
+                                                {modelClasses.map((c) => <option key={c} value={c}>{c}</option>)}
+                                            </select>
+                                        </div>
+                                    )
+                                })}
                                 <div className="flex flex-col gap-1">
                                     <label className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider">Mode</label>
                                     <select
@@ -323,15 +399,15 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                             </button>
                             <button
                                 onClick={runCheck}
-                                disabled={!rules.some((r) => r.selectorA.trim()) || checking || pairs.length === 0}
+                                disabled={activePairs.length === 0 || checking}
                                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-amber-500 text-black font-medium disabled:opacity-40 transition-opacity ml-auto"
                             >
                                 {checking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                                Run Check ({pairs.length} pair{pairs.length === 1 ? '' : 's'})
+                                Run Check ({activePairs.length} pair{activePairs.length === 1 ? '' : 's'})
                             </button>
                         </div>
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">
-                            Each pair is checked independently against the same rules — Class A is matched in the first model of each pair, Class B in the second.
+                            Pick a class per model for each rule — "— not included —" leaves that model out of this rule. A pair only runs for a rule once both of its models have a class picked; add another rule to cover a different pair (e.g. clear one model and pick a third).
                         </p>
                     </div>
 

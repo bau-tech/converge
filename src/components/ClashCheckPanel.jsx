@@ -41,7 +41,7 @@ function newRule() {
 // Supports multiple rules per run (e.g. "Columns vs Beams" + "Pipes vs
 // Ducts") — the backend exports the model to IFC once and runs every rule
 // against that same export in one job, so results come back grouped by rule.
-export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, ifcClasses = [], onClose, serverUrl, serverToken }) {
+export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef, topics = [], onTopicsChange, onRequestSync, ifcClasses = [], onClose, serverUrl, serverToken }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
     const { user } = useAuth()
     const [width, startResize] = useDrawerWidth()
@@ -66,40 +66,82 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
     // Other already-ingested models this model can be cross-checked against
     // (clash-check operates on bim_models rows, so the candidate model must
     // already be ingested — same precondition as the active model itself).
+    // Scoped to the current Speckle project via /models/by-stream — /models
+    // lists every ingested model on the whole instance, across every
+    // project, which is the wrong candidate set here (see DocumentsPanel's
+    // identical by-stream fetch for the same reasoning).
     const [availableModels, setAvailableModels] = useState([])
     const [compareModel, setCompareModel] = useState(null)   // a row from availableModels, or null for single-model mode
 
     useEffect(() => {
-        if (!base) return
+        if (!base || !streamId) return
         let cancelled = false
-        fetch(`${base}/models`)
+        fetch(`${base}/models/by-stream/${streamId}`)
             .then(res => res.ok ? res.json() : [])
             .then(models => { if (!cancelled) setAvailableModels(Array.isArray(models) ? models : []) })
             .catch(() => { if (!cancelled) setAvailableModels([]) })
         return () => { cancelled = true }
-    }, [base])
+    }, [base, streamId])
 
     const otherModels = availableModels.filter(m => m.model_id !== projectId)
     const compareLabel = (m) => `${m.branch_name || m.stream_id} · ${m.source || 'unknown'} · ${m.ingested_at ? new Date(m.ingested_at).toLocaleDateString() : ''}`
 
+    // Model B's own IFC classes, fetched from its already-normalised DB row
+    // (no need to load it into the viewer for this — /models/{id}/summary is
+    // the same lightweight per-model query the dashboard's charts use).
+    // Group B used to reuse `ifcClasses` (Model A's classes) unconditionally,
+    // which meant picking a class that only exists in Model A silently
+    // produced zero clashes against Model B instead of a real option list.
+    const [compareModelClasses, setCompareModelClasses] = useState([])
+    const [compareModelClassesLoading, setCompareModelClassesLoading] = useState(false)
+
+    useEffect(() => {
+        if (!base || !compareModel) { setCompareModelClasses([]); return }
+        let cancelled = false
+        setCompareModelClassesLoading(true)
+        fetch(`${base}/models/${compareModel.model_id}/summary`)
+            .then(res => res.ok ? res.json() : null)
+            .then(summary => {
+                if (cancelled) return
+                setCompareModelClasses(Object.keys(summary?.by_ifc_class || {}).sort())
+            })
+            .catch(() => { if (!cancelled) setCompareModelClasses([]) })
+            .finally(() => { if (!cancelled) setCompareModelClassesLoading(false) })
+        return () => { cancelled = true }
+    }, [base, compareModel])
+
+    // A class picked for Group B against the previous compare target (or
+    // against no compare target at all) may not exist in the newly selected
+    // model — clear it rather than silently keeping an invalid selection.
+    useEffect(() => {
+        setRules(prev => prev.map(r => r.selectorB === '' ? r : { ...r, selectorB: '' }))
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [compareModel])
+
     // Seed any still-blank rule's selectors with real IFC classes once they load
     // (a fresh rule starts blank since there's no model-agnostic sensible default).
-    // Only touches rules the user hasn't picked anything for yet.
+    // Only touches rules the user hasn't picked anything for yet. Group B is
+    // only seeded with a second class from `ifcClasses` in self-clash mode —
+    // in cross-model mode, `ifcClasses` is Model A's own class list, which
+    // may not exist in Model B at all, so blank (meaning "same class as
+    // Model A", a real option Model B is guaranteed to support) is the only
+    // safe default there.
     useEffect(() => {
         if (ifcClasses.length === 0) return
         setRules(prev => prev.map(r => r.selectorA !== '' ? r : {
             ...r,
             selectorA: ifcClasses[0] || '',
-            selectorB: ifcClasses[1] && ifcClasses[1] !== ifcClasses[0] ? ifcClasses[1] : '',
+            selectorB: (!compareModel && ifcClasses[1] && ifcClasses[1] !== ifcClasses[0]) ? ifcClasses[1] : '',
         }))
-    }, [ifcClasses])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [ifcClasses, compareModel])
 
     const updateRule = (id, patch) =>
         setRules(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r))
     const addRule = () => setRules(prev => [...prev, {
         ...newRule(),
         selectorA: ifcClasses[0] || '',
-        selectorB: ifcClasses[1] && ifcClasses[1] !== ifcClasses[0] ? ifcClasses[1] : '',
+        selectorB: (!compareModel && ifcClasses[1] && ifcClasses[1] !== ifcClasses[0]) ? ifcClasses[1] : '',
     }])
     const removeRule = (id) => setRules(prev => prev.length > 1 ? prev.filter(r => r.id !== id) : prev)
 
@@ -296,11 +338,15 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                                     <select
                                         value={rule.selectorB}
                                         onChange={e => updateRule(rule.id, { selectorB: e.target.value })}
-                                        disabled={ifcClasses.length === 0}
+                                        disabled={compareModel ? compareModelClassesLoading : ifcClasses.length === 0}
                                         className="px-2.5 py-1.5 text-sm rounded bg-[var(--speckle-foundation)] text-[var(--speckle-foreground)] border border-[var(--speckle-outline-3)] outline-none w-52 disabled:opacity-50"
                                     >
-                                        <option value="">{compareModel ? '— Same class as Model A —' : '— None (clash A against itself) —'}</option>
-                                        {ifcClasses.map(c => <option key={c} value={c}>{c}</option>)}
+                                        <option value="">
+                                            {compareModel
+                                                ? (compareModelClassesLoading ? 'Loading classes…' : '— Same class as Model A —')
+                                                : '— None (clash A against itself) —'}
+                                        </option>
+                                        {(compareModel ? compareModelClasses : ifcClasses).map(c => <option key={c} value={c}>{c}</option>)}
                                     </select>
                                 </div>
                                 <div className="flex flex-col gap-1">
@@ -361,7 +407,9 @@ export function ClashCheckPanel({ projectId, normalizerUrl, viewerRef, topics = 
                             </button>
                         </div>
                         <p className="text-[10px] text-[var(--speckle-foreground-3)]">
-                            Groups list every IFC class actually present in this model{compareModel ? ' (Model A only — Model B isn\'t checked against this list, so a class missing there just reports zero clashes)' : ''}. Collision finds overlapping solids — the standard hard-clash check. All rules run together against the same exported model{compareModel ? 's' : ''}.
+                            {compareModel
+                                ? 'Model A and Model B each list their own IFC classes — leaving Model B blank reuses whatever class is picked for Model A.'
+                                : 'Groups list every IFC class actually present in this model.'} Collision finds overlapping solids — the standard hard-clash check. All rules run together against the same exported model{compareModel ? 's' : ''}.
                             {compareModel && ' For cross-model checks, only the side belonging to the model currently open in the viewer can be highlighted/snapshotted.'}
                         </p>
                     </div>

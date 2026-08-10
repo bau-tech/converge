@@ -58,6 +58,7 @@ import { ElementConnectivityPanel } from './components/ElementConnectivityPanel'
 import { CombineModelsPicker, nextCombineColor } from './components/CombineModelsPicker'
 import { FederatedClashPanel } from './components/FederatedClashPanel'
 import { DocumentsPanel } from './components/DocumentsPanel'
+import { AlignmentPanel } from './components/AlignmentPanel'
 import { NotificationBell } from './components/NotificationBell'
 import { SchedulePanel } from './components/SchedulePanel'
 import { SchedulePlaybackView } from './components/SchedulePlaybackView'
@@ -69,6 +70,7 @@ import { listTopics, listViewpoints } from './utils/bcfClient'
 import { pullFromSpeckle, pushToSpeckle } from './utils/bcfSync'
 import { useAuth } from './contexts/AuthContext'
 import { LoginScreen } from './components/LoginScreen'
+import { ResetPasswordScreen } from './components/ResetPasswordScreen'
 import { LandingPage } from './components/LandingPage'
 import { RUNTIME_CONFIG } from './runtimeConfig'
 
@@ -121,6 +123,13 @@ const _urlSeed = (() => {
 // BcfTopicPanel so it can auto-open once that topic actually shows up in
 // its (async-loaded) topics list.
 const _topicGuidSeed = new URLSearchParams(window.location.search).get('topic') || null
+
+// From a password-reset email's link (routers/auth.py's /auth/forgot-password
+// builds "{PUBLIC_APP_URL}/?resetToken=..."). Read into App()'s own state
+// (not just used bare like the seeds above) because, unlike those, this one
+// needs to un-set itself once the reset succeeds and hand control back to
+// the normal authUser gate below — see App()'s resetToken branch.
+const _resetTokenSeed = new URLSearchParams(window.location.search).get('resetToken') || null
 
 // Parse EXTRA_SPECKLE_SERVERS at module load — works without backend
 const ENV_EXTRA_SERVERS = ((raw) => {
@@ -1530,7 +1539,15 @@ function Dashboard({ readOnly = false }) {
         })
         if (!ingestRes.ok) {
             let detail = `HTTP ${ingestRes.status}`
-            try { const b = await ingestRes.json(); detail = b.detail || JSON.stringify(b) } catch {}
+            try {
+                const b = await ingestRes.json()
+                // FastAPI's own request-validation errors (422) shape detail
+                // as an array of {loc, msg, ...} objects, not a string — that
+                // silently rendered as the useless literal "[object Object]"
+                // when interpolated directly (b.detail is truthy so the
+                // JSON.stringify(b) fallback below never ran for this case).
+                detail = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail ?? b)
+            } catch {}
             throw new Error(`Normalizer ingest failed: ${detail}`)
         }
 
@@ -1870,6 +1887,57 @@ function Dashboard({ readOnly = false }) {
     // undefined entry (or COMBINED_MODEL_KEY) means "use the merged set".
     const [chartModelFilters, setChartModelFilters] = useState({})
 
+    // Pre-check the already-loaded (primary) model in CombineModelsPicker,
+    // reflecting reality — it's already in the viewer — and signaling to the
+    // user that picking 1-2 more is what "combine" actually means, rather
+    // than starting from an empty list that implies picking 2+ unrelated
+    // models from scratch. Tracks which key is "the primary's own entry" via
+    // a ref so that switching the MODEL dropdown (not just the project) to a
+    // different branch migrates that entry's key instead of leaving it
+    // behind — leaving it behind was the actual bug: combinedModels kept
+    // whatever branch was open FIRST (e.g. "arc") forever, so switching to
+    // "hvac" left "arc" sitting in the picker looking checked/combined
+    // (colliding with genuinely picking "arc" as an addition — checking its
+    // box actually unchecked this stale entry) while "hvac" itself was never
+    // a key at all, so combinedModels never reached size >= 2 and "Load
+    // combined view" silently did nothing. Doesn't fight the user's own
+    // picks for every OTHER (non-primary) entry — those are untouched here.
+    const primaryAutoSeedKeyRef = useRef(null)
+    useEffect(() => {
+        const branchName = data?.summary?.branch_name
+        if (!branchName) return
+        setCombinedModels(prev => {
+            if (primaryAutoSeedKeyRef.current === branchName) return prev
+            const next = new Map(prev)
+            const existing = primaryAutoSeedKeyRef.current ? next.get(primaryAutoSeedKeyRef.current) : undefined
+            if (primaryAutoSeedKeyRef.current) next.delete(primaryAutoSeedKeyRef.current)
+            next.set(branchName, {
+                branchName,
+                // Must be a raw Speckle commit id (what ingestModelToNormalizer/
+                // resolveObjectId expect), same field toggleCombinedModel uses
+                // for every other entry (branch.commits.items[0].id).
+                // selectedVersion is only set once the user explicitly picks a
+                // historical version from the dropdown — it stays null while
+                // viewing "Latest" (BreadcrumbSelector.jsx's own label falls
+                // back to "Latest" for exactly this same null check). data.
+                // version_id covers that default case: loadModelDataFromNormalizer
+                // sets it to the exact commit id (specificVersionId ||
+                // commits[0].id) that was actually used for this model's own
+                // successful initial ingest, i.e. the resolved "latest" commit
+                // — not a different, normalizer-side identifier as previously
+                // assumed here (that assumption was the actual bug: using
+                // selectedVersion?.id alone sent a null commit_id to ingest
+                // whenever "Latest" was showing, which is the common case).
+                versionId: selectedVersion?.id || data?.version_id || null,
+                color: existing?.color ?? nextCombineColor(0),
+                normalizerModelId: null,
+                hidden: false,
+            })
+            primaryAutoSeedKeyRef.current = branchName
+            return next
+        })
+    }, [data?.summary?.branch_name, selectedVersion?.id, data?.version_id])
+
     const toggleCombinedModel = useCallback((branch) => {
         setCombinedModels(prev => {
             const next = new Map(prev)
@@ -1882,8 +1950,28 @@ function Dashboard({ readOnly = false }) {
                     versionId: latestCommit?.id || null,
                     color: nextCombineColor(next.size),
                     normalizerModelId: null,
+                    hidden: false,
                 })
             }
+            return next
+        })
+    }, [])
+
+    // FederatedBar's per-model eye icon (SpeckleViewer.jsx) — unlike
+    // toggleCombinedModel above (which adds/removes a model from the
+    // combine set entirely, used by CombineModelsPicker's checkboxes), this
+    // just flips a `hidden` flag on an already-combined entry so its chip/
+    // button stays put and can be toggled back on. SpeckleViewer's
+    // federated-loading effect treats hidden entries as "not wanted" and
+    // genuinely unloads their geometry (same mechanism toggleCombinedModel
+    // triggers), rather than the old hide/show-on-already-loaded-geometry
+    // approach that silently no-opped once 3+ models were combined.
+    const setCombinedModelHidden = useCallback((branchName, hidden) => {
+        setCombinedModels(prev => {
+            const entry = prev.get(branchName)
+            if (!entry || !!entry.hidden === !!hidden) return prev
+            const next = new Map(prev)
+            next.set(branchName, { ...entry, hidden })
             return next
         })
     }, [])
@@ -1935,6 +2023,24 @@ function Dashboard({ readOnly = false }) {
         setFederatedElementData(null)
         setChartModelFilters({})
     }, [])
+
+    // Combined/federated view state (picks, tints, active mode) is scoped to
+    // one project — CombineModelsPicker's candidate list and every ingest
+    // call resolve against selectedProject.id, so an entry picked while
+    // viewing a different project carries a commit id that belongs to that
+    // OTHER project's stream. Left in place across a project switch, the
+    // pre-seed effect above skips re-seeding (its "only seed once" guard
+    // checks combinedModels.size, not project identity) and "Load combined
+    // view" then sends that stale commit id paired with the NEW project's
+    // stream id — ingest fails with "Commit ... not found in stream ..."
+    // even though the commit is real, just in a different project. Reset on
+    // every project switch; switching models/branches within the same
+    // project intentionally leaves combinedModels alone (all its entries
+    // still share one valid stream id in that case).
+    useEffect(() => {
+        exitCombineMode()
+        setCombinedModels(new Map())
+    }, [selectedProject?.id, exitCombineMode])
 
     // Stable array reference for SpeckleViewer's federatedModels prop — only
     // changes when the combined set's contents actually change, not on every
@@ -2023,6 +2129,7 @@ function Dashboard({ readOnly = false }) {
                     federatedModels={federatedModelsArray}
                     federatedFullData={federatedElementData}
                     onExitFederated={exitCombineMode}
+                    onSetFederatedModelHidden={setCombinedModelHidden}
                 />
                 {playbackBarOpen && data?.normalizer_model_id && (
                     <div className="absolute bottom-3 left-3 right-3 z-20">
@@ -2040,7 +2147,7 @@ function Dashboard({ readOnly = false }) {
     ), [activeServer.id, selectedProject?.id, data?.version_id, data?.normalizer_model_id,
         fullData, effectiveFilterIds, diffResult, compareVersionId,
         bcfTopics, documentPins, timelinePlaybackIds, timelineSyncEnabled, handleViewerSelection, handleTimelineSync, deactivateCompare, darkMode,
-        combineMode, federatedModelsArray, federatedElementData, exitCombineMode,
+        combineMode, federatedModelsArray, federatedElementData, exitCombineMode, setCombinedModelHidden,
         playbackBarOpen, handleSchedulePlaybackChange])
 
     // ── Canvas panels ─────────────────────────────────────────────────────
@@ -2192,6 +2299,12 @@ function Dashboard({ readOnly = false }) {
     const [showIdsCheck, setShowIdsCheck] = useState(false)
     const [showClashCheck, setShowClashCheck] = useState(false)
     const [showDocuments, setShowDocuments] = useState(false)
+    // The drawing (bim_documents row) currently being aligned to the 3D
+    // model, or null. Not a boolean like the other show* flags — the panel
+    // needs to know *which* drawing, and closes Documents to open (Documents
+    // is a full-screen overlay; alignment needs the live 3D viewer visible
+    // underneath its own floating panel for 3D point picking).
+    const [alignmentDoc, setAlignmentDoc] = useState(null)
     // Presence (not a separate boolean) drives whether ElementConnectivityPanel
     // is shown — { elementId, name } for whichever element opened it.
     const [connectivityTarget, setConnectivityTarget] = useState(null)
@@ -2508,6 +2621,7 @@ function Dashboard({ readOnly = false }) {
                                 </motion.button>
                                 <CombineModelsPicker
                                     models={models}
+                                    primaryBranchName={data?.summary?.branch_name}
                                     combinedModels={combinedModels}
                                     onToggleModel={toggleCombinedModel}
                                     onLoad={loadCombinedModels}
@@ -3047,6 +3161,7 @@ function Dashboard({ readOnly = false }) {
                     {showClashCheck && (
                         <ClashCheckPanel
                             projectId={data?.normalizer_model_id}
+                            streamId={data?.project_id}
                             normalizerUrl={CONFIG.normalizerUrl}
                             viewerRef={speckleViewerRef}
                             topics={bcfTopics}
@@ -3084,7 +3199,6 @@ function Dashboard({ readOnly = false }) {
                             onRequestSync={triggerBcfSync}
                             serverUrl={activeServer.url}
                             serverToken={activeServer.token}
-                            ifcClasses={clashIfcClasses}
                             onClose={() => setShowFederatedClash(false)}
                         />
                     )}
@@ -3092,19 +3206,42 @@ function Dashboard({ readOnly = false }) {
 
                 <AnimatePresence>
                     {showDocuments && (
+                        <ErrorBoundary>
                         <DocumentsPanel
                             streamId={data?.project_id}
                             normalizerUrl={CONFIG.normalizerUrl}
                             serverUrl={activeServer.url}
                             serverToken={activeServer.token}
                             activeModelId={data?.normalizer_model_id}
+                            viewerRef={speckleViewerRef}
                             onClose={() => setShowDocuments(false)}
                             onDocumentsChanged={refreshDocumentPins}
                             onLoadModel={(branchName, commitId) => {
                                 setShowDocuments(false)
                                 loadModelData(data?.project_id, branchName, commitId)
                             }}
+                            onAlignDrawing={(doc) => {
+                                setShowDocuments(false)
+                                setAlignmentDoc(doc)
+                            }}
                         />
+                        </ErrorBoundary>
+                    )}
+                </AnimatePresence>
+
+                <AnimatePresence>
+                    {alignmentDoc && (
+                        <ErrorBoundary>
+                        <AlignmentPanel
+                            doc={alignmentDoc}
+                            streamId={data?.project_id}
+                            normalizerUrl={CONFIG.normalizerUrl}
+                            modelId={data?.normalizer_model_id}
+                            viewerRef={speckleViewerRef}
+                            onClose={() => setAlignmentDoc(null)}
+                            onSaved={() => { setAlignmentDoc(null); refreshDocumentPins() }}
+                        />
+                        </ErrorBoundary>
                     )}
                 </AnimatePresence>
 
@@ -3270,6 +3407,21 @@ function Dashboard({ readOnly = false }) {
 // user's already-loaded state.
 function App() {
     const { user: authUser, loading: authLoading } = useAuth()
+    const [resetToken, setResetToken] = useState(_resetTokenSeed)
+
+    if (resetToken) {
+        return (
+            <ResetPasswordScreen
+                token={resetToken}
+                onDone={() => {
+                    const cleanUrl = new URL(window.location.href)
+                    cleanUrl.searchParams.delete('resetToken')
+                    window.history.replaceState({}, '', cleanUrl)
+                    setResetToken(null)
+                }}
+            />
+        )
+    }
 
     if (authLoading) {
         return (

@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { X, Layers, Eye, EyeOff } from 'lucide-react'
 
@@ -6,20 +5,15 @@ import { X, Layers, Eye, EyeOff } from 'lucide-react'
 // each combined discipline model with its tint color and an independent
 // show/hide toggle, mirroring DiffBar's structure/positioning for the other
 // viewer "mode" overlay (Diff/Compare).
+//
+// Controlled by `models[].hidden` (App.jsx's combinedModels state, flipped
+// via onToggleVisibility -> setCombinedModelHidden) rather than owning its
+// own hidden-set state — a model's hidden flag drives SpeckleViewer's
+// federated-loading effect to genuinely unload/reload its geometry, the
+// same mechanism CombineModelsPicker's checkboxes use, instead of a
+// separate hide/show-on-already-loaded-geometry path that silently no-oped
+// once 3+ models were combined.
 export function FederatedBar({ models = [], onToggleVisibility, onExit }) {
-    const [hidden, setHidden] = useState(() => new Set())
-
-    const toggle = (branchName) => {
-        setHidden((prev) => {
-            const next = new Set(prev)
-            const nowHidden = !next.has(branchName)
-            if (nowHidden) next.add(branchName)
-            else next.delete(branchName)
-            onToggleVisibility?.(branchName, !nowHidden)
-            return next
-        })
-    }
-
     return (
         <motion.div
             initial={{ opacity: 0, y: -10 }}
@@ -37,11 +31,11 @@ export function FederatedBar({ models = [], onToggleVisibility, onExit }) {
                 <div className="w-px h-4 bg-[var(--speckle-outline-3)] flex-shrink-0" />
 
                 {models.map((m) => {
-                    const isHidden = hidden.has(m.branchName)
+                    const isHidden = !!m.hidden
                     return (
                         <button
                             key={m.branchName}
-                            onClick={() => toggle(m.branchName)}
+                            onClick={() => onToggleVisibility?.(m.branchName, !isHidden)}
                             title={isHidden ? `Show ${m.branchName}` : `Hide ${m.branchName}`}
                             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all border ${
                                 isHidden

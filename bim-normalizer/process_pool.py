@@ -35,6 +35,21 @@ def _worker_init() -> None:
         level=log_level,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
     )
+    # A worker that segfaults (confirmed: ifcopenshell's native geometry
+    # code, see clash_check.py's _single_threaded_geometry_iterator) dumps
+    # its full memory image to a core.<pid> file in the container's own
+    # /app — not a mounted volume, so nothing ever cleans it up. One such
+    # crash left behind a 1-2GB file; eight of them (accumulated silently
+    # over about an hour) filled this host's entire disk and crashed
+    # Postgres as collateral damage. BrokenProcessPool already handles a
+    # dead worker gracefully from the app's perspective (run_cpu_bound
+    # recreates the pool and retries), so the core dump itself was never
+    # buying anything but disk risk — disabling it here means any future
+    # native crash, from this or any other cause, degrades to "that job
+    # failed and got retried" instead of "silently eat multiple GB and
+    # eventually take the database down with it."
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     from db.connection import init_pool
     init_pool()
 

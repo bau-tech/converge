@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Layers } from 'lucide-react'
 
@@ -11,14 +11,22 @@ export function nextCombineColor(usedCount) {
     return DISCIPLINE_COLORS[usedCount % DISCIPLINE_COLORS.length]
 }
 
-// Lets the user pick 2+ branches ("ARC"/"STR"/"FM" etc.) within the current
-// project to federate into one 3D view for cross-discipline coordination —
-// see FederatedBar.jsx (viewer overlay) and FederatedClashPanel.jsx (N-way
-// clash checking across the combined set). Reuses the same Map<key, entry>
-// checkbox-toggle shape as IdsCheckPanel.jsx/ClashCheckPanel.jsx's `selected`
-// state, since each combined model needs more per-entry data (version,
-// color, resolved normalizer model id) than a plain string array would hold.
-export function CombineModelsPicker({ models = [], combinedModels, onToggleModel, onLoad, onExit, loading, active }) {
+// Lets the user pick 1+ more branches ("ARC"/"STR"/"FM" etc.) to federate
+// alongside the model already open in the viewer, into one combined 3D
+// view for cross-discipline coordination — see FederatedBar.jsx (viewer
+// overlay) and FederatedClashPanel.jsx (N-way clash checking across the
+// combined set). Reuses the same Map<key, entry> checkbox-toggle shape as
+// IdsCheckPanel.jsx/ClashCheckPanel.jsx's `selected` state, since each
+// combined model needs more per-entry data (version, color, resolved
+// normalizer model id) than a plain string array would hold.
+//
+// The already-open model is pre-seeded into `combinedModels` by App.jsx
+// (so the loading/coloring/hide-show machinery always treats it uniformly
+// with anything else combined) but deliberately isn't offered as a
+// checkbox here — it's not a choice the user is making, it's already true.
+// Showing it as just another row made the count ("Load combined view (3)")
+// read as if 3 separate picks had been made when only 1 extra one had.
+export function CombineModelsPicker({ models = [], primaryBranchName, combinedModels, onToggleModel, onLoad, onExit, loading, active }) {
     const [open, setOpen] = useState(false)
     const containerRef = useRef(null)
 
@@ -29,8 +37,25 @@ export function CombineModelsPicker({ models = [], combinedModels, onToggleModel
         return () => document.removeEventListener('mousedown', handler)
     }, [open])
 
-    const candidateModels = models.filter((m) => m.commits?.totalCount > 0)
-    const count = combinedModels.size
+    const candidateModels = useMemo(
+        () => models.filter((m) => m.commits?.totalCount > 0 && m.name !== primaryBranchName),
+        [models, primaryBranchName]
+    )
+    // combinedModels always includes the pre-seeded primary entry once
+    // data has loaded — exclude it so the "Load combined view" button's own
+    // count/disabled-state reflect only what the user actually chose to add
+    // (picking 1 more is the minimum to combine anything).
+    const additionalCount = useMemo(
+        () => [...combinedModels.keys()].filter((k) => k !== primaryBranchName).length,
+        [combinedModels, primaryBranchName]
+    )
+    // The icon badge is a different signal from the button count above: it
+    // reflects how many models are actually loaded in the viewer right now
+    // (only meaningful once `active`/combineMode is true), not how many are
+    // queued up in an as-yet-unloaded picker selection — so it stays hidden
+    // for the single-model default case and shows the real total (2, 3, ...)
+    // once combined, instead of an always-off-by-one "+N" of just the extras.
+    const loadedCount = active ? combinedModels.size : 0
 
     return (
         <div ref={containerRef} className="relative">
@@ -41,9 +66,9 @@ export function CombineModelsPicker({ models = [], combinedModels, onToggleModel
                 title="Combine models for federated viewing + cross-discipline clash checking"
             >
                 <Layers className="w-6 h-6" />
-                {count > 0 && (
+                {loadedCount >= 2 && (
                     <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-400 text-[9px] font-bold text-black flex items-center justify-center">
-                        {count}
+                        {loadedCount}
                     </span>
                 )}
             </motion.button>
@@ -61,9 +86,16 @@ export function CombineModelsPicker({ models = [], combinedModels, onToggleModel
                         <p className="text-[10px] text-[var(--speckle-foreground-3)] uppercase tracking-wider px-2 pb-1.5">
                             Combine models
                         </p>
+                        {primaryBranchName && (
+                            <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-md text-sm bg-white/5">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0 bg-[var(--speckle-foreground-3)]" />
+                                <span className="flex-1 truncate text-[var(--speckle-foreground-2)]">{primaryBranchName}</span>
+                                <span className="text-[var(--speckle-foreground-3)] text-[10px] shrink-0">already open</span>
+                            </div>
+                        )}
                         <div className="space-y-0.5">
                             {candidateModels.length === 0 ? (
-                                <div className="px-2 py-3 text-xs text-[var(--speckle-foreground-3)] text-center">No models with commits</div>
+                                <div className="px-2 py-3 text-xs text-[var(--speckle-foreground-3)] text-center">No other models with commits</div>
                             ) : candidateModels.map((m) => {
                                 const entry = combinedModels.get(m.name)
                                 return (
@@ -98,15 +130,15 @@ export function CombineModelsPicker({ models = [], combinedModels, onToggleModel
                             ) : (
                                 <button
                                     onClick={() => { onLoad(); setOpen(false) }}
-                                    disabled={count < 2 || loading}
+                                    disabled={additionalCount < 1 || loading}
                                     className="flex-1 py-1.5 rounded-md text-xs font-medium bg-amber-400/15 text-amber-400 hover:bg-amber-400/25 disabled:opacity-40 transition-colors"
                                 >
-                                    {loading ? 'Loading…' : `Load combined view (${count})`}
+                                    {loading ? 'Loading…' : `Load combined view (+${additionalCount})`}
                                 </button>
                             )}
                         </div>
-                        {count < 2 && !active && (
-                            <p className="text-[10px] text-[var(--speckle-foreground-3)] px-2 pt-1.5">Select at least 2 models to combine.</p>
+                        {additionalCount < 1 && !active && (
+                            <p className="text-[10px] text-[var(--speckle-foreground-3)] px-2 pt-1.5">Select at least 1 more model to combine with the one already open.</p>
                         )}
                     </motion.div>
                 )}
