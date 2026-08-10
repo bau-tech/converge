@@ -150,6 +150,16 @@ ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES bcf_organi
 -- existing behaviour — everyone gets emailed — doesn't change for accounts
 -- that never touch the new admin toggle.
 ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- Self-service "forgot password" (routers/auth.py's /auth/forgot-password
+-- and /auth/reset-password), replacing the admin-only reset that was the
+-- sole recovery path before (see bcf/admin.py's reset-password route).
+-- Stores a SHA-256 hash of the emailed token, not the token itself — same
+-- reasoning as password_hash: a DB dump/backup shouldn't hand out live
+-- credentials. One active token per user (a fresh request overwrites the
+-- previous one, which is the desired "old link stops working" behaviour).
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ;
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by
