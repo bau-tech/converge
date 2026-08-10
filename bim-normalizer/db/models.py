@@ -43,6 +43,16 @@ CREATE INDEX IF NOT EXISTS idx_bim_elements_model    ON bim_elements(model_id);
 CREATE INDEX IF NOT EXISTS idx_bim_elements_app_id   ON bim_elements(application_id);
 CREATE INDEX IF NOT EXISTS idx_bim_elements_ifc      ON bim_elements(ifc_class);
 CREATE INDEX IF NOT EXISTS idx_bim_elements_category ON bim_elements(category);
+-- Every category/ifc_class/storey/name filter in chat/agent.py and
+-- db/query.py uses a leading-wildcard ILIKE ('%value%') — plain B-tree
+-- indexes (idx_bim_elements_ifc/_category above) only help '='/prefix
+-- matches, so those lookups were sequential-scanning bim_elements on every
+-- chat filter/query tool call on any model big enough to matter.
+-- bim_parameters.key/value already got this treatment; bim_elements never did.
+CREATE INDEX IF NOT EXISTS idx_bim_elements_category_trgm ON bim_elements USING gin(category gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_ifc_trgm      ON bim_elements USING gin(ifc_class gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_storey_trgm   ON bim_elements USING gin(storey gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_bim_elements_name_trgm     ON bim_elements USING gin(name gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS bim_geometry (
     element_id  UUID PRIMARY KEY REFERENCES bim_elements(element_id) ON DELETE CASCADE,

@@ -38,6 +38,18 @@ export function BcfTopicPanel({
     const [newComment, setNewComment] = useState('')
     const [snapshotUrl, setSnapshotUrl] = useState(null)
 
+    // Caps how many topic rows actually mount — a project with hundreds of
+    // BCF issues used to render every one of them as a live DOM node with
+    // its own onClick handler regardless of whether the list was even
+    // scrolled into view. Resets on projectId (a stable primitive) rather
+    // than the `topics` array itself — App.jsx can hand this a new array
+    // reference on unrelated re-renders (e.g. a single topic being patched
+    // in place via onTopicsChange), which would otherwise snap an
+    // already-expanded "show more" state back to the page size every time.
+    const TOPIC_PAGE_SIZE = 50
+    const [visibleTopicCount, setVisibleTopicCount] = useState(TOPIC_PAGE_SIZE)
+    useEffect(() => { setVisibleTopicCount(TOPIC_PAGE_SIZE) }, [projectId])
+
     const [creating, setCreating] = useState(false)
     const [pendingViewpoint, setPendingViewpoint] = useState(null)
     const [newTitle, setNewTitle] = useState('')
@@ -565,7 +577,7 @@ export function BcfTopicPanel({
                                     {topics.length === 0 && (
                                         <p className="text-xs text-zinc-500 px-2 py-6 text-center">No BCF topics yet</p>
                                     )}
-                                    {topics.map((t) => (
+                                    {topics.slice(0, visibleTopicCount).map((t) => (
                                         <button
                                             key={t.guid}
                                             onClick={() => openTopic(t)}
@@ -587,6 +599,14 @@ export function BcfTopicPanel({
                                             </div>
                                         </button>
                                     ))}
+                                    {topics.length > visibleTopicCount && (
+                                        <button
+                                            onClick={() => setVisibleTopicCount((n) => n + TOPIC_PAGE_SIZE)}
+                                            className="w-full text-center px-2 py-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                                        >
+                                            Show {Math.min(TOPIC_PAGE_SIZE, topics.length - visibleTopicCount)} more ({topics.length - visibleTopicCount} remaining)
+                                        </button>
+                                    )}
                                 </div>
                             )}
                         </div>

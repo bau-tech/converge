@@ -1284,19 +1284,36 @@ def get_element_connectivity(conn, model_id: str, element_id: str, hops: int = 2
                 (frontier,),
             )
             frontier_bboxes = cur.fetchall()
+            # One query per hop instead of one per frontier element per hop
+            # (was O(frontier size) round-trips here, on top of the O(hops)
+            # outer loop) — a LATERAL join with each frontier bbox as its own
+            # VALUES row keeps the same "cap fan-out to 50 per element"
+            # behavior via a per-row LIMIT inside the LATERAL subquery.
             touch_pairs: list[tuple[str, str]] = []
-            for eid, bmin, bmax in frontier_bboxes:
+            if frontier_bboxes:
+                values_sql = ", ".join(["(%s::uuid, %s, %s, %s, %s, %s, %s)"] * len(frontier_bboxes))
+                params: list = []
+                for eid, bmin, bmax in frontier_bboxes:
+                    params.extend([eid, bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]])
+                params.append(model_id)
                 cur.execute(
-                    "SELECT e2.element_id::text FROM bim_elements e2 "
-                    "JOIN bim_geometry g2 ON g2.element_id = e2.element_id "
-                    "WHERE e2.model_id = %s AND e2.element_id != %s::uuid "
-                    "AND g2.bbox_min[1] <= %s AND g2.bbox_max[1] >= %s "
-                    "AND g2.bbox_min[2] <= %s AND g2.bbox_max[2] >= %s "
-                    "AND g2.bbox_min[3] <= %s AND g2.bbox_max[3] >= %s "
-                    "LIMIT 50",
-                    (model_id, eid, bmax[0], bmin[0], bmax[1], bmin[1], bmax[2], bmin[2]),
+                    f"""
+                    SELECT f.fid::text, e2.element_id::text
+                    FROM (VALUES {values_sql}) AS f(fid, bxmin, bymin, bzmin, bxmax, bymax, bzmax)
+                    JOIN LATERAL (
+                        SELECT e2.element_id
+                        FROM bim_elements e2
+                        JOIN bim_geometry g2 ON g2.element_id = e2.element_id
+                        WHERE e2.model_id = %s AND e2.element_id != f.fid
+                          AND g2.bbox_min[1] <= f.bxmax AND g2.bbox_max[1] >= f.bxmin
+                          AND g2.bbox_min[2] <= f.bymax AND g2.bbox_max[2] >= f.bymin
+                          AND g2.bbox_min[3] <= f.bzmax AND g2.bbox_max[3] >= f.bzmin
+                        LIMIT 50
+                    ) e2 ON true
+                    """,
+                    params,
                 )
-                touch_pairs.extend((eid, other_id) for (other_id,) in cur.fetchall())
+                touch_pairs = [(fid, other_id) for fid, other_id in cur.fetchall()]
 
             next_frontier: list[str] = []
 

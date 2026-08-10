@@ -181,6 +181,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     const [showBcfTopics, setShowBcfTopics] = useState(true)
     const [bcfPinPositions, setBcfPinPositions] = useState({})
     const bcfRafRef = useRef(null)
+    const lastBcfPinsRef = useRef({})
 
     // Document pins — small badges over elements that have a linked document
     // (bim_documents.linked_element), positioned from the element's geometry
@@ -188,6 +189,27 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     const [showDocumentPins, setShowDocumentPins] = useState(true)
     const [docPinPositions, setDocPinPositions] = useState({})
     const docPinRafRef = useRef(null)
+    const lastDocPinsRef = useRef({})
+
+    // Both pin-tracking rAF loops below recompute pin screen positions every
+    // frame (needed — the camera can move any frame) but used to call
+    // setState with a brand-new object unconditionally, forcing a full React
+    // re-render 60x/second even while the camera sits still and every
+    // position is byte-identical to last frame. Rounding to whole pixels
+    // (sub-pixel jitter is invisible anyway) and skipping setState when
+    // nothing actually changed turns "camera idle" back into "no re-renders",
+    // without changing the still-real "camera moving" case at all.
+    const pinsEqual = (a, b) => {
+        const aKeys = Object.keys(a)
+        if (aKeys.length !== Object.keys(b).length) return false
+        for (const key of aKeys) {
+            const pa = a[key], pb = b[key]
+            if (!pb || Math.round(pa.x) !== Math.round(pb.x) || Math.round(pa.y) !== Math.round(pb.y) || pa.visible !== pb.visible) {
+                return false
+            }
+        }
+        return true
+    }
 
     // Shared by captureViewpoint() and captureViewpointForElements() — reads
     // the current camera, clipping planes, and a screenshot into a BCF-shaped
@@ -1387,6 +1409,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     useEffect(() => {
         if (!showBcfTopics || !isViewerReady || !bcfTopics.length) {
             if (bcfRafRef.current) cancelAnimationFrame(bcfRafRef.current)
+            lastBcfPinsRef.current = {}
             setBcfPinPositions({})
             return
         }
@@ -1399,7 +1422,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 const pos = projectWorldPoint(cvp.x, cvp.y, cvp.z)
                 if (pos?.visible) nextPins[topic.guid] = pos
             }
-            setBcfPinPositions(nextPins)
+            if (!pinsEqual(lastBcfPinsRef.current, nextPins)) {
+                lastBcfPinsRef.current = nextPins
+                setBcfPinPositions(nextPins)
+            }
             bcfRafRef.current = requestAnimationFrame(loop)
         }
 
@@ -1412,6 +1438,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     useEffect(() => {
         if (!showDocumentPins || !isViewerReady || !documentPins.length) {
             if (docPinRafRef.current) cancelAnimationFrame(docPinRafRef.current)
+            lastDocPinsRef.current = {}
             setDocPinPositions({})
             return
         }
@@ -1424,7 +1451,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 const pos = projectWorldPoint(c[0], c[1], c[2])
                 if (pos?.visible) nextPins[pin.speckle_id] = pos
             }
-            setDocPinPositions(nextPins)
+            if (!pinsEqual(lastDocPinsRef.current, nextPins)) {
+                lastDocPinsRef.current = nextPins
+                setDocPinPositions(nextPins)
+            }
             docPinRafRef.current = requestAnimationFrame(loop)
         }
 

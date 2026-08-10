@@ -152,6 +152,8 @@ def apply_overrides(model_id: str):
             """, (model_id,))
             updated = cur.rowcount
         conn.commit()
+        from chat.agent import invalidate_model_query_cache
+        invalidate_model_query_cache(model_id)
         logger.info("Applied %d overrides to model %s", updated, model_id)
         return {"updated": updated}
     except HTTPException:

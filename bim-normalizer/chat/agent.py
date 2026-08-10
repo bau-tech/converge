@@ -938,7 +938,18 @@ def _query_materials(conn, model_id: str, category: str = None) -> list[dict]:
     nothing, for models ingested before canonical_key existed — this used to
     be the *only* path here, independently re-deriving a weaker version of
     logic db/query.py's dashboard-facing queries already got right.
+
+    Cached per (model_id, category) — see _cached_model_query's module
+    comment; a chat turn calling get_materials more than once (or a
+    follow-up turn asking again) used to re-run this JOIN every time.
     """
+    return _cached_model_query(
+        ("materials", model_id, category),
+        lambda: _query_materials_uncached(conn, model_id, category),
+    )
+
+
+def _query_materials_uncached(conn, model_id: str, category: str = None) -> list[dict]:
     extra_where = ""
     params: list = [model_id]
     if category:
@@ -1000,7 +1011,13 @@ def _query_profiles(conn, model_id: str) -> list[dict]:
     _steel_element_ids() returns None (not an empty set) when there's no
     material/grade data at all, so unfiltered models still fall back to
     showing whatever profile/grade values exist instead of an empty result.
+
+    Cached per model_id — see _cached_model_query's module comment.
     """
+    return _cached_model_query(("profiles", model_id), lambda: _query_profiles_uncached(conn, model_id))
+
+
+def _query_profiles_uncached(conn, model_id: str) -> list[dict]:
     with conn.cursor() as cur:
         steel_ids = _steel_element_ids(cur, model_id)
         scope_sql, scope_params = "", []
@@ -1626,7 +1643,57 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
 # System prompt builder — enriched with DB context + CoT guidance (items 2 & 5)
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str:
+# Shared by _build_static_model_context (below) and _query_materials/
+# _query_profiles — all three re-derive data that only ever changes on a
+# fresh ingest, which always mints a brand-new model_id (see bim_documents'
+# own "model_id is minted fresh per ingested commit" comment in
+# db/models.py), so an existing model_id's results are immutable by
+# construction... with one exception: routers/overrides.py's
+# apply_overrides() UPDATEs bim_elements.category/ifc_class in place for an
+# existing model_id, which is why that route explicitly calls
+# invalidate_model_query_cache() after committing. The TTL below is just a
+# safety net against any other in-place-mutation path this doesn't know
+# about, not the primary invalidation mechanism. Keyed by (kind, model_id,
+# *extra) so materials/profiles (which take an optional category filter)
+# share the cache without colliding on key.
+_MODEL_QUERY_CACHE_TTL_S = 300
+_model_query_cache: dict[tuple, tuple[float, object]] = {}
+
+
+def invalidate_model_query_cache(model_id: str) -> None:
+    """Call after any UPDATE to bim_elements/bim_parameters for an
+    already-ingested model_id (as opposed to a fresh ingest, which never
+    needs this — see module comment above). Drops every cached tool result
+    for that model_id, not just the system prompt."""
+    for key in [k for k in _model_query_cache if k[1] == model_id]:
+        _model_query_cache.pop(key, None)
+
+
+def _cached_model_query(cache_key: tuple, compute):
+    cached = _model_query_cache.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _MODEL_QUERY_CACHE_TTL_S:
+        return cached[1]
+    result = compute()
+    _model_query_cache[cache_key] = (now, result)
+    return result
+
+
+def _get_static_model_context(conn, model_id: str) -> str:
+    """Cached wrapper — this used to re-run on every single chat turn
+    (6 queries reproducing byte-identical output for the life of a
+    conversation), which for a 10-message chat meant paying for the same
+    rollup 10 times."""
+    return _cached_model_query(
+        ("static_prompt", model_id),
+        lambda: _build_static_model_context(conn, model_id),
+    )
+
+
+def _build_static_model_context(conn, model_id: str) -> str:
+    """The model_id-only-dependent part of the system prompt (everything
+    that doesn't depend on this particular request's model_context) — see
+    _get_static_model_context for caching."""
     from psycopg2.extras import RealDictCursor
 
     def _fetch(cur, sql, params=()):
@@ -1742,23 +1809,13 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
     if param_keys:
         prompt += f"\n## Available Parameter Keys\n{', '.join(param_keys[:30])}\n"
 
-    if model_context:
-        for label, key in [("Families", "families"), ("Construction Phases", "phases"), ("Worksets", "worksets")]:
-            vals = model_context.get(key)
-            if vals:
-                prompt += f"\n## {label}\n{', '.join(str(v) for v in vals[:20])}\n"
+    return prompt
 
-        sel = model_context.get("selectedElement")
-        if sel and (sel.get("speckleId") or sel.get("name")):
-            prompt += (
-                f"\n## Currently Selected Element (in the 3D viewer)\n"
-                f"Name: {sel.get('name') or 'Unnamed'}, Speckle ID: {sel.get('speckleId') or 'unknown'}, "
-                f"Category: {sel.get('category') or 'unknown'}\n"
-                "When the user refers to \"the selected element/object\", \"this element\", \"it\", or "
-                "similar, use this Speckle ID as the `reference` argument for tools like find_nearby_elements.\n"
-            )
 
-    prompt += (
+# Fully static (no model_id, no DB) — module-level constant rather than
+# rebuilt on every call, since _build_system_prompt used to reconstruct this
+# same literal string on every single chat turn for no reason.
+_TOOLS_AND_REASONING_TRAILER = (
         "\n## Tools Available\n"
         "- filter_elements: highlight elements by category, ifc_class, storey, name\n"
         "- get_summary: aggregate counts/volumes grouped by category, storey, or ifc_class\n"
@@ -1787,8 +1844,29 @@ def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "
         "If a filter returns 0 results, use the fallback information to suggest alternatives.\n"
         "Keep answers concise. Report element counts after every filter."
-    )
-    return prompt
+)
+
+
+def _build_system_prompt(conn, model_id: str, model_context: dict | None) -> str:
+    prompt = _get_static_model_context(conn, model_id)
+
+    if model_context:
+        for label, key in [("Families", "families"), ("Construction Phases", "phases"), ("Worksets", "worksets")]:
+            vals = model_context.get(key)
+            if vals:
+                prompt += f"\n## {label}\n{', '.join(str(v) for v in vals[:20])}\n"
+
+        sel = model_context.get("selectedElement")
+        if sel and (sel.get("speckleId") or sel.get("name")):
+            prompt += (
+                f"\n## Currently Selected Element (in the 3D viewer)\n"
+                f"Name: {sel.get('name') or 'Unnamed'}, Speckle ID: {sel.get('speckleId') or 'unknown'}, "
+                f"Category: {sel.get('category') or 'unknown'}\n"
+                "When the user refers to \"the selected element/object\", \"this element\", \"it\", or "
+                "similar, use this Speckle ID as the `reference` argument for tools like find_nearby_elements.\n"
+            )
+
+    return prompt + _TOOLS_AND_REASONING_TRAILER
 
 
 # ---------------------------------------------------------------------------
