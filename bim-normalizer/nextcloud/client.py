@@ -12,6 +12,7 @@ Groupfolders app mounts group folders for their members — so uploading to
 member of that project's group.
 """
 import logging
+import mimetypes
 from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
@@ -22,6 +23,14 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 _DAV_NS = {"d": "DAV:", "oc": "http://owncloud.org/ns", "nc": "http://nextcloud.org/ns"}
+
+# Shared across every call this module makes (and, via nextcloud/groupfolders.py
+# and nextcloud/provisioning.py's _ocs_request, every OCS call too) so repeated
+# requests to the same Nextcloud host reuse one pooled keep-alive connection
+# instead of paying a fresh TCP+TLS handshake each time — this integration is
+# chatty (a PROPFIND per folder navigation, per upload, per hourly reconcile
+# sweep), so connection reuse is a meaningful win, not a micro-optimisation.
+_session = requests.Session()
 
 
 class NextcloudError(Exception):
@@ -55,7 +64,7 @@ def _ocs_request(method: str, path: str, auth: tuple[str, str], base: str = "ocs
     its endpoints live directly under the app path with no /ocs/vN.php/
     prefix at all. groupfolders.py passes base="" for those calls."""
     url = f"{settings.NEXTCLOUD_URL}/{path.lstrip('/')}" if not base else f"{settings.NEXTCLOUD_URL}/{base}/{path.lstrip('/')}"
-    resp = requests.request(
+    resp = _session.request(
         method, url, auth=auth,
         headers={"OCS-APIRequest": "true", "Accept": "application/json"},
         timeout=30,
@@ -131,7 +140,7 @@ def list_folder(path: str, depth: str = "1") -> list[dict]:
     """List immediate children of `path` (Depth: 1) or the whole subtree
     (Depth: infinity, used by reconcile.py). Returns [] if the folder
     doesn't exist yet rather than raising, since callers create-on-demand."""
-    resp = requests.request(
+    resp = _session.request(
         "PROPFIND", _dav_url(path), auth=_auth(),
         headers={"Depth": depth, "Content-Type": "application/xml"},
         data=_PROPFIND_BODY, timeout=30,
@@ -143,17 +152,8 @@ def list_folder(path: str, depth: str = "1") -> list[dict]:
     return _parse_propfind(resp.content, path)
 
 
-def get_file_metadata(path: str) -> dict | None:
-    entries = list_folder(path.rsplit("/", 1)[0] if "/" in path else "", depth="1")
-    name = path.rsplit("/", 1)[-1]
-    for e in entries:
-        if e["name"] == name:
-            return e
-    return None
-
-
 def download_bytes(path: str) -> bytes:
-    resp = requests.get(_dav_url(path), auth=_auth(), timeout=120)
+    resp = _session.get(_dav_url(path), auth=_auth(), timeout=120)
     if resp.status_code == 404:
         raise NextcloudError(f"File not found: {path}")
     resp.raise_for_status()
@@ -162,18 +162,43 @@ def download_bytes(path: str) -> bytes:
 
 def ensure_folder(path: str) -> None:
     """MKCOL is idempotent-ish here — 405 means it already exists."""
-    resp = requests.request("MKCOL", _dav_url(path), auth=_auth(), timeout=30)
+    resp = _session.request("MKCOL", _dav_url(path), auth=_auth(), timeout=30)
     if resp.status_code not in (201, 405):
         raise NextcloudError(f"MKCOL {path} failed: {resp.status_code} {resp.text[:300]}")
+
+
+def _parse_oc_fileid(header_value: str | None) -> int | None:
+    """The OC-FileId response header (present on every successful PUT/GET) is
+    Nextcloud's fixed-width fileid+instanceid concatenation — literally
+    str_pad($fileid, 8, '0', STR_PAD_LEFT) . $instanceId in Nextcloud's own
+    DAV backend. Confirmed against a live PUT response ("00000344ocfb094xllhx"
+    -> fileid 344): the numeric fileid is always exactly the first 8
+    characters, however long the trailing instance-id happens to be — so this
+    is a stable parse, not a guess."""
+    if not header_value or len(header_value) < 8:
+        return None
+    try:
+        return int(header_value[:8])
+    except ValueError:
+        return None
 
 
 def upload_bytes(path: str, content: bytes, overwrite: bool) -> dict:
     """Upload to `path`. overwrite=False (new document) refuses to clobber an
     existing file and instead retries once with a "(1)" suffix on collision;
     overwrite=True (a revision) omits If-None-Match so Nextcloud auto-versions
-    the prior content instead of rejecting the write."""
+    the prior content instead of rejecting the write.
+
+    Reads fileid/etag straight off the PUT response's OC-FileId/OC-ETag
+    headers instead of following up with a PROPFIND (get_file_metadata) —
+    that follow-up used to list the *entire containing folder* just to find
+    the one file this call already knows the path of. mime_type is a
+    filename-extension guess rather than Nextcloud's own content-sniffed
+    type; the only consumer (routers/documents.py's download Content-Type
+    header) doesn't need sniffing precision for that.
+    """
     headers = {} if overwrite else {"If-None-Match": "*"}
-    resp = requests.put(_dav_url(path), auth=_auth(), data=content, headers=headers, timeout=120)
+    resp = _session.put(_dav_url(path), auth=_auth(), data=content, headers=headers, timeout=120)
     if resp.status_code == 412 and not overwrite:
         stem, _, ext = path.rpartition(".")
         alt_path = f"{stem} (1).{ext}" if stem else f"{path} (1)"
@@ -183,14 +208,22 @@ def upload_bytes(path: str, content: bytes, overwrite: bool) -> dict:
         # of raising, bypassing the "refuse to clobber" contract this
         # function documents for overwrite=False: no version bump, no
         # bim_document_events record, none of revise()'s gate resets.
-        resp = requests.put(_dav_url(alt_path), auth=_auth(), data=content, headers=headers, timeout=120)
+        resp = _session.put(_dav_url(alt_path), auth=_auth(), data=content, headers=headers, timeout=120)
         path = alt_path
     if resp.status_code >= 400:
         raise NextcloudError(f"PUT {path} failed: {resp.status_code} {resp.text[:300]}")
-    meta = get_file_metadata(path)
-    if meta is None:
-        raise NextcloudError(f"Upload to {path} succeeded but metadata lookup failed")
-    return meta
+    fileid = _parse_oc_fileid(resp.headers.get("OC-FileId"))
+    if fileid is None:
+        raise NextcloudError(f"Upload to {path} succeeded but response carried no OC-FileId header")
+    name = path.rsplit("/", 1)[-1]
+    return {
+        "path": path,
+        "name": name,
+        "fileid": fileid,
+        "etag": (resp.headers.get("OC-ETag") or resp.headers.get("ETag") or "").strip('"'),
+        "size": len(content),
+        "mime_type": mimetypes.guess_type(name)[0],
+    }
 
 
 def move(src_path: str, dst_path: str) -> None:
@@ -206,7 +239,7 @@ def move(src_path: str, dst_path: str) -> None:
     dst_url = _dav_url(dst_path)
     parts = urlsplit(dst_url)
     dst_url = urlunsplit((parts.scheme, parts.netloc, quote(parts.path, safe="/"), parts.query, parts.fragment))
-    resp = requests.request(
+    resp = _session.request(
         "MOVE", _dav_url(src_path), auth=_auth(),
         headers={"Destination": dst_url, "Overwrite": "F"},
         timeout=30,
@@ -216,7 +249,7 @@ def move(src_path: str, dst_path: str) -> None:
 
 
 def delete(path: str) -> None:
-    resp = requests.delete(_dav_url(path), auth=_auth(), timeout=30)
+    resp = _session.delete(_dav_url(path), auth=_auth(), timeout=30)
     if resp.status_code not in (204, 404):
         raise NextcloudError(f"DELETE {path} failed: {resp.status_code} {resp.text[:300]}")
 
@@ -225,7 +258,7 @@ def list_versions(fileid: int) -> list[dict]:
     """Nextcloud's WebDAV versions API is keyed by fileid, not path — stable
     across moves/renames, which is why bim_documents stores nc_fileid."""
     url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/versions/{settings.NEXTCLOUD_USER}/versions/{fileid}"
-    resp = requests.request(
+    resp = _session.request(
         "PROPFIND", url, auth=_auth(),
         headers={"Depth": "1", "Content-Type": "application/xml"},
         data=_PROPFIND_BODY, timeout=30,
@@ -252,6 +285,6 @@ def list_versions(fileid: int) -> list[dict]:
 
 def download_version(fileid: int, version_id: str) -> bytes:
     url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/versions/{settings.NEXTCLOUD_USER}/versions/{fileid}/{version_id}"
-    resp = requests.get(url, auth=_auth(), timeout=120)
+    resp = _session.get(url, auth=_auth(), timeout=120)
     resp.raise_for_status()
     return resp.content

@@ -6,9 +6,11 @@ Nextcloud has no CAD preview provider at all (confirmed: always 404s for
 .dxf/.dwg), so without this, every DWG/DXF document falls back to a generic
 file icon in the Documents kanban board instead of an actual preview.
 
-Renders fresh on every request rather than caching, matching
-routers/documents.py's preview_dwg_as_dxf route's same "proxy-on-demand"
-philosophy for the exact same file types.
+This function itself always renders fresh — its caller, /thumbnail
+(thumbnail_document), is the one that caches the resulting PNG keyed by
+(nc_fileid, etag) so a given file version is only ever rendered once. The
+.dwg -> .dxf conversion route (preview_dwg_as_dxf) still re-converts on every
+request; only the thumbnail path is cached.
 """
 import io
 import threading

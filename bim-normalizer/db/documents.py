@@ -400,7 +400,17 @@ def set_suitability_code(conn, doc_id: str, code: str, actor: str, actor_guid: s
 def bump_revision(conn, doc_id: str, *, nc_path: str, size_bytes: int | None, etag: str | None) -> dict:
     """A revised document must re-earn every downstream ISO 19650 gate again —
     increments revision and resets reviewed/approved/verified/suitability_code
-    to false/NULL."""
+    to false/NULL.
+
+    Also evicts any cached thumbnail (bim_document_thumbnails) for this
+    file's nc_fileid. This can't be left to the cache's own etag-match check
+    to catch: confirmed live against this deployment's Nextcloud that its
+    ETag does not reliably change when a file is overwritten in place (two
+    uploads of different-length content came back with the identical ETag),
+    so an etag comparison alone would keep serving the pre-revision
+    thumbnail indefinitely. Deleting here, at the one call site that
+    reliably knows content just changed, doesn't depend on ETag behaving
+    correctly at all."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -418,9 +428,10 @@ def bump_revision(conn, doc_id: str, *, nc_path: str, size_bytes: int | None, et
                 """,
                 (nc_path, size_bytes, etag, doc_id),
             )
-            row = cur.fetchone()
+            doc = _row_to_doc(cur.fetchone())
+            cur.execute("DELETE FROM bim_document_thumbnails WHERE nc_fileid = %s", (doc["nc_fileid"],))
         conn.commit()
-        return _row_to_doc(row)
+        return doc
     except Exception:
         conn.rollback()
         raise
@@ -575,3 +586,44 @@ def get_document_author_guid(conn, doc_id: str) -> str | None:
         )
         row = cur.fetchone()
     return str(row[0]) if row and row[0] else None
+
+
+def get_cached_thumbnail(conn, nc_fileid: int, etag: str | None) -> tuple[str, bytes] | None:
+    """(content_type, content) if a thumbnail was already rendered for this
+    exact file version, else None. etag=None (a document reconciled before
+    Nextcloud ever reported one) never matches — always a miss, never a
+    false hit — since there's nothing to confirm the cached render is still
+    current."""
+    if not etag:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content_type, content FROM bim_document_thumbnails WHERE nc_fileid = %s AND etag = %s",
+            (nc_fileid, etag),
+        )
+        row = cur.fetchone()
+    return (row[0], bytes(row[1])) if row else None
+
+
+def cache_thumbnail(conn, nc_fileid: int, etag: str, content_type: str, content: bytes) -> None:
+    """One row per file (upsert on nc_fileid, not one per etag ever seen) —
+    a revision's new etag simply overwrites the prior render rather than
+    accumulating stale rows forever."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bim_document_thumbnails (nc_fileid, etag, content_type, content)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (nc_fileid) DO UPDATE SET
+                    etag = EXCLUDED.etag,
+                    content_type = EXCLUDED.content_type,
+                    content = EXCLUDED.content,
+                    created_at = NOW()
+                """,
+                (nc_fileid, etag, content_type, content),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise

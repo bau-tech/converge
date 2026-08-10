@@ -480,6 +480,24 @@ CREATE INDEX IF NOT EXISTS idx_bim_notifications_unread ON bim_notifications(use
 -- "assigned to" notifications (see notifications/dispatch.py's
 -- notify_bcf_assignment, fired from bcf/topics.py).
 ALTER TABLE bim_notifications ADD COLUMN IF NOT EXISTS topic_guid UUID;
+
+-- Rendered-thumbnail cache for routers/documents.py's /thumbnail route.
+-- Keyed by nc_fileid (stable across renames/moves, like bim_documents' own
+-- key) with etag as a staleness check — bump_revision() gives a document a
+-- new etag on every re-upload, so a stale cached thumbnail is simply a cache
+-- miss on next request, never served. One row per file (upsert on nc_fileid,
+-- not one row per etag ever seen) so this table can't grow unboundedly as
+-- documents get revised. Covers every /thumbnail source (Nextcloud's own
+-- preview proxy, and the DXF/DWG/PDF fallback renderers), not just the
+-- custom-rendered ones, since even the proxy path pays a Nextcloud round
+-- trip this cache skips entirely on a hit.
+CREATE TABLE IF NOT EXISTS bim_document_thumbnails (
+    nc_fileid     BIGINT PRIMARY KEY,
+    etag          TEXT NOT NULL,
+    content_type  TEXT NOT NULL,
+    content       BYTEA NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 

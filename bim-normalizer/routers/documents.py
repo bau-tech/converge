@@ -18,6 +18,7 @@ approver. Roles are assigned via bcf-server's admin panel (bcf/admin.py).
 import asyncio
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -108,21 +109,37 @@ def list_documents(stream_id: str, status: str | None = None, linked_element: st
         release_conn(conn)
 
 
+def _run_on_each_status_root(fn) -> None:
+    """Run fn(status_subfolder) once per status root (WIP/Shared/Published/
+    Archived) concurrently instead of one at a time — these 4 Nextcloud calls
+    never depend on each other, so the old sequential loop paid 4x the
+    round-trip latency for no reason. Used by create_folder/rename_folder/
+    delete_folder below; each fn already does its own error handling
+    (propagate vs. log-and-continue), so this only changes the scheduling."""
+    with ThreadPoolExecutor(max_workers=len(_STATUS_FOLDERS)) as pool:
+        for _ in pool.map(fn, _STATUS_FOLDERS.values()):
+            pass
+
+
 def _union_subfolder_names(group_folder: str, path: str) -> set[str]:
     """Subfolder names at `path`, unioned across all 4 status roots — a
     folder is one logical thing spanning the whole WIP->Shared->Published->
     Archived workflow (see create_folder), and may exist asymmetrically if
     created/renamed directly in Nextcloud under only one status root.
     Shared by list_subfolders (below) and rename_folder's destination-name
-    collision check."""
+    collision check. The 4 PROPFINDs run concurrently (see
+    _run_on_each_status_root) — they're independent reads, no reason to
+    serialize them."""
     from nextcloud.client import list_folder as nc_list_folder
 
-    names: set[str] = set()
-    for status_sub in _STATUS_FOLDERS.values():
+    def _list(status_sub: str) -> list[dict]:
         base = f"{group_folder}/{status_sub}/{path}" if path else f"{group_folder}/{status_sub}"
-        for entry in nc_list_folder(base, depth="1"):
-            if entry["is_dir"]:
-                names.add(entry["name"])
+        return nc_list_folder(base, depth="1")
+
+    names: set[str] = set()
+    with ThreadPoolExecutor(max_workers=len(_STATUS_FOLDERS)) as pool:
+        for entries in pool.map(_list, _STATUS_FOLDERS.values()):
+            names.update(e["name"] for e in entries if e["is_dir"])
     return names
 
 
@@ -229,56 +246,79 @@ def thumbnail_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(
     instead of the generic icon every other unpreviewable format gets. .pdf
     gets the same treatment via pdf_thumbnail.py (pdftoppm) — lightweight,
     unlike DOCX/XLSX which would need a full LibreOffice pipeline (not
-    implemented, deliberately deprioritized)."""
-    import requests
+    implemented, deliberately deprioritized).
+
+    Result is cached in bim_document_thumbnails keyed by (nc_fileid, etag) —
+    every source below used to redo its work (a Nextcloud preview round trip,
+    or a full file download + DWG/DXF/PDF conversion) on every single
+    request, for every viewer, forever. A cache hit skips all Nextcloud I/O
+    entirely; a miss renders once and the next request for the same file
+    version is a hit. A new etag (bump_revision on /revise) naturally misses
+    and re-renders, never serving a stale thumbnail."""
     from config import settings
     from db.connection import get_conn, release_conn
+    from db.documents import get_cached_thumbnail, cache_thumbnail
 
     conn = get_conn()
     try:
         doc = _require_doc(conn, doc_id, user)
+        cached = get_cached_thumbnail(conn, doc["nc_fileid"], doc["etag"])
     finally:
         release_conn(conn)
+    if cached is not None:
+        content_type, content = cached
+        return Response(content=content, media_type=content_type)
 
-    from nextcloud.client import _auth
-    resp = requests.get(
+    from nextcloud.client import _auth, _session
+    resp = _session.get(
         f"{settings.NEXTCLOUD_URL}/index.php/core/preview",
         params={"fileId": doc["nc_fileid"], "x": 256, "y": 256, "a": "1"},
         auth=_auth(), timeout=30,
     )
+    content_type: str | None = None
+    content: bytes | None = None
+
     if resp.status_code == 200:
-        return Response(content=resp.content, media_type=resp.headers.get("Content-Type", "image/png"))
+        content_type = resp.headers.get("Content-Type", "image/png")
+        content = resp.content
+    else:
+        filename = doc["filename"].lower()
+        if filename.endswith(".dxf") or filename.endswith(".dwg"):
+            from nextcloud.client import download_bytes
+            from dxf_thumbnail import render_dxf_thumbnail, DxfThumbnailError
 
-    filename = doc["filename"].lower()
-    if filename.endswith(".dxf") or filename.endswith(".dwg"):
-        from nextcloud.client import download_bytes
-        from dxf_thumbnail import render_dxf_thumbnail, DxfThumbnailError
-
-        raw = download_bytes(doc["nc_path"])
-        if filename.endswith(".dwg"):
-            from dwg_convert import convert_dwg_to_dxf, DwgConversionError
+            raw = download_bytes(doc["nc_path"])
+            if filename.endswith(".dwg"):
+                from dwg_convert import convert_dwg_to_dxf, DwgConversionError
+                try:
+                    raw = convert_dwg_to_dxf(raw)
+                except DwgConversionError as exc:
+                    raise HTTPException(status_code=404, detail=f"No preview available: {exc}")
             try:
-                raw = convert_dwg_to_dxf(raw)
-            except DwgConversionError as exc:
+                content = render_dxf_thumbnail(raw)
+                content_type = "image/png"
+            except DxfThumbnailError as exc:
                 raise HTTPException(status_code=404, detail=f"No preview available: {exc}")
+        elif filename.endswith(".pdf"):
+            from nextcloud.client import download_bytes
+            from pdf_thumbnail import render_pdf_thumbnail, PdfThumbnailError
+
+            raw = download_bytes(doc["nc_path"])
+            try:
+                content = render_pdf_thumbnail(raw)
+                content_type = "image/png"
+            except PdfThumbnailError as exc:
+                raise HTTPException(status_code=404, detail=f"No preview available: {exc}")
+        else:
+            raise HTTPException(status_code=404, detail="No preview available")
+
+    if doc["etag"]:
+        conn = get_conn()
         try:
-            png = render_dxf_thumbnail(raw)
-        except DxfThumbnailError as exc:
-            raise HTTPException(status_code=404, detail=f"No preview available: {exc}")
-        return Response(content=png, media_type="image/png")
-
-    if filename.endswith(".pdf"):
-        from nextcloud.client import download_bytes
-        from pdf_thumbnail import render_pdf_thumbnail, PdfThumbnailError
-
-        raw = download_bytes(doc["nc_path"])
-        try:
-            png = render_pdf_thumbnail(raw)
-        except PdfThumbnailError as exc:
-            raise HTTPException(status_code=404, detail=f"No preview available: {exc}")
-        return Response(content=png, media_type="image/png")
-
-    raise HTTPException(status_code=404, detail="No preview available")
+            cache_thumbnail(conn, doc["nc_fileid"], doc["etag"], content_type, content)
+        finally:
+            release_conn(conn)
+    return Response(content=content, media_type=content_type)
 
 
 @router.post("/projects/{stream_id}/documents/upload")
@@ -394,8 +434,7 @@ def create_folder(
 
     group_folder = _group_folder(stream_id)
     try:
-        for sub in _STATUS_FOLDERS.values():
-            ensure_folder(f"{group_folder}/{sub}/{folder_path}")
+        _run_on_each_status_root(lambda sub: ensure_folder(f"{group_folder}/{sub}/{folder_path}"))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud folder creation failed: {exc}")
 
@@ -445,11 +484,13 @@ def delete_folder(stream_id: str, path: str, user: CurrentUser = Depends(require
     # via nc_delete's own tolerance; any other failure is logged rather than
     # aborting the loop, since partial cleanup is still strictly better than
     # none and the DB side (the part users actually see) is already done.
-    for sub in _STATUS_FOLDERS.values():
+    def _delete_one(sub: str) -> None:
         try:
             nc_delete(f"{group_folder}/{sub}/{folder_path}")
         except Exception as exc:
             logger.warning("delete_folder: failed to remove %s/%s: %s", sub, folder_path, exc)
+
+    _run_on_each_status_root(_delete_one)
 
     return {"deleted": folder_path, "documents_removed": len(affected)}
 
@@ -497,11 +538,13 @@ def rename_folder(stream_id: str, body: RenameFolderRequest, user: CurrentUser =
     if new_name in existing:
         raise HTTPException(status_code=409, detail=f'A folder named "{new_name}" already exists here')
 
-    for sub in _STATUS_FOLDERS.values():
+    def _move_one(sub: str) -> None:
         try:
             nc_move(f"{group_folder}/{sub}/{old_path}", f"{group_folder}/{sub}/{new_path}")
         except Exception as exc:
             logger.warning("rename_folder: failed to move %s/%s -> %s: %s", sub, old_path, new_path, exc)
+
+    _run_on_each_status_root(_move_one)
 
     conn = get_conn()
     try:
