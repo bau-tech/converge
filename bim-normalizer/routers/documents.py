@@ -19,7 +19,7 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -885,6 +885,114 @@ def unlink_element(stream_id: str, doc_id: str, user: CurrentUser = Depends(requ
         return updated
     finally:
         release_conn(conn)
+
+
+class AlignmentPoint(BaseModel):
+    drawing: dict  # {x, y} — true (unshifted) DXF modelspace coordinates
+    world: dict    # {x, y, z} — Speckle viewer world coordinates
+
+
+class AlignmentTransform(BaseModel):
+    tx: float
+    ty: float
+    rotation_rad: float
+    scale: float
+
+
+class AlignmentSetRequest(BaseModel):
+    transform: AlignmentTransform
+    elevation_z: float
+    model_id: str
+    control_points: list[AlignmentPoint]
+
+
+@router.post("/projects/{stream_id}/documents/{doc_id}/align")
+def set_document_alignment(stream_id: str, doc_id: str, body: AlignmentSetRequest, user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE))):
+    """Saves a 2D-similarity transform (computed client-side by
+    src/utils/alignmentTransform.js from a 2-point-pair calibration) that
+    positions this drawing as an overlay plane in the 3D viewer. Overwrites
+    any existing alignment — see bim_documents.align_* column comments
+    (db/models.py) for why this is 1 active alignment per document, not a
+    history."""
+    from db.connection import get_conn, release_conn
+    from db.documents import set_alignment as _set, record_event
+    conn = get_conn()
+    try:
+        _require_doc(conn, doc_id, user)
+        if not _model_belongs_to_stream(conn, stream_id, body.model_id):
+            raise HTTPException(status_code=422, detail="model_id does not belong to this project")
+        updated = _set(
+            conn, doc_id,
+            transform=body.transform.model_dump(), elevation_z=body.elevation_z, model_id=body.model_id,
+            control_points=[p.model_dump() for p in body.control_points],
+            actor=user.name, actor_guid=user.guid,
+        )
+        record_event(conn, doc_id, "aligned", actor=user.name, actor_guid=user.guid)
+        return updated
+    finally:
+        release_conn(conn)
+
+
+@router.delete("/projects/{stream_id}/documents/{doc_id}/align")
+def clear_document_alignment(stream_id: str, doc_id: str, user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE))):
+    from db.connection import get_conn, release_conn
+    from db.documents import clear_alignment as _clear, record_event
+    conn = get_conn()
+    try:
+        _require_doc(conn, doc_id, user)
+        updated = _clear(conn, doc_id)
+        record_event(conn, doc_id, "unaligned", actor=user.name, actor_guid=user.guid)
+        return updated
+    finally:
+        release_conn(conn)
+
+
+@router.get("/projects/{stream_id}/documents/{doc_id}/align-texture.png")
+def document_align_texture(
+    stream_id: str, doc_id: str,
+    scale: float | None = Query(None, description="Alignment transform's world-units-per-drawing-unit factor — when known, sizes the texture off the drawing's real physical size instead of a flat pixel cap. See dxf_texture_export.py."),
+    user: CurrentUser = Depends(require_login),
+):
+    """Renders this drawing to a transparent PNG for use as the 3D overlay
+    plane's texture, plus the exact modelspace extents used (as response
+    headers) so the frontend can map the plane's UV space back to true
+    drawing coordinates — see dxf_texture_export.py for why this differs
+    from the existing /thumbnail route (transparent background, pinned
+    extents, higher resolution) rather than reusing it outright."""
+    from db.connection import get_conn, release_conn
+    from dxf_texture_export import render_dxf_texture, DxfTextureExportError
+    from nextcloud.client import download_bytes
+
+    conn = get_conn()
+    try:
+        doc = _require_doc(conn, doc_id, user)
+    finally:
+        release_conn(conn)
+
+    filename = doc["filename"].lower()
+    if not (filename.endswith(".dxf") or filename.endswith(".dwg")):
+        raise HTTPException(status_code=400, detail="Not a .dxf or .dwg document")
+
+    raw = download_bytes(doc["nc_path"])
+    if filename.endswith(".dwg"):
+        from dwg_convert import convert_dwg_to_dxf, DwgConversionError
+        try:
+            raw = convert_dwg_to_dxf(raw)
+        except DwgConversionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+    try:
+        png, (extmin_x, extmin_y, extmax_x, extmax_y) = render_dxf_texture(raw, scale=scale)
+    except DxfTextureExportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return Response(
+        content=png, media_type="image/png",
+        headers={
+            "X-Extent-Min-X": repr(extmin_x), "X-Extent-Min-Y": repr(extmin_y),
+            "X-Extent-Max-X": repr(extmax_x), "X-Extent-Max-Y": repr(extmax_y),
+            "Access-Control-Expose-Headers": "X-Extent-Min-X, X-Extent-Min-Y, X-Extent-Max-X, X-Extent-Max-Y",
+        },
+    )
 
 
 @router.post("/projects/{stream_id}/documents/backfill")

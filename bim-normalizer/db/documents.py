@@ -20,6 +20,8 @@ _COLUMNS = """
     naming_compliant, naming_fields,
     suitability_code, suitability_set_by, suitability_set_by_guid, suitability_set_at,
     org_id,
+    align_transform, align_elevation_z, align_model_id, align_control_points,
+    align_created_by, align_created_by_guid, align_created_at,
     deleted_at, created_at, updated_at
 """
 
@@ -34,6 +36,8 @@ def _row_to_doc(row) -> dict:
      naming_compliant, naming_fields,
      suitability_code, suitability_set_by, suitability_set_by_guid, suitability_set_at,
      org_id,
+     align_transform, align_elevation_z, align_model_id, align_control_points,
+     align_created_by, align_created_by_guid, align_created_at,
      deleted_at, created_at, updated_at) = row
     return {
         "doc_id": str(doc_id),
@@ -71,6 +75,13 @@ def _row_to_doc(row) -> dict:
         "suitability_set_by_guid": str(suitability_set_by_guid) if suitability_set_by_guid else None,
         "suitability_set_at": suitability_set_at.isoformat() if suitability_set_at else None,
         "org_id": str(org_id) if org_id else None,
+        "align_transform": align_transform,
+        "align_elevation_z": align_elevation_z,
+        "align_model_id": str(align_model_id) if align_model_id else None,
+        "align_control_points": align_control_points,
+        "align_created_by": align_created_by,
+        "align_created_by_guid": str(align_created_by_guid) if align_created_by_guid else None,
+        "align_created_at": align_created_at.isoformat() if align_created_at else None,
         "deleted_at": deleted_at.isoformat() if deleted_at else None,
         "created_at": created_at.isoformat() if created_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
@@ -475,6 +486,53 @@ def unlink_element(conn, doc_id: str) -> dict:
         with conn.cursor() as cur:
             cur.execute(
                 f"UPDATE bim_documents SET linked_element = NULL, updated_at = NOW() WHERE doc_id = %s RETURNING {_COLUMNS}",
+                (doc_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return _row_to_doc(row)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def set_alignment(
+    conn, doc_id: str, transform: dict, elevation_z: float, model_id: str,
+    control_points: list, actor: str | None, actor_guid: str | None,
+) -> dict:
+    """Overwrites any existing alignment — a drawing has at most one active
+    alignment at a time (see bim_documents' align_* columns, db/models.py)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE bim_documents SET
+                    align_transform = %s, align_elevation_z = %s, align_model_id = %s,
+                    align_control_points = %s, align_created_by = %s, align_created_by_guid = %s,
+                    align_created_at = NOW(), updated_at = NOW()
+                WHERE doc_id = %s RETURNING {_COLUMNS}
+                """,
+                (Json(transform), elevation_z, model_id, Json(control_points), actor, actor_guid, doc_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return _row_to_doc(row)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def clear_alignment(conn, doc_id: str) -> dict:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE bim_documents SET
+                    align_transform = NULL, align_elevation_z = NULL, align_model_id = NULL,
+                    align_control_points = NULL, align_created_by = NULL, align_created_by_guid = NULL,
+                    align_created_at = NULL, updated_at = NOW()
+                WHERE doc_id = %s RETURNING {_COLUMNS}
+                """,
                 (doc_id,),
             )
             row = cur.fetchone()
