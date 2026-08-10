@@ -95,7 +95,11 @@ services:
     image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: bim-normalizer
-    mem_limit: 3g
+    # See docker-compose.yml's bim-normalizer service for why this needed
+    # raising from 3g to 6g — a memcg OOM under load can kill whichever
+    # process in the container the kernel scores worst, including the main
+    # uvicorn process itself, not just the pool worker that caused the spike.
+    mem_limit: 6g
     ports:
       - "8002:8002"
     environment:

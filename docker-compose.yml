@@ -136,9 +136,16 @@ services:
     # big ingest, glibc not always returning freed memory to the OS — isn't
     # bounded by it) — confirmed via dmesg's oom-kill entry naming the
     # python3.11 worker pid at ~3.05GB RSS while resuming an interrupted
-    # embedding job. 4g gives headroom; see process_pool.py's worker
-    # comment for the same "each worker can independently balloon" caveat.
-    mem_limit: 4g
+    # embedding job. 4g gave headroom for a while, but a cross-model clash
+    # check against a large IFC4X3 export (7500+ elements) blew past it too
+    # — this time dmesg's oom-kill entry named the main uvicorn process
+    # itself as the cgroup's victim (a memcg OOM kills whatever process in
+    # the cgroup the kernel scores worst, not necessarily the worker that
+    # actually caused the spike), taking the whole backend down for every
+    # user instead of just failing one job. 6g gives more headroom; the LXC
+    # has 10g total with ~8g typically free, so this still leaves room for
+    # the rest of the stack.
+    mem_limit: 6g
     ports:
       - "8002:8002"
     environment:
