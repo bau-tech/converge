@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import {
-    X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, UploadCloud, GitBranch, Ruler,
-    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag,
+    X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, EyeOff, UploadCloud, GitBranch, Ruler,
+    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag, Crosshair, Loader2,
 } from 'lucide-react'
 import { DocumentPreview } from './DocumentPreview'
 import { SpeckleModelsList } from './SpeckleModelsList'
@@ -19,6 +19,14 @@ const PREVIEWABLE_EXT = new Set(['pdf', 'ifc', 'dxf', 'dwg', 'docx', 'xlsx', 'xl
 function isPreviewable(filename) {
     const m = /\.([a-z0-9]+)$/i.exec(filename || '')
     return m ? PREVIEWABLE_EXT.has(m[1].toLowerCase()) : false
+}
+
+// Drawing-to-3D-model alignment (AlignmentPanel.jsx) only supports DXF/DWG —
+// they have real vector coordinates to calibrate against; PDF is a raster
+// iframe with no coordinate access (see the drawing-alignment plan).
+function isAlignable(filename) {
+    const m = /\.([a-z0-9]+)$/i.exec(filename || '')
+    return m ? ['dxf', 'dwg'].includes(m[1].toLowerCase()) : false
 }
 
 const COLUMNS = ['WIP', 'Shared', 'Published', 'Archived']
@@ -232,7 +240,7 @@ function Card({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, pending
 // Full-screen document workflow overlay — mirrors BcfKanbanBoard.jsx's
 // layout (fixed inset-0 + 360px detail drawer), not IdsCheckPanel's
 // right-docked drawer, since this is a multi-column board like the BCF one.
-export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged, activeModelId }) {
+export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged, activeModelId, onAlignDrawing, viewerRef }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
     const { user } = useAuth()
     const [activeTab, setActiveTab] = useState('documents') // 'documents' | 'drawings' | 'models'
@@ -257,6 +265,15 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     const [deleting, setDeleting] = useState(false)
     const [isDraggingFile, setIsDraggingFile] = useState(false)
     const [modelsUploading, setModelsUploading] = useState(false)
+    // Drawing-alignment feature: which doc's saved overlay is currently shown
+    // in the 3D viewer (SpeckleViewer only ever holds one at a time — see
+    // its alignmentOverlayRef), plus its opacity. Toggled from the drawing
+    // detail drawer below; the effect only becomes visible once this panel
+    // is closed, since it's a full-screen overlay sitting on top of the
+    // (already-loaded) 3D viewer.
+    const [overlayDocId, setOverlayDocId] = useState(null)
+    const [overlayOpacity, setOverlayOpacity] = useState(1)
+    const [overlayLoading, setOverlayLoading] = useState(false)
     // Folder navigation — ONE shared path across all 4 status columns (a
     // folder spans the whole workflow, not 4 independent trees; see
     // docFolderPath above and create_folder in routers/documents.py).
@@ -339,12 +356,18 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         return acc
     }, {})
 
-    const loadDocuments = useCallback(async () => {
+    // Scoped to one folder's direct contents server-side (folder_path) —
+    // previously fetched every document in the whole project regardless of
+    // which folder was being viewed. Takes `path` explicitly (defaulting to
+    // the closed-over folderPath) for the same reason loadSubfolders below
+    // does: navigateToFolder needs to fetch the *new* path immediately, not
+    // wait for a same-tick setFolderPath to be visible in a fresh closure.
+    const loadDocuments = useCallback(async (path = folderPath) => {
         if (!streamId || !base) return
         setLoading(true)
         setError(null)
         try {
-            const res = await fetch(`${base}/projects/${streamId}/documents`)
+            const res = await fetch(`${base}/projects/${streamId}/documents?folder_path=${encodeURIComponent(path)}`)
             if (!res.ok) throw new Error(`Could not load documents (${res.status})`)
             setDocuments(await res.json())
         } catch (err) {
@@ -352,7 +375,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         } finally {
             setLoading(false)
         }
-    }, [streamId, base])
+    }, [streamId, base, folderPath])
 
     useEffect(() => { loadDocuments() }, [loadDocuments])
 
@@ -363,18 +386,46 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     // previous view no longer corresponds to what's visible — drop it.
     useEffect(() => { setSelectedIds(new Set()) }, [activeTab, folderPath])
 
-    const loadSubfolders = useCallback(async () => {
+    // Caps how many cards actually mount per kanban column — a folder+status
+    // combination with hundreds of documents (someone not using subfolders)
+    // used to render every single one as a live DOM node regardless of
+    // screen space. Per-status (not one global count) since column sizes
+    // can differ a lot; reset on the same tab/folder switch as selection
+    // above, for the same reason.
+    const CARD_PAGE_SIZE = 100
+    const [visibleCounts, setVisibleCounts] = useState({})
+    useEffect(() => { setVisibleCounts({}) }, [activeTab, folderPath])
+
+    // Takes `path` as an explicit argument rather than closing over the
+    // `folderPath` state: a caller that just called setFolderPath(newPath)
+    // would otherwise fetch the *previous* path, since setState is async and
+    // a useCallback closes over whatever folderPath was on the render that
+    // created it — a same-tick "setFolderPath(x); loadSubfolders()" would
+    // still read the old value. The effect below covers the general case
+    // (folderPath changed some other way); navigateToFolder covers clicks
+    // that change the path, calling this directly with the known-correct
+    // new path instead of trusting the effect to re-fire in time.
+    const loadSubfolders = useCallback(async (path) => {
         if (!streamId || !base) return
         try {
-            const res = await fetch(`${base}/projects/${streamId}/documents/folders?path=${encodeURIComponent(folderPath)}`)
+            const res = await fetch(`${base}/projects/${streamId}/documents/folders?path=${encodeURIComponent(path)}`)
             if (!res.ok) throw new Error(`Could not load folders (${res.status})`)
             setSubfolders((await res.json()).folders || [])
         } catch (err) {
             setError(err.message)
         }
-    }, [streamId, base, folderPath])
+    }, [streamId, base])
 
-    useEffect(() => { loadSubfolders() }, [loadSubfolders])
+    useEffect(() => { loadSubfolders(folderPath) }, [loadSubfolders, folderPath])
+
+    // Navigates to `path` and refreshes its subfolder list and document list
+    // immediately, instead of only setting state and hoping the effects
+    // above re-fire in time — see loadSubfolders' comment.
+    const navigateToFolder = useCallback((path) => {
+        setFolderPath(path)
+        loadSubfolders(path)
+        loadDocuments(path)
+    }, [loadSubfolders, loadDocuments])
 
     useEffect(() => {
         if (!streamId || !base) return
@@ -433,9 +484,27 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         if (docType) form.append('doc_type', docType)
         if (modelId) form.append('model_id', modelId)
         if (folderPath) form.append('folder_path', folderPath)
-        const res = await fetch(`${base}/projects/${streamId}/documents/upload`, {
-            method: 'POST', body: form,
-        })
+        // Without this, a fetch() that never settles (dropped connection,
+        // backgrounded tab, browser-specific FormData/File read stall) left
+        // `uploading` stuck true forever with no way for the user to retry —
+        // the "Upload" button just showed "Uploading…" indefinitely. 2min is
+        // generous for a document/drawing upload (not IFC ingestion, which
+        // has its own much longer server-side timeout — see nginx.conf.template).
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 120_000)
+        let res
+        try {
+            res = await fetch(`${base}/projects/${streamId}/documents/upload`, {
+                method: 'POST', body: form, signal: controller.signal,
+            })
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                throw new Error(`Upload timed out for "${file.name}" — check your connection and try again`)
+            }
+            throw err
+        } finally {
+            clearTimeout(timeoutId)
+        }
         if (!res.ok) {
             const body = await res.json().catch(() => ({}))
             throw new Error(body.detail || `Upload failed for "${file.name}" (${res.status})`)
@@ -486,7 +555,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 const body = await res.json().catch(() => ({}))
                 throw new Error(body.detail || `Create folder failed (${res.status})`)
             }
-            await loadSubfolders()
+            await loadSubfolders(folderPath)
             setNewFolderPrompt(false)
         } catch (err) {
             setError(err.message)
@@ -510,7 +579,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 const body = await res.json().catch(() => ({}))
                 throw new Error(body.detail || `Rename failed (${res.status})`)
             }
-            await Promise.all([loadSubfolders(), loadDocuments()])
+            await Promise.all([loadSubfolders(folderPath), loadDocuments()])
             setRenameFolderTarget(null)
         } catch (err) {
             setError(err.message)
@@ -531,7 +600,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 const body = await res.json().catch(() => ({}))
                 throw new Error(body.detail || `Delete folder failed (${res.status})`)
             }
-            await Promise.all([loadSubfolders(), loadDocuments()])
+            await Promise.all([loadSubfolders(folderPath), loadDocuments()])
             setDeleteFolderTarget(null)
         } catch (err) {
             setError(err.message)
@@ -726,6 +795,45 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         return updated
     }
 
+    // Shows/hides a saved alignment's overlay plane in the 3D viewer —
+    // SpeckleViewer only ever renders one overlay at a time, so turning one
+    // drawing on implicitly replaces whatever was shown before.
+    const toggleOverlay = async (doc) => {
+        const viewer = viewerRef?.current
+        if (!viewer) return
+        if (overlayDocId === doc.doc_id) {
+            viewer.clearAlignmentOverlay()
+            setOverlayDocId(null)
+            return
+        }
+        setOverlayLoading(true)
+        try {
+            // Pass the saved transform's scale so the backend can size the
+            // texture off the drawing's real physical size in the model
+            // rather than a flat pixel cap — see dxf_texture_export.py.
+            const res = await fetch(`${base}/projects/${streamId}/documents/${doc.doc_id}/align-texture.png?scale=${doc.align_transform.scale}`)
+            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to render texture (${res.status})`)
+            const extminX = parseFloat(res.headers.get('X-Extent-Min-X'))
+            const extminY = parseFloat(res.headers.get('X-Extent-Min-Y'))
+            const extmaxX = parseFloat(res.headers.get('X-Extent-Max-X'))
+            const extmaxY = parseFloat(res.headers.get('X-Extent-Max-Y'))
+            const blob = await res.blob()
+            const objectUrl = URL.createObjectURL(blob)
+            viewer.setAlignmentOverlay({
+                textureUrl: objectUrl,
+                extents: { extminX, extminY, extmaxX, extmaxY },
+                transform: doc.align_transform,
+                elevationZ: doc.align_elevation_z,
+            })
+            viewer.setAlignmentOverlayOpacity(overlayOpacity)
+            setOverlayDocId(doc.doc_id)
+        } catch (e) {
+            setError(e.message)
+        } finally {
+            setOverlayLoading(false)
+        }
+    }
+
     // Runs the gate for `targetStatus` (review/approve/verify) then moves
     // the document into it — used both by the pending-gate prompt after a
     // drag-and-drop, and could be reused for a one-click "gate & move".
@@ -865,11 +973,33 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         }
     }
 
+    // While a saved alignment's overlay is being shown in the 3D viewer AND
+    // its drawer (holding the toggle/opacity slider) is open, the rest of
+    // this panel (kanban board, tabs, header) is hidden entirely so the live
+    // 3D view is actually visible — the whole point of the opacity slider is
+    // to see its effect on the model, which an opaque (or even faintly
+    // visible) documents panel would hide. Requiring selectedDoc too (not
+    // just overlayDocId) means "Back" out of the drawer un-hides the panel
+    // again instead of leaving it stuck invisible — the overlay itself stays
+    // showing in the viewer, only this panel's own visibility is affected.
+    const fadedForOverlay = !!overlayDocId && !!selectedDoc
+
     return (
         <motion.div
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 z-[200000] flex flex-col"
-            style={{ backgroundColor: 'var(--speckle-foundation-page)' }}
+            style={{
+                backgroundColor: fadedForOverlay ? 'transparent' : 'var(--speckle-foundation-page)',
+                transition: 'background-color 300ms ease',
+                // Without this, the root div itself (not just the faded inner
+                // wrapper) keeps capturing every click/drag/scroll across the
+                // whole viewport even though it's invisible — the 3D model
+                // renders behind it but stops responding to orbit/pan/zoom,
+                // which looks exactly like the viewer freezing. The detail
+                // drawer below re-enables pointer events on itself since this
+                // is inherited.
+                pointerEvents: fadedForOverlay ? 'none' : 'auto',
+            }}
             onDragEnter={handleDragEnter}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -881,6 +1011,11 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                     <p className="text-sm font-medium text-amber-200">Drop files to upload to WIP</p>
                 </div>
             )}
+
+            <div
+                className="flex flex-col flex-1 min-h-0"
+                style={{ display: fadedForOverlay ? 'none' : 'flex' }}
+            >
 
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--speckle-outline-3)] shrink-0">
                 <div className="flex items-center gap-2">
@@ -977,7 +1112,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 <div className="flex items-center justify-between px-5 pt-2 shrink-0">
                     <div className="flex items-center gap-1 text-[11px] text-[var(--speckle-foreground-3)]">
                         <button
-                            onClick={() => setFolderPath('')}
+                            onClick={() => navigateToFolder('')}
                             className={folderPath === '' ? 'text-[var(--speckle-foreground)] font-medium' : 'hover:text-[var(--speckle-foreground)]'}
                         >
                             Root
@@ -988,7 +1123,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                 <span key={upTo} className="flex items-center gap-1">
                                     <span>/</span>
                                     <button
-                                        onClick={() => setFolderPath(upTo)}
+                                        onClick={() => navigateToFolder(upTo)}
                                         className={upTo === folderPath ? 'text-[var(--speckle-foreground)] font-medium' : 'hover:text-[var(--speckle-foreground)]'}
                                     >
                                         {seg}
@@ -1060,7 +1195,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                 className="group flex items-center gap-1 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
                             >
                                 <button
-                                    onClick={() => setFolderPath(folderPath ? `${folderPath}/${name}` : name)}
+                                    onClick={() => navigateToFolder(folderPath ? `${folderPath}/${name}` : name)}
                                     className="flex items-center gap-1.5 text-[11px] pl-2.5 pr-1 py-1.5"
                                 >
                                     <Folder className="w-3.5 h-3.5" /> {name}
@@ -1089,9 +1224,12 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 )}
                 <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDoc(null)}>
                     <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-4 p-5">
-                        {COLUMNS.map(status => (
-                            <Column key={status} id={status} title={status} count={columns[status].length} emptyLabel={wantDrawings ? 'No drawings for this model' : 'No documents'} viewMode={viewMode}>
-                                {columns[status].map(d => (
+                        {COLUMNS.map(status => {
+                            const visible = visibleCounts[status] ?? CARD_PAGE_SIZE
+                            const columnDocs = columns[status]
+                            return (
+                            <Column key={status} id={status} title={status} count={columnDocs.length} emptyLabel={wantDrawings ? 'No drawings for this model' : 'No documents'} viewMode={viewMode}>
+                                {columnDocs.slice(0, visible).map(d => (
                                     <Card
                                         key={d.doc_id}
                                         doc={d}
@@ -1108,8 +1246,17 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                                         onCardClick={handleCardClick}
                                     />
                                 ))}
+                                {columnDocs.length > visible && (
+                                    <button
+                                        onClick={() => setVisibleCounts(prev => ({ ...prev, [status]: visible + CARD_PAGE_SIZE }))}
+                                        className="w-full text-center py-2 text-[11px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] transition-colors"
+                                    >
+                                        Show {Math.min(CARD_PAGE_SIZE, columnDocs.length - visible)} more ({columnDocs.length - visible} remaining)
+                                    </button>
+                                )}
                             </Column>
-                        ))}
+                            )
+                        })}
                     </div>
                     <DragOverlay dropAnimation={null}>
                         {activeDoc && (
@@ -1128,12 +1275,14 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                 </DndContext>
                 </>
             )}
+            </div>
 
             {selectedDoc && (
                 <motion.div
                     initial={{ x: 360 }} animate={{ x: 0 }} exit={{ x: 360 }}
                     transition={{ duration: 0.18 }}
                     className="absolute top-0 right-0 h-full w-[360px] max-w-[calc(100vw-2rem)] glass-card rounded-none border-l border-[var(--speckle-outline-3)] flex flex-col overflow-hidden"
+                    style={{ pointerEvents: 'auto' }}
                 >
                     <div className="p-4 border-b border-[var(--speckle-outline-3)] flex items-center justify-between shrink-0">
                         <button onClick={() => setSelectedDoc(null)} className="flex items-center gap-1 text-xs text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]">
@@ -1250,6 +1399,42 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                             >
                                 <Eye className="w-3.5 h-3.5" /> Preview
                             </button>
+                        )}
+
+                        {onAlignDrawing && selectedDoc.doc_type === 'drawing' && isAlignable(selectedDoc.filename) && (
+                            <button
+                                onClick={() => onAlignDrawing(selectedDoc)}
+                                className="w-full flex items-center justify-center gap-1.5 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
+                            >
+                                <Crosshair className="w-3.5 h-3.5" />
+                                {selectedDoc.align_transform ? 'Re-align to model' : 'Align to model'}
+                            </button>
+                        )}
+
+                        {viewerRef && selectedDoc.doc_type === 'drawing' && selectedDoc.align_transform && (
+                            <div className="rounded-lg bg-[var(--speckle-outline-3)]/30 px-2 py-2 space-y-1.5">
+                                <button
+                                    onClick={() => toggleOverlay(selectedDoc)}
+                                    disabled={overlayLoading}
+                                    className="w-full flex items-center justify-center gap-1.5 text-xs py-1 rounded-lg text-[var(--speckle-foreground-2)] hover:text-[var(--speckle-foreground)] disabled:opacity-50 transition-colors"
+                                >
+                                    {overlayLoading
+                                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        : overlayDocId === selectedDoc.doc_id ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                                    {overlayDocId === selectedDoc.doc_id ? 'Showing in 3D model — hide' : 'Show in 3D model'}
+                                </button>
+                                {overlayDocId === selectedDoc.doc_id && (
+                                    <input
+                                        type="range" min="0" max="1" step="0.05" value={overlayOpacity}
+                                        onChange={(e) => {
+                                            const v = parseFloat(e.target.value)
+                                            setOverlayOpacity(v)
+                                            viewerRef.current?.setAlignmentOverlayOpacity(v)
+                                        }}
+                                        className="w-full"
+                                    />
+                                )}
+                            </div>
                         )}
 
                         <div className="flex gap-2">
