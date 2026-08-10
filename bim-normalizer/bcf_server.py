@@ -24,7 +24,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from db.connection import init_pool, close_pool
@@ -109,6 +109,22 @@ async def _log_requests(request, call_next):
             request.client.host if request.client else None,
             (time.perf_counter() - start) * 1000,
         )
+        # TEMPORARY diagnostic — logs the exact response body for the calls
+        # BIMcollab ZOOM makes right before it blocks issue creation with
+        # "no assignable team members" (current-user/extensions/topics),
+        # to rule out any byte-level mismatch a manual re-test wouldn't
+        # catch. Remove once the ZOOM issue is resolved.
+        if request.method == "GET" and any(
+            marker in request.url.path for marker in ("/current-user", "/extensions", "/topics")
+        ):
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            logger.info("DIAG %s %s -> %s", request.method, request.url.path, body[:2000])
+            response = Response(
+                content=body,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type=response.media_type,
+            )
     return response
 
 
