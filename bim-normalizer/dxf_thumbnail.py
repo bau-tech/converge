@@ -11,10 +11,21 @@ routers/documents.py's preview_dwg_as_dxf route's same "proxy-on-demand"
 philosophy for the exact same file types.
 """
 import io
+import threading
 
 import ezdxf
 from ezdxf.addons.drawing import matplotlib as ezdxf_mpl
 from ezdxf.addons.drawing import RenderContext, Frontend
+
+# matplotlib.pyplot's figure/font-cache state is process-global and not
+# thread-safe — FastAPI runs sync `def` routes in a thread-pool executor, so
+# two concurrent /thumbnail requests can genuinely corrupt each other's
+# rendering (confirmed: concurrent renders produced a spurious "cmap"
+# KeyError from deep inside matplotlib's font handling, not a real problem
+# with either DXF file). Used to also guard dxf_texture_export.py's render
+# call before that module moved off matplotlib onto ezdxf's SVG backend +
+# cairosvg, which carry no such global state.
+MPL_RENDER_LOCK = threading.Lock()
 
 
 class DxfThumbnailError(Exception):
@@ -43,19 +54,20 @@ def render_dxf_thumbnail(dxf_bytes: bytes, width_px: int = 320, height_px: int =
         raise DxfThumbnailError(f"Could not parse DXF: {exc}")
 
     msp = doc.modelspace()
-    fig = plt.figure(figsize=(width_px / 96, height_px / 96), dpi=96)
-    try:
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.set_axis_off()
-        ctx = RenderContext(doc)
-        ctx.set_current_layout(msp)
-        backend = ezdxf_mpl.MatplotlibBackend(ax)
+    with MPL_RENDER_LOCK:
+        fig = plt.figure(figsize=(width_px / 96, height_px / 96), dpi=96)
         try:
-            Frontend(ctx, backend).draw_layout(msp, finalize=True)
-        except Exception as exc:
-            raise DxfThumbnailError(f"Could not render DXF layout: {exc}")
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", facecolor="#1a1a1a")
-        return buf.getvalue()
-    finally:
-        plt.close(fig)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_axis_off()
+            ctx = RenderContext(doc)
+            ctx.set_current_layout(msp)
+            backend = ezdxf_mpl.MatplotlibBackend(ax)
+            try:
+                Frontend(ctx, backend).draw_layout(msp, finalize=True)
+            except Exception as exc:
+                raise DxfThumbnailError(f"Could not render DXF layout: {exc}")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor="#1a1a1a")
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
