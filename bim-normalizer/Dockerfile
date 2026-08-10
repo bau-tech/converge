@@ -46,7 +46,13 @@ RUN apt-get update && apt-get install -y \
 COPY --from=libredwg-builder /usr/local/bin/dwg2dxf /usr/local/bin/dwg2dxf
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip/setuptools/wheel are build-only tooling — the running app never
+# imports them (uvicorn/fastapi/etc. don't need pip present at runtime) —
+# but pip install leaves them sitting in the final image regardless
+# (~21MB). Uninstalling them once the actual dependencies are in place
+# doesn't touch those dependencies' own files.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y pip setuptools wheel
 
 COPY . .
 

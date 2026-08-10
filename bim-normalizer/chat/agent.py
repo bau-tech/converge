@@ -13,7 +13,7 @@ import json
 import logging
 import time
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from decimal import Decimal
 from typing import Generator
 
@@ -1656,8 +1656,18 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
 # about, not the primary invalidation mechanism. Keyed by (kind, model_id,
 # *extra) so materials/profiles (which take an optional category filter)
 # share the cache without colliding on key.
+#
+# _MODEL_QUERY_CACHE_MAX_ENTRIES bounds this bim-normalizer is a single
+# long-lived process (Dockerfile runs uvicorn with --workers 1,
+# restart: unless-stopped) — without a cap, this dict would grow for the
+# life of the process: every fresh ingest mints a new model_id (see above),
+# and a model_id that's queried once and never again used to keep its
+# entry forever, since the TTL only gates whether a hit is trusted, it
+# never actually removes anything. OrderedDict + move_to_end on every
+# hit/insert gives real LRU eviction, not just insertion-order FIFO.
 _MODEL_QUERY_CACHE_TTL_S = 300
-_model_query_cache: dict[tuple, tuple[float, object]] = {}
+_MODEL_QUERY_CACHE_MAX_ENTRIES = 500
+_model_query_cache: "OrderedDict[tuple, tuple[float, object]]" = OrderedDict()
 
 
 def invalidate_model_query_cache(model_id: str) -> None:
@@ -1673,9 +1683,13 @@ def _cached_model_query(cache_key: tuple, compute):
     cached = _model_query_cache.get(cache_key)
     now = time.monotonic()
     if cached is not None and now - cached[0] < _MODEL_QUERY_CACHE_TTL_S:
+        _model_query_cache.move_to_end(cache_key)
         return cached[1]
     result = compute()
     _model_query_cache[cache_key] = (now, result)
+    _model_query_cache.move_to_end(cache_key)
+    if len(_model_query_cache) > _MODEL_QUERY_CACHE_MAX_ENTRIES:
+        _model_query_cache.popitem(last=False)  # evict least-recently-used
     return result
 
 
