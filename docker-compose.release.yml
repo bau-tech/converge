@@ -62,6 +62,27 @@ services:
     networks:
       - speckle-net
 
+  # ── Nextcloud cron (background jobs: preview pre-generation, etc.) ─────────
+  # See docker-compose.yml's nextcloud-cron for the full rationale — same
+  # sidecar here so a release deploy gets previewgenerator's pre-generation
+  # too, not just local dev.
+  nextcloud-cron:
+    image: nextcloud:apache
+    container_name: nextcloud-cron
+    mem_limit: 256m
+    entrypoint: /cron.sh
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - nextcloud_config:/var/www/html/config
+      - nextcloud_custom_apps:/var/www/html/custom_apps
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
   # ── BIM Normalizer ────────────────────────────────────────────────────────────
   # Pulls the released image instead of building from ./bim-normalizer — see
   # docker-compose.yml for the local-build version of this same service.

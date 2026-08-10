@@ -89,6 +89,32 @@ services:
     networks:
       - speckle-net
 
+  # ── Nextcloud cron (background jobs: preview pre-generation, etc.) ─────────
+  # The official image ships no system cron of its own; Nextcloud's
+  # background-job modes are AJAX/Webcron/cron, and previewgenerator
+  # specifically requires "cron" mode (install-previewgenerator.sh sets it) —
+  # AJAX only runs on page load, webcron isn't used here. Standard sidecar
+  # pattern: same image + same volumes as nextcloud, entrypoint swapped to
+  # the image's built-in /cron.sh, which just loops `php -f cron.php` every
+  # 5 minutes. No Postgres env vars needed — cron.php reads db credentials
+  # from config.php in the shared nextcloud_config volume.
+  nextcloud-cron:
+    image: nextcloud:apache
+    container_name: nextcloud-cron
+    mem_limit: 256m
+    entrypoint: /cron.sh
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - nextcloud_config:/var/www/html/config
+      - nextcloud_custom_apps:/var/www/html/custom_apps
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
   # ── BIM Normalizer ───────────────────────────────────────────────────────────
   # speckle-mcp and bcf-server below share this same image: bim-normalizer:latest
   # tag (same codebase, different entrypoint command) — all three also need
