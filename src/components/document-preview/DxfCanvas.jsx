@@ -21,10 +21,21 @@ import { Loader2 } from 'lucide-react'
 // rendered without one. Bundles Roboto (Apache-2.0) from Google Fonts.
 const FONT_URLS = ['/fonts/Roboto-Regular.ttf']
 
-export function DxfCanvas({ url }) {
+// pickModeActive/onPickPoint: drawing-alignment feature's calibration UI
+// (AlignmentPanel.jsx) — while active, a pointerdown reports the click's
+// TRUE (unshifted) modelspace {x, y} back to onPickPoint. dxf-viewer
+// internally shifts its scene by -origin for float precision, so its own
+// "position" (scene coords) must have GetOrigin() added back before it
+// means anything to the alignment transform math (which works in real
+// drawing/modelspace coordinates, matching what a saved transform's
+// control_points and what the backend's ezdxf-based texture export both use).
+export function DxfCanvas({ url, pickModeActive = false, onPickPoint }) {
     const containerRef = useRef(null)
     const [status, setStatus] = useState('loading') // loading | ready | error
     const [error, setError] = useState(null)
+    const viewerRef = useRef(null)
+    const onPickPointRef = useRef(onPickPoint)
+    useEffect(() => { onPickPointRef.current = onPickPoint }, [onPickPoint])
 
     useEffect(() => {
         let cancelled = false
@@ -46,6 +57,7 @@ export function DxfCanvas({ url }) {
                     workerFactory: () => new DxfParseWorker(),
                 })
                 if (cancelled) { viewer.Destroy(); viewer = null; return }
+                viewerRef.current = viewer
                 setStatus('ready')
             } catch (err) {
                 if (!cancelled) { setError(err.message); setStatus('error') }
@@ -56,13 +68,35 @@ export function DxfCanvas({ url }) {
 
         return () => {
             cancelled = true
-            viewer?.Destroy()
+            viewerRef.current = null
+            // Effect 2 below (pick-handler subscription) can also be tearing
+            // down at the same time and its Unsubscribe() call reaches into
+            // this same viewer's renderer — if Destroy() runs first, that
+            // Unsubscribe() throws "WebGL renderer not available" on an
+            // already-destroyed viewer. Uncaught, that error propagates past
+            // this component (no ErrorBoundary wraps the floating alignment/
+            // documents panels) and takes down the whole React tree.
+            try { viewer?.Destroy() } catch (e) { console.warn('[DxfCanvas] Destroy error:', e) }
         }
     }, [url])
 
+    useEffect(() => {
+        const viewer = viewerRef.current
+        if (!viewer || status !== 'ready' || !pickModeActive) return
+        const handler = (e) => {
+            const origin = viewer.GetOrigin()
+            const { position } = e.detail
+            onPickPointRef.current?.({ x: position.x + origin.x, y: position.y + origin.y })
+        }
+        viewer.Subscribe('pointerdown', handler)
+        // See the Destroy() comment in the effect above — this can run after
+        // that cleanup has already torn down the renderer.
+        return () => { try { viewer.Unsubscribe('pointerdown', handler) } catch (e) { console.warn('[DxfCanvas] Unsubscribe error:', e) } }
+    }, [status, pickModeActive])
+
     return (
         <div className="relative w-full h-full">
-            <div ref={containerRef} className="w-full h-full" />
+            <div ref={containerRef} className="w-full h-full" style={pickModeActive ? { cursor: 'crosshair' } : undefined} />
             {status === 'loading' && (
                 <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-[var(--speckle-foreground-3)] pointer-events-none">
                     <Loader2 className="w-4 h-4 animate-spin" /> Loading DXF drawing…

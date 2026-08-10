@@ -38,6 +38,7 @@ is published publicly (GHCR/Docker Hub).
 | numpy | BSD-3-Clause |
 | ezdxf | MIT |
 | matplotlib | PSF-based (BSD-compatible) |
+| cairosvg | LGPL-3.0-or-later (used as an ordinary dependency, not modified/forked — same category as psycopg2-binary/ifcopenshell below) |
 | specklepy | Apache-2.0 |
 | requests | Apache-2.0 |
 | bcrypt | Apache-2.0 |
