@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Pin, PinOff, Lock, Unlock } from 'lucide-react'
 import GridLayout from 'react-grid-layout'
@@ -340,7 +340,15 @@ const DEFAULT_CHART_SETTINGS = {
     showPriorityChips: true,
 }
 
-export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true, readOnly = false }) {
+// Memoized: this owns the whole chart-panel grid (potentially many
+// DynamicChart/echarts instances plus the 3D viewer panel) and used to
+// re-render on every one of App.jsx's ~73 state changes regardless of
+// whether any of its own props changed. renderPanel legitimately changes
+// identity when chart-hover/element-selection state changes (that's the
+// cross-highlight feature actually working, not waste) — this memo mainly
+// protects against everything else (mobile-nav toggles, search text,
+// unrelated tooltips) that has zero business rebuilding this whole grid.
+export const GridDashboard = memo(function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true, readOnly = false }) {
     const isMobile = useIsMobile()
     const headerHeight = useHeaderHeight()
     const containerRef = useRef(null)
@@ -1023,7 +1031,7 @@ export function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = tr
             )}
         </div>
     )
-}
+})
 
 export function GridPanel({ title, icon, children, headerActions, className = '', contentClassName = 'overflow-auto' }) {
     return (

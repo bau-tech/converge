@@ -437,6 +437,7 @@ function Dashboard({ readOnly = false }) {
     // above) — cleared once BcfTopicPanel has auto-opened it, so it doesn't
     // re-trigger the auto-open on later topic-list refreshes.
     const [pendingBcfTopicGuid, setPendingBcfTopicGuid] = useState(_topicGuidSeed)
+    const clearPendingBcfTopicGuid = useCallback(() => setPendingBcfTopicGuid(null), [])
 
     // Elements with a linked document (bim_documents.linked_element) — { speckle_id, centroid, doc_count }[],
     // used to render the "has a document" pin overlay in SpeckleViewer.
@@ -569,6 +570,13 @@ function Dashboard({ readOnly = false }) {
     const handleRemoveWidget = useCallback((id) => {
         setExtraWidgets(prev => prev.filter(w => w.id !== id))
     }, [])
+
+    // Stable reference so GridDashboard (memoized) doesn't get a fresh
+    // function identity, and thus re-render, on every unrelated App render.
+    const handleClosePanel = useCallback((panel) => {
+        if (panel.type === 'chart' && !panel.widget) handleToggleChartPanel(panel.chartKey)
+        else if (panel.widget) handleRemoveWidget(panel.widget.id)
+    }, [handleToggleChartPanel, handleRemoveWidget])
 
     // Pre-built search index: one string per element, built once when fullData arrives.
     // Avoids calling flattenObject on every element on every keystroke.
@@ -1381,7 +1389,12 @@ function Dashboard({ readOnly = false }) {
     // buttons, no UI feedback, console logging only). Both directions are
     // idempotent via the persistent bcf_speckle_sync table (see bcfSync.js),
     // so safe to re-run on every load without creating duplicates.
-    const syncBcfWithSpeckle = async (bcfProjectId) => {
+    // useCallback so triggerBcfSync (and BcfTopicPanel's onRequestSync prop
+    // below) doesn't get a fresh identity on every unrelated App render —
+    // it still changes when fullData/comments/activeServer actually do,
+    // which is correct (those are real inputs to the sync), just not on
+    // every single render like a plain function declaration would.
+    const syncBcfWithSpeckle = useCallback(async (bcfProjectId) => {
         if (!bcfProjectId) return
         try {
             const list = await listTopics(bcfProjectId)
@@ -1419,7 +1432,7 @@ function Dashboard({ readOnly = false }) {
         } catch (e) {
             console.warn('BCF<->Speckle sync failed:', e)
         }
-    }
+    }, [fullData, activeServer.url, activeServer.token, comments, data?.project_id, data?.model_id, data?.version_id])
 
     // Trigger the sync once per model load — gated on fullData.elements being
     // populated. `comments` loads via a separate fetch (fetchComments,
@@ -1455,11 +1468,12 @@ function Dashboard({ readOnly = false }) {
     // comment/topic just submitted) — unlike the model-load effect above,
     // this is NOT gated by lastSyncedModelRef, since pull/push are fully
     // idempotent and these are infrequent, deliberate calls, not a passive
-    // polling loop.
-    const triggerBcfSync = () => {
+    // polling loop. useCallback so BcfTopicPanel's onRequestSync prop stays
+    // stable across renders that don't actually change the sync target.
+    const triggerBcfSync = useCallback(() => {
         const bcfProjectId = data?.normalizer_model_id
         if (bcfProjectId) syncBcfWithSpeckle(bcfProjectId)
-    }
+    }, [data?.normalizer_model_id, syncBcfWithSpeckle])
 
     // Document-pin positions for the current model — refetched on model load and
     // whenever ElementPanel links/unlinks a document (see onDocumentLinksChanged).
@@ -3064,10 +3078,7 @@ function Dashboard({ readOnly = false }) {
                             renderPanel={renderPanel}
                             darkMode={darkMode}
                             readOnly={readOnly}
-                            onClosePanel={readOnly ? undefined : (panel) => {
-                                if (panel.type === 'chart' && !panel.widget) handleToggleChartPanel(panel.chartKey)
-                                else if (panel.widget) handleRemoveWidget(panel.widget.id)
-                            }}
+                            onClosePanel={readOnly ? undefined : handleClosePanel}
                         />
                         </ErrorBoundary>
                         </>
@@ -3135,7 +3146,7 @@ function Dashboard({ readOnly = false }) {
                     serverUrl={activeServer.url}
                     serverToken={activeServer.token}
                     autoOpenTopicGuid={pendingBcfTopicGuid}
-                    onAutoOpenHandled={() => setPendingBcfTopicGuid(null)}
+                    onAutoOpenHandled={clearPendingBcfTopicGuid}
                 />
                 )}
 

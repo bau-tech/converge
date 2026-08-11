@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, memo } from 'react'
 import { Bell, Check } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 
@@ -8,7 +8,13 @@ import { AnimatePresence, motion } from 'framer-motion'
 // (not stopped once caught up, unlike SemanticSearchStatus.jsx's one-shot
 // poll — new notifications can arrive at any time) on the same 15-20s
 // cadence already established by SemanticSearchStatus.jsx.
-export function NotificationBell({ normalizerUrl }) {
+//
+// Memoized: this is always mounted in App.jsx's header with a single,
+// permanently-stable prop (App.jsx's module-scope CONFIG.normalizerUrl) —
+// every one of App.jsx's ~73 state changes used to re-render this
+// component too, for zero reason, since its own visible state (open,
+// unreadCount, notifications) is entirely self-managed here.
+export const NotificationBell = memo(function NotificationBell({ normalizerUrl }) {
     const [open, setOpen] = useState(false)
     const [unreadCount, setUnreadCount] = useState(0)
     const [notifications, setNotifications] = useState([])
@@ -128,4 +134,4 @@ export function NotificationBell({ normalizerUrl }) {
             </AnimatePresence>
         </div>
     )
-}
+})

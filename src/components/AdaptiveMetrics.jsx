@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, memo } from 'react'
 import { motion } from 'framer-motion'
 import { Tag } from 'lucide-react'
 import { MetricsConfig } from './MetricsConfig'
@@ -177,7 +177,10 @@ function MetricCard({ metricKey, value, index, metric, config = {} }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export function AdaptiveMetrics({ data, horizontal = false, strip = false }) {
+// Memoized: mounted continuously in App.jsx's header/sidebar with only
+// `data` (changes on model load only) and two boolean literals as props —
+// every unrelated App.jsx state change used to re-render this too.
+export const AdaptiveMetrics = memo(function AdaptiveMetrics({ data, horizontal = false, strip = false }) {
     const [metricsConfig, setMetricsConfig] = useState(() => {
         try {
             const stored = localStorage.getItem('dashboard-metrics-config')
@@ -281,7 +284,7 @@ export function AdaptiveMetrics({ data, horizontal = false, strip = false }) {
             </div>
         </div>
     )
-}
+})
 
 // ─── Active filter indicator ──────────────────────────────────────────────────
 export function HighlightIndicator({ field, value, onClear }) {

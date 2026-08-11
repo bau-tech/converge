@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Flag, X, Plus, Camera, Send, Trash2, Download, Upload, ChevronLeft, Pencil } from 'lucide-react'
 import { BcfLogoIcon } from './BcfLogoIcon'
@@ -25,7 +25,15 @@ const STATUS_COLOR = {
 // `topics` is owned by App.jsx (synced automatically and silently with
 // Speckle on model load via bcfSync.js) — this component is a controlled
 // display over that shared state, with manual create/delete/.bcfzip actions.
-export function BcfTopicPanel({
+//
+// Memoized: always mounted (behind its own internal isOpen toggle, not a
+// parent condition) so it used to re-render on every one of App.jsx's ~73
+// state changes regardless of relevance. All props are now either stable
+// primitives/refs or useCallback-wrapped functions on the App.jsx side
+// (onTopicsChange/setBcfTopics, onRequestSync/triggerBcfSync,
+// onAutoOpenHandled/clearPendingBcfTopicGuid) — see App.jsx's own comments
+// on those — so this memo actually has stable props to compare against.
+export const BcfTopicPanel = memo(function BcfTopicPanel({
     projectId, viewerRef, topics = [], fullData = null, streamId = null, onTopicsChange, onRequestSync,
     serverUrl, serverToken, autoOpenTopicGuid = null, onAutoOpenHandled,
 }) {
@@ -655,4 +663,4 @@ export function BcfTopicPanel({
             </motion.button>
         </motion.div>
     )
-}
+})
