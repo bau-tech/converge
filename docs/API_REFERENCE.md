@@ -109,6 +109,16 @@ If the source is IFC, the original blob uploaded to the Speckle server is served
 | `POST` | `/models/{id}/ids-check` | Run an IDS spec against the model via `ifctester`. Returns `{job_id}` |
 | `GET` | `/models/{id}/ids-check/{job_id}/status` | Poll check job; results map failures to element `speckle_id`s for viewer highlight and optional BCF topic creation |
 
+#### bSDD (buildingSMART Data Dictionary)
+
+Server-side proxy powering the IDS graph editor's property/classification pickers — bSDD's public API answers cross-origin browser requests with an empty 200 body (no CORS headers), so the frontend can't call it directly. `routers/bsdd.py` calls it server-to-server and caches responses (1 hour TTL; the underlying dictionary/class/property data changes on the order of months, not requests).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/bsdd/dictionaries` | List all bSDD dictionaries (cached whole, filtered server-side) |
+| `GET` | `/bsdd/classes` | Search bSDD classes (e.g. IFC entities) within a dictionary |
+| `GET` | `/bsdd/entity-properties` | Property sets + properties bSDD associates with an IFC class |
+
 #### Clash detection
 
 | Method | Path | Description |
@@ -361,7 +371,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `BcfStatsWidget` | Topic counts by status/priority |
 | `DocumentsPanel` | Nextcloud-backed document workflow: drag-and-drop WIP/Shared/Published/Archived board with an app-enforced reviewed → approved → verified gate |
 | `DocumentPreview` (`document-preview/{IfcCanvas,DxfCanvas,DocxCanvas,XlsxCanvas}`) | In-browser document preview — PDF (native iframe), IFC (`web-ifc` WASM + Three.js), DXF (`dxf-viewer`, WebGL/Three.js), DOCX (`docx-preview`, renders to HTML/CSS), XLSX/legacy XLS (SheetJS `xlsx`, `sheet_to_html` per sheet). `.dwg` is converted to DXF server-side (`bim-normalizer/dwg_convert.py` + LibreDWG's `dwg2dxf`) and rendered by the same DXF viewer. No preview path for legacy binary `.doc` |
-| `ChatWidget` | AI assistant chat (OpenAI / Ollama / LM Studio / Mistral) |
+| `ChatWidget` | AI assistant chat (OpenAI / Anthropic / Mistral / Ollama / LM Studio) |
 | `MarkdownWidget` | Editable markdown notes panel |
 | `MetricsConfig` | Configuration panel for AdaptiveMetrics thresholds |
 | `ViewerToolbar` | Toolbar for 3D viewer actions (section cuts, explode, etc.) |
@@ -377,6 +387,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `ErrorBoundary` | React error boundary for graceful per-widget failure isolation |
 | `LoginScreen` / `AuthContext` | Dashboard login screen and auth state, gating the ISO 19650 author/reviewer/approver role checks (bypassable only via `DASHBOARD_AUTH_BYPASS`, dev-only) |
 | `SpeckleModelsList` | Browsable list of Speckle projects/models for selection |
+| `ElementConnectivityPanel` | Multi-hop connectivity graph (`@xyflow/react`) radiating out from a selected element — real relationship data (parent/room/space, IFC relationship entities) shown as solid directional edges, the one geometric-inference edge type (`touches`, zero-tolerance bbox overlap) shown dashed, node opacity fading with hop distance |
 | `CombineModelsPicker` / `FederatedBar` / `FederatedClashPanel` | Federated (multi-model) view: combine several models in the viewer and run cross-model clash checks across them |
 | `ViewpointMarkupEditor` | Annotate/markup a 3D viewpoint before attaching it to a BCF topic |
 | `PanoramaThumbnail` | Thumbnail preview for 360°/panorama images |
@@ -525,7 +536,7 @@ converge/
 ├── bim-normalizer/
 │   ├── main.py                        FastAPI app: lifespan, middleware, /health, router wiring
 │   ├── job_registry.py                UUID validation + Content-Disposition header helpers shared by routers (job state itself lives in db/jobs.py, not here)
-│   ├── converge_mcp.py                MCP server (72 tools + 2 resources)
+│   ├── converge_mcp.py                MCP server (85 tools + 2 resources)
 │   ├── bcf_server.py                  BCF-API 2.1/3.0 server (separate process/container)
 │   ├── clash_check.py                 Clash detection via ifcclash
 │   ├── ids_check.py                   IDS validation via ifctester
