@@ -659,6 +659,30 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_document_content",
+            "description": (
+                "Search INSIDE the text of this project's documents (PDF/DOCX/XLSX) — not just "
+                "filenames/status, unlike list_documents. Use when the user asks what a document "
+                "says or contains, e.g. 'what does the fire safety report say about door widths' "
+                "or 'find the spec that mentions concrete grade'. Returns matching passages with "
+                "their source filename (and page number, for PDFs). Only PDF/DOCX/XLSX are "
+                "indexed (no OCR, so scanned/image-only PDFs won't match); a document uploaded "
+                "moments ago may not be indexed yet — indexing runs in the background after "
+                "upload. WIP visibility respects the asker's organization, same as list_documents."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for, in plain English."},
+                    "limit": {"type": "integer", "description": "Max passages to return (default 10)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_topics",
             "description": "List BCF coordination topics (issues) logged against this model.",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -2039,6 +2063,29 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict, user=None) -> t
         match["events"] = list_events(conn, match["doc_id"])
         return _jdump(match), None
 
+    if fn == "search_document_content":
+        query = args.get("query", "")
+        if not query:
+            return "'query' is required.", None
+        stream_id = get_model_stream_id(conn, model_id)
+        if not stream_id:
+            return "Could not determine the project for this model.", None
+        from db.documents import search_document_content as _search_content
+        try:
+            matches = _search_content(
+                conn, stream_id, query,
+                viewer_org_id=user.org_id if user else None, limit=int(args.get("limit") or 10),
+            )
+        except Exception as exc:
+            return f"Document content search failed: {exc}", None
+        if not matches:
+            return (
+                "No indexed document content matched. Either nothing's been uploaded/indexed yet "
+                "for this project, a recent upload hasn't finished indexing yet, or try "
+                "list_documents to see what's available.", None,
+            )
+        return _jdump(matches), None
+
     if fn == "list_topics":
         with conn.cursor() as cur:
             cur.execute(
@@ -2456,6 +2503,8 @@ _TOOLS_AND_REASONING_TRAILER = (
         "- list_ids_specs / check_ids_compliance: buildingSMART IDS spec compliance checking (can be slow)\n"
         "- list_documents / get_document_status: CDE document status, approval gates, suitability code, "
         "folder, and linked element (read-only, org-scoped WIP visibility)\n"
+        "- search_document_content: search INSIDE document text (PDF/DOCX/XLSX), not just "
+        "filename/status — use for 'what does X say about Y' (org-scoped WIP visibility)\n"
         "- list_topics / get_topic / create_topic / update_topic / list_topic_comments / add_topic_comment: "
         "BCF coordination issues — log/track/discuss findings as trackable topics\n"
         "- get_notifications: the current logged-in user's notifications for this project (unavailable when anonymous)\n"

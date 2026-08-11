@@ -521,6 +521,29 @@ CREATE TABLE IF NOT EXISTS bim_document_thumbnails (
     content       BYTEA NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Text chunks extracted from CDE documents (PDF/DOCX/XLSX), embedded for
+-- content search (documents/content_extract.py, db/documents.py's
+-- search_document_content) — same brute-force-cosine approach as
+-- bim_element_embeddings above, reusing search/embeddings.py's model as-is
+-- rather than adding pgvector (no infra change to the shared Postgres
+-- instance; fine at realistic per-project chunk counts, same reasoning
+-- bim_element_embeddings' own comment gives). page_num is set for PDFs
+-- (pdftotext emits a form-feed between pages, chunked per-page for citable
+-- "page N" results) and NULL for docx/xlsx, which have no page concept.
+-- revision lets a re-upload's extraction fully replace the prior one
+-- (delete-then-reinsert on doc_id, mirroring bump_revision's existing
+-- "content changed -> invalidate derived data" precedent for thumbnails).
+CREATE TABLE IF NOT EXISTS bim_document_chunks (
+    id          BIGSERIAL PRIMARY KEY,
+    doc_id      UUID NOT NULL REFERENCES bim_documents(doc_id) ON DELETE CASCADE,
+    revision    INT NOT NULL,
+    page_num    INT,
+    chunk_index INT NOT NULL,
+    chunk_text  TEXT NOT NULL,
+    embedding   FLOAT[] NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bim_document_chunks_doc ON bim_document_chunks(doc_id);
 """
 
 

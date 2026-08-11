@@ -1,13 +1,10 @@
 # converge-mcp's own dependency set — deliberately NOT requirements.txt.
 # Verified the same way as requirements-bcf-server.txt: grepped converge_mcp.py
-# (its only internal import is ifc/relationship_types.py, which has zero
-# third-party imports of its own — pure data/logic, "ifcopenshell.file" in its
-# type hints is a forward-reference string, not a real import) for every
-# third-party import. It genuinely uses ifcopenshell/ifc5d (its own ifc_load/
-# ifc_new/ifc_save/ifc5d_* tools work on an in-memory IFC file directly) plus
-# mcp[cli]/requests/uvicorn — but never fastapi, psycopg2, specklepy,
-# ifctester, ifcclash, numpy, fastembed, ezdxf, cairosvg, python-docx,
-# openpyxl, reportlab, httpx, bcrypt, pyjwt, or python-multipart. All of
+# for every third-party import. It genuinely uses ifcopenshell/ifc5d (its own
+# ifc_load/ifc_new/ifc_save/ifc5d_* tools work on an in-memory IFC file
+# directly) plus mcp[cli]/requests/uvicorn — but never fastapi, psycopg2,
+# specklepy, ifctester, ifcclash, numpy, fastembed, ezdxf, cairosvg,
+# reportlab, httpx, bcrypt, pyjwt, or python-multipart. All of
 # speckle_clash_check/speckle_ids_check/etc. proxy to bim-normalizer's REST
 # API (POST /models/.../clash-check, polled) rather than running ifcclash/
 # ifctester in-process here. python-dotenv is also skipped even though
@@ -15,8 +12,19 @@
 # ImportError: pass` block — that's for running the script directly outside
 # Docker; inside the container, env vars come straight from docker-compose.yml,
 # and the try/except already degrades gracefully without it.
+#
+# python-docx/openpyxl WERE missed in the original cut of this file — the
+# original audit only grepped converge_mcp.py's own top-level imports, not
+# the lazy `from documents.office_export import read_docx_text/read_xlsx_text`
+# inside speckle_read_document's function body (and now also
+# documents/content_extract.py's extract_text, which speckle_read_document
+# and speckle_search_document_content both use for .docx/.xlsx). Both
+# libraries are pure-Python and lightweight — nowhere near ifcopenshell/numpy
+# territory — so this doesn't meaningfully undo the image-size win.
 mcp[cli]>=1.0.0,<2.0.0
 requests
 ifcopenshell>=0.7.0
 ifc5d>=0.8.0
 uvicorn[standard]
+python-docx>=1.1.0
+openpyxl>=3.1.0

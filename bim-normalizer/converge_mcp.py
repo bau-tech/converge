@@ -3653,6 +3653,45 @@ def speckle_list_documents(stream_id: str, status: str = "", folder_path: str = 
 
 
 @mcp.tool()
+def speckle_search_document_content(stream_id: str, query: str, limit: int = 10) -> str:
+    """
+    Search INSIDE the text of a project's documents (PDF/DOCX/XLSX) — not
+    just filenames/status like speckle_list_documents. Use for questions
+    like "what does the fire safety report say about door widths" or "find
+    the spec mentioning concrete grade". Returns matching passages with
+    their source filename (and page number, for PDFs).
+
+    Only PDF/DOCX/XLSX are indexed (no OCR — scanned/image-only PDFs won't
+    match). Indexing runs in the background after upload/revision, so a
+    document uploaded moments ago may not be searchable yet.
+
+    stream_id: Speckle project id (not model_id — documents are project-scoped).
+    query: what to search for, in plain English.
+    limit: max passages to return (default 10).
+    → for a document you already know, read its full text with speckle_read_document(stream_id, doc_id)
+    """
+    try:
+        resp = _dashboard_request(
+            "GET", f"/projects/{stream_id}/documents/search-content",
+            params={"query": query, "limit": limit},
+        )
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code != 200:
+        return f"Search failed: {_error_detail(resp)}"
+    data = resp.json()
+    matches = data.get("matches") or []
+    if not matches:
+        return f"No indexed document content matched {query!r} in project {stream_id}."
+    lines = [f"{len(matches)} match(es) for {query!r}:"]
+    for m in matches:
+        page = f" p.{m['page_num']}" if m.get("page_num") else ""
+        snippet = (m.get("chunk_text") or "").replace("\n", " ").strip()[:200]
+        lines.append(f"  [{m.get('filename')}{page}] (score={m.get('score')}, doc_id={m.get('doc_id')}): {snippet}...")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def speckle_list_notifications(unread_only: bool = False, limit: int = 50) -> str:
     """
     The logged-in MCP dashboard user's own notifications (document uploads,
@@ -3798,11 +3837,14 @@ def speckle_create_document(
 @mcp.tool()
 def speckle_read_document(stream_id: str, doc_id: str) -> str:
     """
-    Download a CDE document and extract its text content — supports .docx
-    (paragraphs + tables) and .xlsx (every sheet's cell values). Other file
-    types aren't parsed; use speckle_document_detail for their metadata
-    instead, or speckle_get_object-style tools for IFC-native data.
-    Use speckle_list_documents(stream_id) to find doc_id.
+    Download a CDE document and extract its full text content — supports
+    .pdf (via pdftotext), .docx (paragraphs + tables), and .xlsx (every
+    sheet's cell values). Other file types aren't parsed; use
+    speckle_document_detail for their metadata instead, or
+    speckle_get_object-style tools for IFC-native data. For searching
+    across many documents instead of reading one you already know, use
+    speckle_search_document_content. Use speckle_list_documents(stream_id)
+    to find doc_id.
     """
     try:
         resp = _dashboard_request("GET", f"/projects/{stream_id}/documents/{doc_id}/download")
@@ -3817,13 +3859,10 @@ def speckle_read_document(stream_id: str, doc_id: str) -> str:
     filename = cd_match.group(1) if cd_match else doc_id
     ext = os.path.splitext(filename)[1].lower()
 
-    from documents.office_export import read_docx_text, read_xlsx_text
-    if ext == ".docx":
-        text = read_docx_text(resp.content)
-    elif ext == ".xlsx":
-        text = read_xlsx_text(resp.content)
-    else:
-        return f"'{filename}' is not a .docx/.xlsx file — text extraction isn't supported for {ext or 'this type'}."
+    from documents.content_extract import extract_text
+    text = extract_text(filename, resp.content)
+    if not text or not text.strip():
+        return f"'{filename}' — no text could be extracted (unsupported file type {ext or '(none)'}, or a scanned/image-only PDF with no OCR)."
     return f"--- {filename} ---\n{text}"
 
 

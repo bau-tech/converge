@@ -215,6 +215,62 @@ def list_documents(
     return [_row_to_doc(r) for r in rows]
 
 
+def search_document_content(
+    conn, stream_id: str, query: str, viewer_org_id: str | None = None, limit: int = 10,
+) -> list[dict]:
+    """Rank text chunks (bim_document_chunks, built in the background by
+    documents/content_extract.py's index_document — see routers/documents.py's
+    upload/revise hooks) across this project's documents by cosine similarity
+    to `query`. Same two-query shape as db/query.py's semantic_search_elements,
+    same org-scoped WIP visibility as list_documents above (identical WHERE
+    clause) — a WIP document's content is exactly as hidden from another
+    org as its metadata already is. Returns [] (not an error) when nothing's
+    been indexed yet for this project."""
+    from search.embeddings import embed_query, cosine_top_k
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id::text, c.embedding
+            FROM bim_document_chunks c
+            JOIN bim_documents d ON d.doc_id = c.doc_id
+            WHERE d.stream_id = %s AND d.deleted_at IS NULL
+              AND (d.status != 'WIP' OR d.org_id IS NULL OR %s IS NULL OR d.org_id = %s)
+            """,
+            (stream_id, viewer_org_id, viewer_org_id),
+        )
+        rows = [(r[0], r[1]) for r in cur.fetchall()]
+        if not rows:
+            return []
+
+        query_vec = embed_query(query)
+        ranked = cosine_top_k(query_vec, rows, limit)
+        if not ranked:
+            return []
+
+        chunk_ids = [cid for cid, _ in ranked]
+        cur.execute(
+            """
+            SELECT c.id::text, c.chunk_text, c.page_num, d.doc_id::text, d.filename, d.status
+            FROM bim_document_chunks c
+            JOIN bim_documents d ON d.doc_id = c.doc_id
+            WHERE c.id = ANY(%s::bigint[])
+            """,
+            (chunk_ids,),
+        )
+        by_id = {
+            cid: {"chunk_text": text, "page_num": page, "doc_id": doc_id, "filename": filename, "status": status}
+            for cid, text, page, doc_id, filename, status in cur.fetchall()
+        }
+
+    results = []
+    for chunk_id, score in ranked:
+        row = by_id.get(chunk_id)
+        if row:
+            results.append({**row, "score": round(score, 4)})
+    return results
+
+
 def list_linked_positions(conn, stream_id: str, model_id: str) -> list[dict]:
     """speckle_id + geometry centroid for every element in `model_id` that has
     at least one linked document — used to place viewer pins without pulling

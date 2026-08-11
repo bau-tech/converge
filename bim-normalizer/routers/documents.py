@@ -87,6 +87,31 @@ def _require_doc(conn, doc_id: str, user: CurrentUser) -> dict:
     return doc
 
 
+def _index_document_safe(doc_id: str) -> None:
+    """fire_and_forget_sync entry point (own connection, catches its own
+    exceptions) for background text extraction/indexing after an upload or
+    revision — never blocks or fails the request that triggered it. Mirrors
+    routers/ingest.py's _run_embeddings: best-effort, logged-not-raised.
+    Content search (db.documents.search_document_content) simply won't
+    surface anything for this document until this finishes, same "eventually
+    indexed" contract semantic_search already has for BIM elements."""
+    from db.connection import get_conn, release_conn
+    from db.documents import get_document
+    from documents.content_extract import index_document
+
+    conn = get_conn()
+    try:
+        doc = get_document(conn, doc_id)
+        if not doc or doc.get("deleted_at"):
+            return
+        n = index_document(conn, doc)
+        logger.info("Indexed %d text chunk(s) for document %s (%s)", n, doc_id, doc["filename"])
+    except Exception as exc:
+        logger.warning("Background content indexing failed for document %s: %s", doc_id, exc)
+    finally:
+        release_conn(conn)
+
+
 @router.get("/projects/{stream_id}/my-roles")
 def my_roles(stream_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
@@ -115,6 +140,28 @@ def list_documents(
     conn = get_conn()
     try:
         return _list(conn, stream_id, status=status, linked_element=linked_element, viewer_org_id=user.org_id, folder_path=sub)
+    finally:
+        release_conn(conn)
+
+
+@router.get("/projects/{stream_id}/documents/search-content")
+def search_document_content_route(
+    stream_id: str,
+    query: str = Query(..., min_length=1, description="Free-text search over document content"),
+    limit: int = 10,
+    user: CurrentUser = Depends(require_login),
+):
+    """Search inside the text of this project's indexed documents (PDF/DOCX/
+    XLSX — see documents/content_extract.py), not just filenames/status.
+    A document indexes in the background shortly after upload/revision; one
+    uploaded moments ago may not show up yet. Same org-scoped WIP visibility
+    as list_documents above."""
+    from db.connection import get_conn, release_conn
+    from db.documents import search_document_content as _search_content
+    conn = get_conn()
+    try:
+        matches = _search_content(conn, stream_id, query, viewer_org_id=user.org_id, limit=limit)
+        return {"query": query, "count": len(matches), "matches": matches}
     finally:
         release_conn(conn)
 
@@ -418,6 +465,7 @@ async def upload_document_bytes(
         release_conn(conn)
     from notifications.dispatch import notify_document_event
     fire_and_forget_sync(notify_document_event, stream_id, doc["doc_id"], "created", None, user.guid)
+    fire_and_forget_sync(_index_document_safe, doc["doc_id"])
     return doc
 
 
@@ -841,6 +889,7 @@ async def revise_document(
         record_event(conn, doc_id, "revised", to_value=f"revision {updated['revision']}", actor=user.name, actor_guid=user.guid)
         from notifications.dispatch import notify_document_event
         fire_and_forget_sync(notify_document_event, stream_id, doc_id, "revised", f"revision {updated['revision']}", user.guid)
+        fire_and_forget_sync(_index_document_safe, doc_id)
         return updated
     finally:
         release_conn(conn)
@@ -1114,6 +1163,90 @@ async def backfill_documents(stream_id: str, user: CurrentUser = Depends(require
 
 @router.get("/projects/{stream_id}/documents/backfill/{job_id}/status")
 def backfill_status(stream_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        job = get_job(conn, job_id)
+    finally:
+        release_conn(conn)
+    if not job:
+        raise HTTPException(status_code=404, detail="Backfill job not found")
+    return job
+
+
+def _backfill_content_sync(conn, stream_id: str) -> int:
+    """Synchronous — run via asyncio.to_thread from the async route below,
+    same as reconcile_project is for backfill_documents. Finds documents
+    with no indexed content yet, or whose indexed content is from an older
+    revision than the document's current one (should be rare — revise
+    already triggers re-indexing directly — but covers a revision that
+    landed while a prior indexing attempt was still in flight, or a
+    document revised before this feature existed)."""
+    from documents.content_extract import index_document
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT d.doc_id::text, d.nc_path, d.filename, d.revision
+            FROM bim_documents d
+            LEFT JOIN (
+                SELECT doc_id, MAX(revision) AS max_revision
+                FROM bim_document_chunks GROUP BY doc_id
+            ) c ON c.doc_id = d.doc_id
+            WHERE d.stream_id = %s AND d.deleted_at IS NULL
+              AND (c.doc_id IS NULL OR c.max_revision < d.revision)
+        """, (stream_id,))
+        rows = cur.fetchall()
+
+    indexed = 0
+    for doc_id, nc_path, filename, revision in rows:
+        try:
+            n = index_document(conn, {"doc_id": doc_id, "nc_path": nc_path, "filename": filename, "revision": revision})
+            if n:
+                indexed += 1
+        except Exception as exc:
+            logger.warning("Content backfill: indexing failed for document %s (%s): %s", doc_id, filename, exc)
+    return indexed
+
+
+@router.post("/projects/{stream_id}/documents/backfill-content")
+async def backfill_document_content(stream_id: str, user: CurrentUser = Depends(require_login)):
+    """Extract + index text content for every already-uploaded document
+    with no indexed content yet — separate, heavier opt-in step from
+    backfill_documents above (that one is a fast PROPFIND-only metadata
+    walk; this one downloads and parses every file, so it shouldn't
+    surprise someone running a routine metadata reconcile). Poll the
+    returned job_id."""
+    from db.connection import get_conn, release_conn
+
+    job_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        create_job(conn, job_id, "document_content_backfill", payload={"stream_id": stream_id})
+    finally:
+        release_conn(conn)
+
+    async def _run():
+        from db.connection import get_conn as _get_conn, release_conn as _release_conn
+
+        conn2 = _get_conn()
+        try:
+            indexed = await asyncio.to_thread(_backfill_content_sync, conn2, stream_id)
+            update_job(conn2, job_id, status="complete", result={"indexed": indexed})
+        except Exception as exc:
+            logger.error("Document content backfill job %s failed: %s", job_id, exc, exc_info=True)
+            update_job(conn2, job_id, status="failed", error=str(exc))
+        finally:
+            try:
+                prune_jobs(conn2, "document_content_backfill")
+            finally:
+                _release_conn(conn2)
+
+    fire_and_forget(_run())
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/projects/{stream_id}/documents/backfill-content/{job_id}/status")
+def backfill_content_status(stream_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
