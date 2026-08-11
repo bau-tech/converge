@@ -1,10 +1,19 @@
 name: Publish Docker images
 
-# Two images published to GHCR: the frontend dashboard (root Dockerfile —
-# no secrets baked in, see config.js.template/src/runtimeConfig.js for how
-# it's configured per-deployment at container start instead) and
-# bim-normalizer (bim-normalizer/Dockerfile — also runs bcf-server and
-# converge-mcp, same image, different command/port per docker-compose.yml).
+# Four images published to GHCR (and Docker Hub, if configured — see the
+# Docker Hub login step below): the frontend dashboard (root Dockerfile — no
+# secrets baked in, see config.js.template/src/runtimeConfig.js for how it's
+# configured per-deployment at container start instead), bim-normalizer
+# (bim-normalizer/Dockerfile — main.py's own dependency set: fastapi/
+# psycopg2/specklepy/ifcopenshell/ifc5d/ifctester/ifcclash/numpy/fastembed/
+# ezdxf/cairosvg/python-docx/openpyxl/reportlab/etc.), bcf-server
+# (bim-normalizer/Dockerfile.bcf-server — its own slim image; see that
+# Dockerfile's header comment: bcf-server never touches ifcopenshell/numpy/
+# fastembed/etc., so sharing the ~800MB bim-normalizer image just for
+# bcf_server.py meant carrying dependencies it never used), and converge-mcp
+# (bim-normalizer/Dockerfile.converge-mcp — same reasoning, its own slim
+# image with just mcp[cli]/requests/ifcopenshell/ifc5d/uvicorn, no fastapi/
+# psycopg2/specklepy/fastembed/ezdxf/cairosvg/python-docx/openpyxl/reportlab).
 on:
   push:
     branches: [master]
@@ -29,6 +38,12 @@ jobs:
           - image: converge-normalizer
             context: ./bim-normalizer
             dockerfile: bim-normalizer/Dockerfile
+          - image: converge-bcf-server
+            context: ./bim-normalizer
+            dockerfile: bim-normalizer/Dockerfile.bcf-server
+          - image: converge-mcp
+            context: ./bim-normalizer
+            dockerfile: bim-normalizer/Dockerfile.converge-mcp
     steps:
       - name: Checkout
         uses: actions/checkout@v4

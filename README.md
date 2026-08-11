@@ -233,10 +233,10 @@ docker compose up -d --build
 
 ### Running from the released images (no build required)
 
-Both images are published on every push to `master` and on every `v*.*.*` tag ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)) to two registries:
+All four images are published on every push to `master` and on every `v*.*.*` tag ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)) to two registries:
 
-- Docker Hub: [`docker.io/euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) and [`docker.io/euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer)
-- GHCR: `ghcr.io/bau-tech/converge-dashboard` and `ghcr.io/bau-tech/converge-normalizer`
+- Docker Hub: [`docker.io/euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard), [`docker.io/euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer), [`docker.io/euch/converge-bcf-server`](https://hub.docker.com/r/euch/converge-bcf-server) (its own slim image — no ifcopenshell/numpy/fastembed/etc., see `bim-normalizer/Dockerfile.bcf-server`), and [`docker.io/euch/converge-mcp`](https://hub.docker.com/r/euch/converge-mcp) (also its own slim image — just mcp[cli]/requests/ifcopenshell/ifc5d/uvicorn, see `bim-normalizer/Dockerfile.converge-mcp`)
+- GHCR: `ghcr.io/bau-tech/converge-dashboard`, `ghcr.io/bau-tech/converge-normalizer`, `ghcr.io/bau-tech/converge-bcf-server`, and `ghcr.io/bau-tech/converge-mcp`
 
 Each push produces four tags per image: `latest` (default branch only), a semver `X.Y.Z` + `X.Y` pair (tag pushes only, e.g. `0.1.0` / `0.1`), and the short commit SHA. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild.
 

@@ -1,0 +1,20 @@
+# bcf-server's own dependency set — deliberately NOT requirements.txt.
+# bcf-server only ever runs bcf_server.py + the bcf/ package + shared
+# db/connection.py, db/purge.py (-> db/documents.py, nextcloud/client.py,
+# nextcloud/groupfolders.py), config/settings.py, naming/iso19650.py,
+# notifications/*.py — none of which import ifcopenshell, ifc5d, ifctester,
+# ifcclash, specklepy, numpy, fastembed, ezdxf, cairosvg, python-docx,
+# openpyxl, reportlab, httpx, or mcp[cli] (all bim-normalizer/converge-mcp-
+# only concerns: IFC processing, embeddings, DXF/report export, the MCP
+# protocol). Verified by grepping bcf/*.py and the modules it transitively
+# imports for every third-party import — see the Dockerfile.bcf-server
+# comment for how this is wired up.
+fastapi>=0.116.0
+uvicorn[standard]
+pydantic>=2.0
+psycopg2-binary
+requests
+python-dotenv
+pyjwt>=2.8.0
+python-multipart
+bcrypt>=4.0.0

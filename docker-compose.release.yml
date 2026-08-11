@@ -9,6 +9,7 @@ services:
     container_name: speckle-postgres
     mem_limit: 512m
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       POSTGRES_USER: ${PG_USER:-speckle}
       POSTGRES_PASSWORD: ${PG_PASS:-speckle}
       POSTGRES_DB: ${PG_NAME:-speckle}
@@ -36,6 +37,7 @@ services:
     ports:
       - "${NEXTCLOUD_PORT:-8005}:80"
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       POSTGRES_HOST: postgres
       POSTGRES_DB: nextcloud
       POSTGRES_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
@@ -71,6 +73,8 @@ services:
     container_name: nextcloud-cron
     mem_limit: 256m
     entrypoint: /cron.sh
+    environment:
+      TZ: ${TZ:-Europe/Berlin}
     volumes:
       - nextcloud_html:/var/www/html
       - nextcloud_data:/var/www/html/data
@@ -103,9 +107,15 @@ services:
     ports:
       - "8002:8002"
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
       SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
       SPECKLE_SKIP_ANALYTICS: "true"
+      # Was never passed to this service before (converge-mcp/converge already
+      # get it) — bcf/admin.py's project-name lookup and reports/generate.py's
+      # report-title project-name lookup both need it to reach any Speckle
+      # server beyond the single default one.
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       AUTO_SYNC_SCAN_INTERVAL_S: ${AUTO_SYNC_SCAN_INTERVAL_S:-900}
       OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
@@ -132,6 +142,9 @@ services:
       DOCUMENT_SYNC_SCAN_INTERVAL_S: ${DOCUMENT_SYNC_SCAN_INTERVAL_S:-86400}
       BCF_API_KEY: ${BCF_API_KEY:-}
       BCF_OIDC_SECRET: ${BCF_OIDC_SECRET:-}
+      # reports/generate.py's BCF Coordination Report needs to reach
+      # bcf-server directly, same URL passed to converge-mcp/converge below.
+      BCF_SERVER_URL: http://bcf-server:8004
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
       # DEV/TESTING ONLY — see the warning next to this var in .env.example.
       DASHBOARD_AUTH_BYPASS: ${DASHBOARD_AUTH_BYPASS:-}
@@ -152,16 +165,19 @@ services:
 
   # ── Converge MCP Server (streamable HTTP, remote access) ──────────────────
   converge-mcp:
-    image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
+    image: docker.io/euch/converge-mcp:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: converge-mcp
     mem_limit: 3g
-    command: ["python", "converge_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
       - "8003:8003"
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       SPECKLE_SERVER_URL: ${VITE_SPECKLE_SERVER}
       SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
+      # speckle_list_servers/the `server=` param on the direct-Speckle tools
+      # need this to see any server beyond the single default one.
+      VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       NORMALIZER_URL: http://bim-normalizer:8002
       MCP_API_KEY: ${MCP_API_KEY:-}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
@@ -175,21 +191,21 @@ services:
       bim-normalizer:
         condition: service_healthy
     restart: unless-stopped
-    healthcheck:
-      disable: true
+    # No healthcheck: — converge-mcp's own image defines none (converge_mcp.py's
+    # streamable-http transport has no /health route of its own).
     networks:
       - speckle-net
 
   # ── BCF-API server ────────────────────────────────────────────────────────────
   bcf-server:
-    image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
+    image: docker.io/euch/converge-bcf-server:${CONVERGE_VERSION:-latest}
     pull_policy: always
     container_name: bcf-server
     mem_limit: 512m
-    command: ["python", "bcf_server.py"]
     ports:
       - "8004:8004"
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       PG_HOST: postgres
       PG_PORT: 5432
       PG_USER: ${PG_USER:-speckle}
@@ -233,6 +249,7 @@ services:
     ports:
       - "8080:80"
     environment:
+      TZ: ${TZ:-Europe/Berlin}
       NORMALIZER_URL: http://bim-normalizer:8002/
       BCF_SERVER_URL: http://bcf-server:8004/
       VITE_SPECKLE_SERVER: ${VITE_SPECKLE_SERVER}

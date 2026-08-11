@@ -1,0 +1,38 @@
+# Separate, slim image for the converge-mcp entrypoint — it never touches
+# fastapi/psycopg2/specklepy/ifctester/ifcclash/numpy/fastembed/ezdxf/
+# cairosvg/python-docx/openpyxl/reportlab/httpx/bcrypt/pyjwt/python-multipart,
+# all of which bim-normalizer's main Dockerfile installs for main.py's sake
+# (see requirements-converge-mcp.txt for how that was verified). Sharing that
+# image just for converge_mcp.py meant an ~800MB image for a process that
+# only ever does its own in-memory IFC editing (ifcopenshell/ifc5d) plus a
+# thin REST/GraphQL client over everything else. Same build context
+# (./bim-normalizer) as the main Dockerfile though, via docker-compose.yml's
+# `dockerfile: Dockerfile.converge-mcp` override — one source tree, two
+# Dockerfiles, not a separate repo/context to keep in sync. Mirrors
+# Dockerfile.bcf-server's split for the same reason.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-converge-mcp.txt requirements.txt
+# pip/setuptools/wheel are build-only tooling, same reasoning as the main
+# Dockerfile — uninstalled once the actual dependencies are in place.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y pip setuptools wheel
+
+# Still the whole source tree (simpler than maintaining a second COPY
+# allowlist that'd silently go stale) — the size win here is almost entirely
+# from the slimmer requirements.txt above, not from excluding source files.
+COPY . .
+
+RUN useradd -m -u 1000 app && chown -R app:app /app
+USER app
+
+EXPOSE 8003
+
+# No HEALTHCHECK here — converge_mcp.py's streamable-http transport has no
+# /health route of its own (docker-compose.yml's converge-mcp service
+# already disables the main image's inherited healthcheck for the same
+# reason, since that one targets bim-normalizer's own :8002/health).
+
+CMD ["python", "converge_mcp.py", "--transport", "streamable-http", "--port", "8003"]
