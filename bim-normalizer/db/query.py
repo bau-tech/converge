@@ -494,6 +494,35 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
     return {"total": total, "elements": elements}
 
 
+def get_elements_for_grouping(conn, model_id: str, group_by: str, metric: str) -> list[dict]:
+    """Lightweight variant of get_elements_flat for group-and-aggregate
+    consumers (currently just reports/generate.py's gather_anomalies) that
+    only need one grouping column + one metric value per element — not
+    get_elements_flat's full per-element payload, which does a second
+    bulk query across every element's parameters plus material/profile/
+    grade alias classification and centroid geometry, all of it wasted
+    work for a stats computation that only ever reads name/group/metric.
+
+    group_by/metric must come from the caller's own fixed whitelist (see
+    gather_anomalies' own group_by/metric validation) — never pass raw
+    user input straight through, since they're interpolated as column
+    names, not bound as query parameters."""
+    assert group_by in ("category", "ifc_class", "storey"), group_by
+    assert metric in ("volume_m3", "area_m2"), metric
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT e.element_id, e.name, e.{group_by}, g.{metric}
+            FROM bim_elements e
+            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+            WHERE e.model_id = %s
+        """, (model_id,))
+        rows = cur.fetchall()
+    return [
+        {"element_id": str(r[0]), "name": r[1], group_by: r[2], metric: r[3]}
+        for r in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Parameter key discovery — used by the pivot table to build its field list.
 # ---------------------------------------------------------------------------
@@ -645,29 +674,91 @@ def get_model_qa(conn, model_id: str) -> dict:
 # 5D Quantity takeoff — grouped aggregation for BoQ / cost estimation
 # ---------------------------------------------------------------------------
 
+def _element_material_map(cur, model_id: str) -> dict[str, str]:
+    """Map element_id -> one material value per element (canonical_key
+    preferred; falls back to the raw key list for pre-canonical_key data) —
+    mirrors _param_distribution's cascading fallback, but returns per-element
+    values instead of an aggregate count, since get_quantity_takeoff needs to
+    join each element's material against its own geometry row."""
+    cur.execute("""
+        SELECT DISTINCT ON (p.element_id) p.element_id::text, p.value
+        FROM bim_parameters p
+        JOIN bim_elements e ON e.element_id = p.element_id
+        WHERE e.model_id = %s
+          AND p.canonical_key = 'material'
+          AND p.value IS NOT NULL AND p.value <> ''
+        ORDER BY p.element_id, p.key
+    """, (model_id,))
+    rows = cur.fetchall()
+    if rows:
+        return {eid: val for eid, val in rows}
+
+    cur.execute("""
+        SELECT DISTINCT ON (p.element_id) p.element_id::text, p.value
+        FROM bim_parameters p
+        JOIN bim_elements e ON e.element_id = p.element_id
+        WHERE e.model_id = %s
+          AND p.key = ANY(%s)
+          AND p.value IS NOT NULL AND p.value <> ''
+        ORDER BY p.element_id, array_position(%s::text[], p.key)
+    """, (model_id, _MATERIAL_KEYS, _MATERIAL_KEYS))
+    return {eid: val for eid, val in cur.fetchall()}
+
+
 def get_quantity_takeoff(conn, model_id: str, group_by: str = "ifc_class") -> dict:
     """
-    Return structured quantity takeoff grouped by ifc_class, category, or storey.
-    Reads volume_m3 and area_m2 from bim_geometry.
+    Return structured quantity takeoff grouped by ifc_class, category,
+    storey, or material. Reads volume_m3 and area_m2 from bim_geometry.
+
+    'material' isn't a bim_elements column (it lives in bim_parameters, one
+    row per element via canonical_key/raw-key fallback like everywhere else
+    in this file) so it takes a separate path: map each element to its
+    material via _element_material_map, then aggregate in Python against
+    each element's own geometry row — same end result as the SQL GROUP BY
+    the other three fields use, just computed client-side since the group
+    key isn't a column to GROUP BY on directly.
     """
-    allowed = {"ifc_class", "category", "storey"}
+    allowed = {"ifc_class", "category", "storey", "material"}
     field = group_by if group_by in allowed else "ifc_class"
 
     with conn.cursor() as cur:
-        cur.execute(f"""
-            SELECT
-                COALESCE(e.{field}, 'Unknown') AS grp,
-                COUNT(*)                        AS element_count,
-                COALESCE(SUM(g.volume_m3), 0)  AS volume_m3,
-                COALESCE(SUM(g.area_m2), 0)    AS area_m2,
-                COUNT(g.element_id)             AS elements_with_geometry
-            FROM bim_elements e
-            LEFT JOIN bim_geometry g ON g.element_id = e.element_id
-            WHERE e.model_id = %s
-            GROUP BY grp
-            ORDER BY SUM(g.volume_m3) DESC NULLS LAST, COUNT(*) DESC
-        """, (model_id,))
-        rows = cur.fetchall()
+        if field == "material":
+            mat_map = _element_material_map(cur, model_id)
+            cur.execute("""
+                SELECT e.element_id::text, g.volume_m3, g.area_m2
+                FROM bim_elements e
+                LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                WHERE e.model_id = %s
+            """, (model_id,))
+            agg: dict[str, dict] = {}
+            for eid, vol, area in cur.fetchall():
+                bucket = agg.setdefault(mat_map.get(eid, "Unknown"), {"count": 0, "vol": 0.0, "area": 0.0, "with_geom": 0})
+                bucket["count"] += 1
+                if vol is not None:
+                    bucket["vol"] += float(vol)
+                if area is not None:
+                    bucket["area"] += float(area)
+                if vol is not None or area is not None:
+                    bucket["with_geom"] += 1
+            rows = sorted(
+                ((grp, v["count"], v["vol"], v["area"], v["with_geom"]) for grp, v in agg.items()),
+                key=lambda r: (-r[2], -r[1]),
+            )
+        else:
+            cur.execute(f"""
+                SELECT
+                    COALESCE(e.{field}, 'Unknown') AS grp,
+                    COUNT(*)                        AS element_count,
+                    COALESCE(SUM(g.volume_m3), 0)  AS volume_m3,
+                    COALESCE(SUM(g.area_m2), 0)    AS area_m2,
+                    COUNT(g.element_id)             AS elements_with_geometry
+                FROM bim_elements e
+                LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                WHERE e.model_id = %s
+                GROUP BY grp
+                ORDER BY SUM(g.volume_m3) DESC NULLS LAST, COUNT(*) DESC
+            """, (model_id,))
+            rows = cur.fetchall()
 
         cur.execute("""
             SELECT COUNT(*), COALESCE(SUM(g.volume_m3), 0), COALESCE(SUM(g.area_m2), 0)

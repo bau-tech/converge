@@ -455,6 +455,26 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         setFederatedModelVisibility(branchName, visible) {
             handleSetFederatedVisibility(branchName, visible)
         },
+        // Capture a PNG snapshot of the current view on a white background
+        // (regardless of the app's dark/light theme), for embedding in
+        // generated reports. Restores the theme-correct background afterward.
+        async captureScreenshot() {
+            const viewer = viewerRef.current
+            if (!viewer) return null
+            const renderer = viewer.getRenderer()
+            try {
+                renderer?.renderer?.setClearColor(0xffffff, 1)
+                viewer.requestRender()
+                await new Promise((resolve) => requestAnimationFrame(resolve))
+                return await viewer.screenshot()
+            } catch (e) {
+                console.warn('[SpeckleViewer] captureScreenshot error:', e)
+                return null
+            } finally {
+                renderer?.renderer?.setClearColor(darkModeRef.current ? VIEWER_BG_DARK : VIEWER_BG_LIGHT, 1)
+                viewer.requestRender()
+            }
+        },
         // handleApplyChartColors/handleClearChartColors (useCallback([], ...) below) are
         // deliberately omitted from deps: they're declared later in this render, so listing
         // them here would read the binding before its own initializer runs.

@@ -28,6 +28,7 @@ from routers.models import router as models_router
 from routers.nextcloud_webhook import router as nextcloud_webhook_router
 from routers.notifications import router as notifications_router
 from routers.overrides import router as overrides_router
+from routers.reports import router as reports_router
 from routers.sync import router as sync_router
 from routers.timeline import router as timeline_router
 
@@ -188,3 +189,4 @@ app.include_router(clash_check_router)
 app.include_router(documents_router)
 app.include_router(nextcloud_webhook_router)
 app.include_router(notifications_router)
+app.include_router(reports_router)

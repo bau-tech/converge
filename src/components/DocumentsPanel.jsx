@@ -3,10 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import {
     X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, EyeOff, UploadCloud, GitBranch, Ruler,
-    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag, Crosshair, Loader2,
+    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag, Crosshair, Loader2, FileSpreadsheet,
 } from 'lucide-react'
 import { DocumentPreview } from './DocumentPreview'
 import { SpeckleModelsList } from './SpeckleModelsList'
+import { WordIcon } from './WordIcon'
+import { ExcelIcon } from './ExcelIcon'
 import { useAuth } from '../contexts/AuthContext'
 import { SUITABILITY_CODES, SUITABILITY_COLOR } from '../utils/suitabilityCodes'
 
@@ -15,10 +17,49 @@ import { SUITABILITY_CODES, SUITABILITY_COLOR } from '../utils/suitabilityCodes'
 // bim-normalizer/naming/iso19650.py for the actual advisory check).
 const NAMING_TEMPLATE = 'PROJECT-ORIGINATOR-VOLUME-LEVEL-TYPE-ROLE-NUMBER'
 
+// Mirrors reports/generate.py's REPORT_TYPES — see bim-normalizer/routers/reports.py's
+// GET /reports/types for the same list served from the backend (this static
+// copy avoids an extra round-trip just to populate a dropdown).
+const REPORT_TYPE_OPTIONS = [
+    { value: 'bom', label: 'Bill of Materials', needs: [] },
+    { value: 'qa', label: 'Data Quality Report', needs: [] },
+    { value: 'rooms', label: 'Room / Space Schedule', needs: [] },
+    { value: 'schedule', label: '4D Schedule Report', needs: [] },
+    { value: 'documents', label: 'Document Register', needs: [] },
+    { value: 'bcf', label: 'BCF Coordination Report', needs: [] },
+    { value: 'anomalies', label: 'Anomaly Report', needs: [] },
+    { value: 'concrete_beams', label: 'Concrete Beam Schedule', needs: [] },
+    { value: 'steel_beams', label: 'Steel Beam Schedule', needs: [] },
+    { value: 'walls', label: 'Wall Schedule', needs: [] },
+    { value: 'columns', label: 'Column Schedule', needs: [] },
+    { value: 'floors', label: 'Floor Schedule', needs: [] },
+    { value: 'foundations', label: 'Foundation Schedule', needs: [] },
+    { value: 'doors', label: 'Door Schedule', needs: [] },
+    { value: 'windows', label: 'Window Schedule', needs: [] },
+    { value: 'model_summary', label: 'Model Summary', needs: [] },
+    { value: 'changes', label: 'Model Change Report', needs: ['compared_model_id'] },
+    { value: 'ids', label: 'IDS Compliance Report', needs: ['spec_id'] },
+    { value: 'clashes', label: 'Clash Detection Report', needs: ['rules_json'] },
+]
+
 const PREVIEWABLE_EXT = new Set(['pdf', 'ifc', 'dxf', 'dwg', 'docx', 'xlsx', 'xls', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'txt', 'md'])
 function isPreviewable(filename) {
     const m = /\.([a-z0-9]+)$/i.exec(filename || '')
     return m ? PREVIEWABLE_EXT.has(m[1].toLowerCase()) : false
+}
+
+// No real thumbnail exists for .docx/.xlsx (would need a full LibreOffice
+// pipeline — see thumbnail_document's fallback chain in routers/documents.py)
+// — showing the real Word/Excel file-type icon instead of a generic FileText
+// glyph at least tells the two apart at a glance in the grid/list. Sized to
+// fill the same container a real thumbnail would (object-contain, not the
+// small fixed size FileText uses) so it reads with the same visual weight
+// as a PDF/DXF preview instead of looking like an afterthought.
+function DocTypeIcon({ filename, className }) {
+    const ext = /\.([a-z0-9]+)$/i.exec(filename || '')?.[1]?.toLowerCase()
+    if (ext === 'docx' || ext === 'doc') return <WordIcon className="w-full h-full object-contain p-2" />
+    if (ext === 'xlsx' || ext === 'xls') return <ExcelIcon className="w-full h-full object-contain p-2" />
+    return <FileText className={className} />
 }
 
 // Drawing-to-3D-model alignment (AlignmentPanel.jsx) only supports DXF/DWG —
@@ -104,7 +145,7 @@ function CardContent({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, 
             >
                 {thumbUrl
                     ? <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
-                    : <FileText className="w-6 h-6 text-[var(--speckle-foreground-disabled)]" />}
+                    : <DocTypeIcon filename={doc.filename} className="w-6 h-6 text-[var(--speckle-foreground-disabled)]" />}
             </div>
             <div className="p-2.5" onClick={e => onCardClick?.(doc, e)}>
                 <div className="flex items-start justify-between gap-2">
@@ -170,7 +211,7 @@ function ListRowContent({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGat
             >
                 {thumbUrl
                     ? <img src={thumbUrl} className="w-full h-full object-cover" alt="" />
-                    : <FileText className="w-4 h-4 text-[var(--speckle-foreground-disabled)]" />}
+                    : <DocTypeIcon filename={doc.filename} className="w-4 h-4 text-[var(--speckle-foreground-disabled)]" />}
             </div>
             <div className="flex-1 min-w-0 flex items-center gap-2" onClick={e => onCardClick?.(doc, e)}>
                 <p className="text-xs font-medium text-[var(--speckle-foreground)] truncate">{doc.filename}</p>
@@ -265,6 +306,29 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
     const [deleting, setDeleting] = useState(false)
     const [isDraggingFile, setIsDraggingFile] = useState(false)
     const [modelsUploading, setModelsUploading] = useState(false)
+    // "Generate Report" popover — builds a real .docx/.xlsx/.pdf from
+    // reports/generate.py's 10 report types and uploads it straight into
+    // this project's CDE, same WIP-landing/approval-gate path as a manual
+    // upload (see routers/reports.py's POST /reports/generate, upload=True).
+    const [showReportMenu, setShowReportMenu] = useState(false)
+    const [reportType, setReportType] = useState('bom')
+    const [reportFormat, setReportFormat] = useState('pdf')
+    const [reportExtra, setReportExtra] = useState({ compared_model_id: '', spec_id: '', rules_json: '' })
+    const [generatingReport, setGeneratingReport] = useState(false)
+    const [reportError, setReportError] = useState(null)
+    // Specs saved via the IDS Editor (IdsCheckPanel — same GET .../ids-specs
+    // list it populates its own spec picker from), so the report picker can
+    // offer a dropdown of real saved rules instead of a raw spec_id to type in.
+    const [idsSpecs, setIdsSpecs] = useState([])
+    useEffect(() => {
+        if (!showReportMenu || reportType !== 'ids' || !activeModelId) return
+        let cancelled = false
+        fetch(`${base}/models/${activeModelId}/ids-specs`)
+            .then(res => res.ok ? res.json() : [])
+            .then(specs => { if (!cancelled) setIdsSpecs(specs) })
+            .catch(() => { if (!cancelled) setIdsSpecs([]) })
+        return () => { cancelled = true }
+    }, [showReportMenu, reportType, activeModelId, base])
     // Drawing-alignment feature: which doc's saved overlay is currently shown
     // in the 3D viewer (SpeckleViewer only ever holds one at a time — see
     // its alignmentOverlayRef), plus its opacity. Toggled from the drawing
@@ -529,6 +593,76 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
             setError(err.message)
         } finally {
             setUploading(false)
+        }
+    }
+
+    const generateReport = async () => {
+        if (!streamId) return
+        const meta = REPORT_TYPE_OPTIONS.find(r => r.value === reportType)
+        const body = {
+            report_type: reportType,
+            stream_id: streamId,
+            model_id: activeModelId || undefined,
+            output_format: reportFormat,
+            upload: true,
+            folder_path: folderPath || undefined,
+        }
+        if (meta?.needs.includes('compared_model_id')) {
+            if (!reportExtra.compared_model_id.trim()) {
+                setReportError('This report needs a baseline model_id to compare against.')
+                return
+            }
+            body.compared_model_id = reportExtra.compared_model_id.trim()
+        }
+        if (meta?.needs.includes('spec_id')) {
+            if (!reportExtra.spec_id.trim()) {
+                setReportError('Pick a saved IDS rule set to check against.')
+                return
+            }
+            body.spec_id = reportExtra.spec_id.trim()
+        }
+        if (meta?.needs.includes('rules_json')) {
+            if (!reportExtra.rules_json.trim()) {
+                setReportError('This report needs at least one clash rule (JSON array).')
+                return
+            }
+            try {
+                body.rules = JSON.parse(reportExtra.rules_json)
+            } catch {
+                setReportError('Clash rules must be valid JSON, e.g. [{"selector_a":"IfcColumn","selector_b":"IfcWall"}]')
+                return
+            }
+        }
+
+        if (reportType === 'model_summary' && viewerRef?.current?.captureScreenshot) {
+            try {
+                const dataUrl = await viewerRef.current.captureScreenshot()
+                if (dataUrl) body.viewer_snapshot = dataUrl.split(',')[1] || undefined
+            } catch {
+                // 3D view is a nice-to-have on this report — fall through and
+                // generate it without a snapshot rather than blocking the report.
+            }
+        }
+
+        setGeneratingReport(true)
+        setReportError(null)
+        try {
+            const res = await fetch(`${base}/reports/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            })
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}))
+                throw new Error(err.detail || `Report generation failed (${res.status})`)
+            }
+            const doc = await res.json()
+            setDocuments(prev => [...prev, doc])
+            setShowReportMenu(false)
+        } catch (err) {
+            setReportError(err.message)
+        } finally {
+            setGeneratingReport(false)
         }
     }
 
@@ -1064,6 +1198,99 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                             >
                                 <Info className="w-3.5 h-3.5" />
                             </span>
+                            <div className="relative">
+                                <button
+                                    onClick={() => { setReportError(null); setShowReportMenu(v => !v) }}
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] bg-[var(--speckle-outline-3)]/60 text-[var(--speckle-foreground)] hover:bg-[var(--speckle-outline-3)] transition-colors"
+                                >
+                                    <FileSpreadsheet className="w-3.5 h-3.5" /> Generate Report
+                                </button>
+                                {showReportMenu && (
+                                    <div className="absolute right-0 top-full mt-1.5 w-72 rounded-xl border border-[var(--speckle-outline-3)] bg-[var(--speckle-foundation-page)] shadow-2xl z-[300] p-3 flex flex-col gap-2.5">
+                                        <div className="text-xs font-semibold text-[var(--speckle-foreground)]">Generate Report</div>
+                                        <label className="text-[11px] text-[var(--speckle-foreground-2)] flex flex-col gap-1">
+                                            Report
+                                            <select
+                                                value={reportType}
+                                                onChange={e => setReportType(e.target.value)}
+                                                className="text-xs px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/50 border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground)]"
+                                            >
+                                                {REPORT_TYPE_OPTIONS.map(r => (
+                                                    <option key={r.value} value={r.value}>{r.label}</option>
+                                                ))}
+                                            </select>
+                                        </label>
+                                        <label className="text-[11px] text-[var(--speckle-foreground-2)] flex flex-col gap-1">
+                                            Format
+                                            <select
+                                                value={reportFormat}
+                                                onChange={e => setReportFormat(e.target.value)}
+                                                className="text-xs px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/50 border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground)]"
+                                            >
+                                                <option value="pdf">PDF</option>
+                                                <option value="docx">Word (.docx)</option>
+                                                <option value="xlsx">Excel (.xlsx)</option>
+                                            </select>
+                                        </label>
+                                        {REPORT_TYPE_OPTIONS.find(r => r.value === reportType)?.needs.includes('compared_model_id') && (
+                                            <label className="text-[11px] text-[var(--speckle-foreground-2)] flex flex-col gap-1">
+                                                Baseline model_id (older version to compare against)
+                                                <input
+                                                    type="text" value={reportExtra.compared_model_id}
+                                                    onChange={e => setReportExtra(prev => ({ ...prev, compared_model_id: e.target.value }))}
+                                                    placeholder="model_id"
+                                                    className="text-xs px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/50 border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground)]"
+                                                />
+                                            </label>
+                                        )}
+                                        {REPORT_TYPE_OPTIONS.find(r => r.value === reportType)?.needs.includes('spec_id') && (
+                                            <label className="text-[11px] text-[var(--speckle-foreground-2)] flex flex-col gap-1">
+                                                IDS rule set
+                                                {idsSpecs.length > 0 ? (
+                                                    <select
+                                                        value={reportExtra.spec_id}
+                                                        onChange={e => setReportExtra(prev => ({ ...prev, spec_id: e.target.value }))}
+                                                        className="text-xs px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/50 border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground)]"
+                                                    >
+                                                        <option value="">Select a saved rule set…</option>
+                                                        {idsSpecs.map(s => (
+                                                            <option key={s.spec_id} value={s.spec_id}>{s.filename}</option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <div className="text-[11px] text-[var(--speckle-foreground-2)] italic px-2 py-1.5">
+                                                        {activeModelId
+                                                            ? 'No saved rule sets for this model yet — create one in the IDS Editor first.'
+                                                            : 'Load a model first to see its saved IDS rule sets.'}
+                                                    </div>
+                                                )}
+                                            </label>
+                                        )}
+                                        {REPORT_TYPE_OPTIONS.find(r => r.value === reportType)?.needs.includes('rules_json') && (
+                                            <label className="text-[11px] text-[var(--speckle-foreground-2)] flex flex-col gap-1">
+                                                Clash rules (JSON array)
+                                                <textarea
+                                                    rows={3} value={reportExtra.rules_json}
+                                                    onChange={e => setReportExtra(prev => ({ ...prev, rules_json: e.target.value }))}
+                                                    placeholder='[{"selector_a":"IfcColumn","selector_b":"IfcWall"}]'
+                                                    className="text-xs px-2 py-1.5 rounded-lg bg-[var(--speckle-outline-3)]/50 border border-[var(--speckle-outline-3)] text-[var(--speckle-foreground)] font-mono"
+                                                />
+                                            </label>
+                                        )}
+                                        {reportError && <div className="text-[11px] text-red-400">{reportError}</div>}
+                                        <div className="text-[10px] text-[var(--speckle-foreground-3)]">
+                                            Uploads straight into this project&apos;s WIP folder — needs review → approval → verification like any new document.
+                                        </div>
+                                        <button
+                                            onClick={generateReport}
+                                            disabled={generatingReport}
+                                            className="flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                                        >
+                                            {generatingReport ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Generating…</> : 'Generate & Upload'}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                         </>
                     )}
                     {activeTab === 'models' && canAct && (
@@ -1298,7 +1525,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                         <div className="aspect-video bg-[var(--speckle-outline-3)] rounded-lg flex items-center justify-center overflow-hidden">
                             {thumbs[selectedDoc.doc_id]
                                 ? <img src={thumbs[selectedDoc.doc_id]} className="w-full h-full object-cover" alt="" />
-                                : <FileText className="w-8 h-8 text-[var(--speckle-foreground-disabled)]" />}
+                                : <DocTypeIcon filename={selectedDoc.filename} className="w-8 h-8 text-[var(--speckle-foreground-disabled)]" />}
                         </div>
                         <h4 className="text-sm font-semibold text-[var(--speckle-foreground)] break-all">{selectedDoc.filename}</h4>
                         <div className="flex items-center gap-1.5 flex-wrap">

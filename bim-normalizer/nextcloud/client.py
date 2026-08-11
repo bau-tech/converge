@@ -34,7 +34,13 @@ _session = requests.Session()
 
 
 class NextcloudError(Exception):
-    pass
+    """status_code carries the WebDAV/HTTP response's status when known, so
+    a caller (e.g. groupfolders.py's freshly-created-mount retry) can act on
+    a specific transient status instead of blindly retrying every failure
+    mode, including permanent ones like a real permissions error."""
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class NextcloudConflictError(NextcloudError):
@@ -164,7 +170,7 @@ def ensure_folder(path: str) -> None:
     """MKCOL is idempotent-ish here — 405 means it already exists."""
     resp = _session.request("MKCOL", _dav_url(path), auth=_auth(), timeout=30)
     if resp.status_code not in (201, 405):
-        raise NextcloudError(f"MKCOL {path} failed: {resp.status_code} {resp.text[:300]}")
+        raise NextcloudError(f"MKCOL {path} failed: {resp.status_code} {resp.text[:300]}", status_code=resp.status_code)
 
 
 def _parse_oc_fileid(header_value: str | None) -> int | None:

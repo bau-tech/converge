@@ -85,6 +85,10 @@ PG_NAME: str = _require("PG_NAME")
 PORT: int = int(os.getenv("PORT", "8002"))
 
 BCF_API_KEY: str = os.getenv("BCF_API_KEY", "")
+# bcf-server is a separate service (own container, own auth) — bim-normalizer
+# itself never called it before reports/generate.py's BCF Coordination
+# Report, which needs to reach it the same way converge_mcp.py already does.
+BCF_SERVER_URL: str = os.getenv("BCF_SERVER_URL", "http://bcf-server:8004").rstrip("/")
 # Signs the OIDC id_token issued by the BCF OAuth2 login flow (bcf/oauth.py),
 # now backed by real bcf_users accounts rather than a fake fixed identity.
 BCF_OIDC_SECRET: str = os.getenv("BCF_OIDC_SECRET") or BCF_API_KEY or "dev-insecure-oidc-secret"

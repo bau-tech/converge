@@ -298,7 +298,7 @@ def get_model_quantities(model_id: str, group_by: str = "ifc_class"):
     """
     5D quantity takeoff from the database — no IFC load required.
     Returns element counts + volume (m³) + area (m²) per group.
-    group_by: 'ifc_class' (default), 'category', or 'storey'
+    group_by: 'ifc_class' (default), 'category', 'storey', or 'material'
     """
     from db.connection import get_conn, release_conn
     from db.query import get_quantity_takeoff as _qto

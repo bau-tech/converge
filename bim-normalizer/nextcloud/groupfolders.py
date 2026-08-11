@@ -9,6 +9,7 @@ which is what the OCS Provisioning API and the Groupfolders OCS endpoint both
 require — separate from the WebDAV service account in client.py.
 """
 import logging
+import time
 
 from config import settings
 from nextcloud.client import NextcloudConflictError, NextcloudError, _ocs_request, ensure_folder
@@ -98,8 +99,28 @@ def ensure_group_folder(stream_id: str) -> int:
     # too, independent of which bcf_users get added by provisioning.py.
     add_user_to_group(settings.NEXTCLOUD_USER, group_id)
 
+    # A group folder mount just created via the Groupfolders OCS API isn't
+    # always immediately visible over WebDAV — Nextcloud's mount-provider
+    # cache can lag a moment behind the OCS call that registered it — so the
+    # very first MKCOL for its status subfolders can 409 "Parent node does
+    # not exist" even though the parent mount was just created above.
+    # Retrying with a short backoff clears this within a couple seconds;
+    # once the mount is registered every later call (including this one on
+    # an existing project) hits it immediately with no delay.
     for sub in STATUS_SUBFOLDERS:
-        ensure_folder(f"{mount_point}/{sub}")
+        path = f"{mount_point}/{sub}"
+        for attempt in range(5):
+            try:
+                ensure_folder(path)
+                break
+            except NextcloudError as exc:
+                # Only retry the specific transient race (409 = parent mount
+                # not visible yet) — anything else (permissions, a real
+                # config error) is permanent and should fail immediately
+                # rather than eating ~5s of retries first.
+                if exc.status_code != 409 or attempt == 4:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
 
     return folder_id
 
