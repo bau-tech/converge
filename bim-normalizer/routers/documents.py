@@ -331,15 +331,18 @@ def thumbnail_document(stream_id: str, doc_id: str, user: CurrentUser = Depends(
     return Response(content=content, media_type=content_type)
 
 
-@router.post("/projects/{stream_id}/documents/upload")
-async def upload_document(
-    stream_id: str, file: UploadFile,
-    doc_type: str = Form("document"),
-    model_id: str | None = Form(None),
-    folder_path: str | None = Form(None),
-    user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
-):
-    """Always lands in 01_WIP — new documents must go through the approval
+async def upload_document_bytes(
+    stream_id: str, filename: str, content: bytes, doc_type: str,
+    model_id: str | None, folder_path: str | None, user: "CurrentUser",
+) -> dict:
+    """Core of /projects/{stream_id}/documents/upload, taking raw bytes
+    instead of an UploadFile — shared by that route (which just reads its
+    UploadFile into bytes first) and reports/generate.py's report-upload
+    path (routers/reports.py), so a generated report lands in the CDE
+    through the exact same WIP-landing/Nextcloud-provisioning/notification
+    path a manually-uploaded file does, not a second reimplementation of it.
+
+    Always lands in 01_WIP — new documents must go through the approval
     workflow before reaching Published, same as everything else.
 
     doc_type='drawing' requires an explicit model_id — deliberately not
@@ -359,8 +362,7 @@ async def upload_document(
         raise HTTPException(status_code=400, detail=f"Invalid doc_type, must be one of {_VALID_DOC_TYPES}")
 
     sub = _sanitize_folder_path(folder_path)
-    content = await file.read()
-    filename = file.filename or "document"
+    filename = filename or "document"
     group_folder = _group_folder(stream_id)
     target_dir = f"{group_folder}/{_STATUS_FOLDERS['WIP']}/{sub}" if sub else f"{group_folder}/{_STATUS_FOLDERS['WIP']}"
 
@@ -380,17 +382,26 @@ async def upload_document(
         release_conn(conn)
 
     try:
-        ensure_project_group(stream_id)
+        # asyncio.to_thread: ensure_project_group/ensure_folder make blocking
+        # requests-based WebDAV/OCS calls (and, on first provisioning, a
+        # blocking retry sleep) — this route is async def, so running them
+        # inline would stall the whole event loop, not just this request.
+        await asyncio.to_thread(ensure_project_group, stream_id)
         if sub:
             # Defensive/idempotent (MKCOL 405s harmlessly if it already
             # exists via create_folder) — removes any hard ordering
             # dependency on the client having called that route first.
-            ensure_folder(target_dir)
+            await asyncio.to_thread(ensure_folder, target_dir)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
 
     try:
-        meta = upload_bytes(f"{target_dir}/{filename}", content, overwrite=False)
+        # asyncio.to_thread — same reasoning as ensure_project_group/
+        # ensure_folder just above: this is the actual file-content PUT,
+        # the biggest blocking call in this request, previously left
+        # inline despite the smaller provisioning calls right next to it
+        # already being wrapped.
+        meta = await asyncio.to_thread(upload_bytes, f"{target_dir}/{filename}", content, overwrite=False)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud upload failed: {exc}")
 
@@ -408,6 +419,18 @@ async def upload_document(
     from notifications.dispatch import notify_document_event
     fire_and_forget_sync(notify_document_event, stream_id, doc["doc_id"], "created", None, user.guid)
     return doc
+
+
+@router.post("/projects/{stream_id}/documents/upload")
+async def upload_document(
+    stream_id: str, file: UploadFile,
+    doc_type: str = Form("document"),
+    model_id: str | None = Form(None),
+    folder_path: str | None = Form(None),
+    user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
+):
+    content = await file.read()
+    return await upload_document_bytes(stream_id, file.filename or "document", content, doc_type, model_id, folder_path, user)
 
 
 class CreateFolderRequest(BaseModel):
@@ -811,7 +834,7 @@ async def revise_document(
     try:
         doc = _require_doc(conn, doc_id, user)
         try:
-            meta = upload_bytes(doc["nc_path"], content, overwrite=True)
+            meta = await asyncio.to_thread(upload_bytes, doc["nc_path"], content, overwrite=True)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Nextcloud upload failed: {exc}")
         updated = bump_revision(conn, doc_id, nc_path=doc["nc_path"], size_bytes=meta.get("size"), etag=meta.get("etag"))
@@ -1057,7 +1080,7 @@ async def backfill_documents(stream_id: str, user: CurrentUser = Depends(require
     from nextcloud.provisioning import ensure_project_group
 
     try:
-        ensure_project_group(stream_id)
+        await asyncio.to_thread(ensure_project_group, stream_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
 

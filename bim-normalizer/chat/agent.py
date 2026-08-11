@@ -762,6 +762,57 @@ _TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_report",
+            "description": (
+                "Generate one of converge's standard BIM reports as a real .docx/.xlsx/.pdf file and "
+                "upload it into this project's CDE (Nextcloud) WIP folder. Use when the user asks to "
+                "'generate a report', 'export the bill of materials', 'give me a QA report', 'create "
+                "a clash report', 'list all the concrete beams', etc. Report types: bom (Bill of "
+                "Materials, quantities by material), qa (Data Quality Report), clashes (Clash "
+                "Detection Report — needs rules_json), ids (IDS Compliance Report — needs spec_id), "
+                "documents (CDE Document Register), rooms (Room/Space Schedule), schedule (4D "
+                "Schedule Report), changes (Model Change Report — needs compared_model_id), bcf (BCF "
+                "Coordination Report), anomalies (volume/area outlier report), concrete_beams / "
+                "steel_beams (IfcBeam elements split by material), walls, columns, floors, "
+                "foundations, doors, windows (element schedules for that category), model_summary "
+                "(one-page project fact sheet — source/author/quantities/category breakdowns; no 3D "
+                "view when generated from chat, that needs the dashboard's own Generate Report button). "
+                "Only works for a logged-in user with a project role, since it uploads a document — "
+                "tell the user to log in if this reports it's unavailable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "report_type": {
+                        "type": "string",
+                        "enum": [
+                            "bom", "qa", "clashes", "ids", "documents", "rooms", "schedule", "changes",
+                            "bcf", "anomalies", "concrete_beams", "steel_beams", "walls", "columns",
+                            "floors", "foundations", "doors", "windows", "model_summary",
+                        ],
+                        "description": "Which report to generate.",
+                    },
+                    "output_format": {
+                        "type": "string", "enum": ["docx", "xlsx", "pdf"],
+                        "description": "File format (default pdf).",
+                    },
+                    "compared_model_id": {
+                        "type": "string",
+                        "description": "Baseline/older model_id — required for report_type='changes', optional for 'clashes' (cross-model check against this other model).",
+                    },
+                    "spec_id": {"type": "string", "description": "IDS spec id — required for report_type='ids'. Find via list_ids_specs."},
+                    "rules_json": {
+                        "type": "string",
+                        "description": "JSON array of clash rules — required for report_type='clashes', e.g. '[{\"selector_a\":\"IfcColumn\",\"selector_b\":\"IfcWall\"}]'.",
+                    },
+                },
+                "required": ["report_type"],
+            },
+        },
+    },
 ]
 
 
@@ -1758,7 +1809,12 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict, user=None) -> t
         valid_issues = {"unclassified", "no_geometry", "no_name", "no_storey", "no_material", "duplicate_ids"}
         if issue not in valid_issues:
             return f"'issue' must be one of: {', '.join(sorted(valid_issues))}.", None
-        elements = get_qa_elements(conn, model_id, issue, limit=int(args.get("limit") or 50))
+        # Clamped like every other tool that hands a caller-facing limit
+        # straight into a SQL LIMIT (e.g. find_nearby_elements' hardcoded
+        # 200-row cap) — this one took the LLM's args["limit"] uncapped,
+        # so a large value would dump an unbounded result straight into
+        # the conversation's token context.
+        elements = get_qa_elements(conn, model_id, issue, limit=min(int(args.get("limit") or 50), 500))
         if not elements:
             return f"No elements found with issue '{issue}'.", None
         ids = [e["speckle_id"] for e in elements if e.get("speckle_id")]
@@ -2081,6 +2137,106 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict, user=None) -> t
             return "No notifications.", None
         return _jdump(notifications), None
 
+    if fn == "generate_report":
+        if user is None:
+            return "Generating a report requires being logged in (it uploads into this project's CDE, same as a manual document upload).", None
+        from reports.generate import REPORT_TYPES
+        report_type = args.get("report_type", "")
+        if report_type not in REPORT_TYPES:
+            return f"report_type must be one of: {', '.join(sorted(REPORT_TYPES))}", None
+        output_format = args.get("output_format") or "pdf"
+        if output_format not in ("docx", "xlsx", "pdf"):
+            return "output_format must be 'docx', 'xlsx', or 'pdf'.", None
+
+        stream_id = get_model_stream_id(conn, model_id)
+        if not stream_id:
+            return "Could not resolve this model's project.", None
+
+        from dashboard_auth.dependencies import ANY_PROJECT_ROLE, require_project_role
+        try:
+            require_project_role(conn, stream_id, user, ANY_PROJECT_ROLE)
+        except Exception:
+            return "You don't have permission to upload documents to this project (requires an author/reviewer/approver role).", None
+
+        compared_model_id = args.get("compared_model_id") or ""
+        spec_id = args.get("spec_id") or ""
+        rules: list = []
+        if args.get("rules_json"):
+            try:
+                rules = json.loads(args["rules_json"])
+            except json.JSONDecodeError as exc:
+                return f"Invalid JSON in rules_json: {exc}", None
+
+        from reports.generate import (
+            gather_anomalies, gather_bcf, gather_bom, gather_changes, gather_clashes,
+            gather_columns, gather_concrete_beams, gather_documents, gather_doors,
+            gather_floors, gather_foundations, gather_ids, gather_model_summary, gather_qa,
+            gather_rooms, gather_schedule, gather_steel_beams, gather_walls, gather_windows,
+        )
+        try:
+            if report_type == "bom":
+                title, sections = _run_async(gather_bom(conn, model_id))
+            elif report_type == "qa":
+                title, sections = _run_async(gather_qa(conn, model_id))
+            elif report_type == "clashes":
+                title, sections = _run_async(gather_clashes(conn, model_id, rules, compared_model_id))
+            elif report_type == "ids":
+                title, sections = _run_async(gather_ids(conn, model_id, spec_id))
+            elif report_type == "documents":
+                title, sections = _run_async(gather_documents(conn, stream_id, viewer_org_id=user.org_id))
+            elif report_type == "rooms":
+                title, sections = _run_async(gather_rooms(conn, model_id))
+            elif report_type == "schedule":
+                title, sections = _run_async(gather_schedule(conn, model_id))
+            elif report_type == "changes":
+                title, sections = _run_async(gather_changes(conn, model_id, compared_model_id))
+            elif report_type == "bcf":
+                from config.settings import BCF_API_KEY, BCF_SERVER_URL
+                title, sections = _run_async(gather_bcf(conn, model_id, BCF_SERVER_URL, BCF_API_KEY))
+            elif report_type == "anomalies":
+                title, sections = _run_async(gather_anomalies(conn, model_id))
+            elif report_type == "concrete_beams":
+                title, sections = _run_async(gather_concrete_beams(conn, model_id))
+            elif report_type == "steel_beams":
+                title, sections = _run_async(gather_steel_beams(conn, model_id))
+            elif report_type == "walls":
+                title, sections = _run_async(gather_walls(conn, model_id))
+            elif report_type == "columns":
+                title, sections = _run_async(gather_columns(conn, model_id))
+            elif report_type == "floors":
+                title, sections = _run_async(gather_floors(conn, model_id))
+            elif report_type == "foundations":
+                title, sections = _run_async(gather_foundations(conn, model_id))
+            elif report_type == "doors":
+                title, sections = _run_async(gather_doors(conn, model_id))
+            elif report_type == "windows":
+                title, sections = _run_async(gather_windows(conn, model_id))
+            else:  # "model_summary" — only remaining member of REPORT_TYPES; no client-side
+                   # viewer to screenshot from a chat tool call, so no 3D view section here.
+                title, sections = _run_async(gather_model_summary(conn, model_id))
+        except ValueError as exc:
+            return str(exc), None
+        except Exception as exc:
+            return f"Report generation failed: {exc}", None
+
+        from documents.office_export import build_docx_report, build_pdf_report, build_xlsx_report
+        builder = {"docx": build_docx_report, "xlsx": build_xlsx_report, "pdf": build_pdf_report}[output_format]
+        data = builder(title, sections)
+
+        from datetime import datetime, timezone
+        filename = f"{report_type}-report-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.{output_format}"
+
+        from routers.documents import upload_document_bytes
+        try:
+            doc = _run_async(upload_document_bytes(stream_id, filename, data, "document", model_id, None, user))
+        except Exception as exc:
+            return f"Report generated but upload to the CDE failed: {exc}", None
+        return (
+            f"Generated '{title}' and uploaded it to this project's CDE as '{doc.get('filename')}' "
+            f"(status=WIP, doc_id={doc.get('doc_id')}). It'll need review → approval → verification "
+            f"like any new document — find it in the Documents panel."
+        ), None
+
     return "Unknown tool.", None
 
 
@@ -2302,7 +2458,11 @@ _TOOLS_AND_REASONING_TRAILER = (
         "folder, and linked element (read-only, org-scoped WIP visibility)\n"
         "- list_topics / get_topic / create_topic / update_topic / list_topic_comments / add_topic_comment: "
         "BCF coordination issues — log/track/discuss findings as trackable topics\n"
-        "- get_notifications: the current logged-in user's notifications for this project (unavailable when anonymous)\n\n"
+        "- get_notifications: the current logged-in user's notifications for this project (unavailable when anonymous)\n"
+        "- generate_report: generate a standard BIM report (bom/qa/clashes/ids/documents/rooms/schedule/"
+        "changes/bcf/anomalies/concrete_beams/steel_beams/walls/columns/floors/foundations/doors/"
+        "windows/model_summary) as a real .docx/.xlsx/.pdf and upload it to this project's CDE "
+        "(requires login + a project role)\n\n"
         "## Reasoning Guidance\n"
         "Before calling tools, briefly state your plan in one sentence (e.g. 'I'll filter beams by "
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "
@@ -2387,9 +2547,24 @@ def run_chat_agent(
 
         for tc in tool_calls:
             fn = tc["function"]["name"]
-            args = json.loads(tc["function"]["arguments"] or "{}")
             tools_used.append(fn)
             tc_id = tc.get("id", fn)
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                # Malformed tool-call JSON from the LLM (common with local
+                # ollama/lmstudio backends, or a truncated stream) used to
+                # crash the whole chat turn here — outside _execute_tool's
+                # own rollback-and-report safety net, since parsing happens
+                # before that's ever called. Report it the same way a failed
+                # tool call reports, so the LLM sees the failure and can
+                # retry with valid JSON in the next round.
+                logger.warning("Tool %s called with malformed JSON arguments: %s", fn, exc)
+                messages.append({
+                    "role": "tool", "tool_call_id": tc_id,
+                    "content": f"Tool '{fn}' failed: arguments were not valid JSON ({exc}). Please retry with valid JSON arguments.",
+                })
+                continue
 
             tool_result, new_ids = _execute_tool(conn, model_id, fn, args, user)
             if new_ids is not None:
@@ -2475,9 +2650,22 @@ def stream_chat_agent(
 
         for tc in tool_calls:
             fn = tc["function"]["name"]
-            args = json.loads(tc["function"]["arguments"] or "{}")
             tools_used.append(fn)
             tc_id = tc.get("id", fn)
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                # Same malformed-tool-call-JSON handling as run_chat_agent's
+                # loop above — report it as a failed tool call instead of
+                # crashing the whole SSE stream.
+                logger.warning("Tool %s called with malformed JSON arguments: %s", fn, exc)
+                yield _sse({"type": "tool_start", "name": fn})
+                yield _sse({"type": "tool_done", "name": fn, "count": None})
+                messages.append({
+                    "role": "tool", "tool_call_id": tc_id,
+                    "content": f"Tool '{fn}' failed: arguments were not valid JSON ({exc}). Please retry with valid JSON arguments.",
+                })
+                continue
 
             yield _sse({"type": "tool_start", "name": fn})
 

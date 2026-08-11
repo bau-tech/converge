@@ -455,6 +455,16 @@ def ingest_commit(
             logger.warning("build_relationships failed for model %s: %s", model_id, exc)
             relationship_count = 0
 
+        # Only reached once every stage above (including relationship
+        # resolution) has actually finished — a crash anywhere earlier
+        # leaves this model_id at its 'in_progress' default from
+        # upsert_model() forever, which is the point: 'in_progress' that
+        # never flips to 'complete' IS the failure signal, no separate
+        # 'failed' state needed.
+        with conn.cursor() as cur:
+            cur.execute("UPDATE bim_models SET ingest_status = 'complete' WHERE model_id = %s", (model_id,))
+        conn.commit()
+
         duration = round(time.monotonic() - t0, 2)
         logger.info(
             "Ingested %d elements (%d with geometry, %d classify-skipped, "

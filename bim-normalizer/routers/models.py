@@ -26,7 +26,7 @@ def list_models():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT m.model_id, m.stream_id, m.commit_id, m.branch_name,
-                       m.source, m.author, m.message, m.ingested_at,
+                       m.source, m.author, m.message, m.ingested_at, m.ingest_status,
                        COUNT(e.element_id) AS element_count
                 FROM bim_models m
                 LEFT JOIN bim_elements e ON e.model_id = m.model_id
@@ -52,7 +52,7 @@ def list_models_for_stream(stream_id: str):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT m.model_id, m.stream_id, m.commit_id, m.branch_name,
-                       m.source, m.author, m.message, m.ingested_at,
+                       m.source, m.author, m.message, m.ingested_at, m.ingest_status,
                        COUNT(e.element_id) AS element_count
                 FROM bim_models m
                 LEFT JOIN bim_elements e ON e.model_id = m.model_id
@@ -90,18 +90,25 @@ def get_model(model_id: str):
 
 
 @router.delete("/models/{model_id}")
-def delete_model(model_id: str):
+def delete_model(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     Delete a model and all its associated elements, geometry, and parameters.
     After deletion the next /ingest for the same commit will re-classify from scratch.
+
+    stream_id isn't in this route's path (only model_id is), so the project
+    role check happens here in the body once the model's own stream_id is
+    known, rather than via a static Depends(require_role(...)) — same
+    pattern require_project_role's own docstring describes.
     """
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT model_id FROM bim_models WHERE model_id = %s", (model_id,))
-            if not cur.fetchone():
+            cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+            row = cur.fetchone()
+            if not row:
                 raise HTTPException(status_code=404, detail="Model not found")
+            require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
             # Cascade deletes handle elements → geometry + parameters via FK
             cur.execute("DELETE FROM bim_models WHERE model_id = %s", (model_id,))
         conn.commit()
@@ -248,6 +255,7 @@ def delete_model_cleanup(stream_id: str, body: ModelDeleteCleanupRequest, user: 
 async def upload_ifc_model(
     stream_id: str, file: UploadFile, branch_name: str = "uploads",
     token: str | None = None, server_url: str | None = None,
+    user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
 ):
     """
     Upload a raw .ifc file directly into this Speckle project as a new model,

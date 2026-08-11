@@ -7,7 +7,9 @@ A single MCP server combining:
     ifc_new / ifc_load / ifc_reset / ifc_save
     ifc_summary / ifc_tree / ifc_info / ifc_select / ifc_relations / ifc_materials
 
-  Speckle server tools  (GraphQL → SPECKLE_SERVER_URL)
+  Speckle server tools  (GraphQL → SPECKLE_SERVER_URL, or another server via `server=`)
+    speckle_list_servers        every Speckle server this MCP server knows about
+                                 (default + VITE_EXTRA_SPECKLE_SERVERS)
     speckle_list_projects / speckle_list_models / speckle_list_versions
     speckle_delete_project / speckle_delete_model / speckle_delete_version
                                  permanent deletes — require confirm=True
@@ -41,6 +43,8 @@ A single MCP server combining:
 
   Documents / CDE tools  (Nextcloud-backed workflow, session-login required)
     speckle_list_documents / speckle_document_detail / speckle_upload_document
+    speckle_create_document       new document from inline content — no local file needed
+    speckle_read_document         extract text from a .docx/.xlsx CDE document
     speckle_move_document        WIP -> Shared -> Published -> Archived
     speckle_set_document_review / _approval / _verification   the three ISO 19650 gates
     speckle_link_document_topic / speckle_link_document_element
@@ -55,9 +59,16 @@ A single MCP server combining:
     speckle_list_ids_specs / speckle_upload_ids_spec / speckle_delete_ids_spec
     speckle_ids_check            run + wait, same shape as speckle_clash_check
 
+  BIM report generation  (documents/office_export.py — real .docx/.xlsx/.pdf files)
+    speckle_generate_report      bom / qa / clashes / ids / documents / rooms /
+                                 schedule / changes / bcf / anomalies — saved
+                                 locally or uploaded straight to the CDE
+
 Configuration (env or .env file next to this script):
   SPECKLE_SERVER_URL      required, no default              (also set in .mcp.json)
   SPECKLE_TOKEN           personal access token                 (loaded from .env)
+  VITE_EXTRA_SPECKLE_SERVERS   optional, "name|url|token" comma-separated — same
+                          var the dashboard uses; see speckle_list_servers()
   NORMALIZER_URL          default http://localhost:8002         (also set in .mcp.json)
   BCF_SERVER_URL          default http://localhost:8004         (bcf-server, for BCF tools)
   BCF_API_KEY             shared Bearer credential — same var bcf-server itself uses
@@ -67,8 +78,10 @@ Configuration (env or .env file next to this script):
                           back to BCF_ADMIN_EMAIL/BCF_ADMIN_PASSWORD if unset.
 """
 
+import base64
 import json
 import os
+import re
 import statistics
 import sys
 import tempfile
@@ -125,6 +138,62 @@ _NORMALIZER_URL = os.getenv("NORMALIZER_URL", "http://localhost:8002").rstrip("/
 # Empty string disables auth (safe for stdio; always set a key for streamable-http/SSE/remote)
 _MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
+
+def _parse_extra_speckle_servers(raw: str) -> list[dict]:
+    """Same "name|url|token" comma-separated format and env var as the
+    frontend's VITE_EXTRA_SPECKLE_SERVERS (App.jsx's ENV_EXTRA_SERVERS) and
+    bim-normalizer's own config/settings.py — reused here so this MCP server
+    knows about the same set of Speckle servers the rest of the app does,
+    instead of only ever seeing the single one it happened to be launched
+    against."""
+    servers: list[dict] = []
+    if not raw:
+        return servers
+    for entry in raw.split(","):
+        parts = [p.strip() for p in entry.split("|")]
+        if len(parts) >= 2 and parts[1]:
+            url = parts[1].rstrip("/")
+            servers.append({"name": parts[0] or url, "url": url, "token": parts[2] if len(parts) > 2 else ""})
+    return servers
+
+
+# Every Speckle server this process can reach: the default (SPECKLE_SERVER_URL,
+# from .mcp.json/.env) plus any extras from VITE_EXTRA_SPECKLE_SERVERS. Looked
+# up by both name and URL so a `server=` tool argument can be either.
+_SPECKLE_SERVERS_LIST: list[dict] = []
+if _SPECKLE_URL:
+    _SPECKLE_SERVERS_LIST.append({"name": "Default", "url": _SPECKLE_URL, "token": _SPECKLE_TOKEN})
+_SPECKLE_SERVERS_LIST.extend(_parse_extra_speckle_servers(os.getenv("VITE_EXTRA_SPECKLE_SERVERS", "")))
+
+_SPECKLE_SERVERS: dict[str, dict] = {}
+for _s in _SPECKLE_SERVERS_LIST:
+    _SPECKLE_SERVERS[_s["name"]] = _s
+    _SPECKLE_SERVERS[_s["url"]] = _s
+
+
+def _resolve_server(server: str = "") -> tuple[str, str]:
+    """Resolve a `server=` tool argument (blank/"default", a configured name,
+    or a raw URL) to (url, token). Blank always means _SPECKLE_URL — the
+    server this process was launched against — even when
+    VITE_EXTRA_SPECKLE_SERVERS isn't set at all."""
+    if not server or server.lower() == "default":
+        return _SPECKLE_URL, _SPECKLE_TOKEN
+    entry = _SPECKLE_SERVERS.get(server) or _SPECKLE_SERVERS.get(server.rstrip("/"))
+    if not entry:
+        raise ValueError(f"Unknown server {server!r}. Use speckle_list_servers() to see configured servers.")
+    return entry["url"], entry["token"]
+
+
+def _token_for_server_url(url: str) -> str:
+    """Look up the token for a given server URL from the configured server
+    list — mirrors bim-normalizer's own SPECKLE_SERVER_TOKENS map, so a model
+    ingested from a non-default server (bim_models.server_url) can still be
+    reached (e.g. speckle_load's original-blob fast path) instead of always
+    authenticating against the default server's token."""
+    entry = _SPECKLE_SERVERS.get((url or "").rstrip("/"))
+    return entry["token"] if entry else _SPECKLE_TOKEN
+
+
 mcp = FastMCP("converge-mcp")
 
 
@@ -140,14 +209,28 @@ def _requests_with_retry(method: str, url: str, *, retries: int = 2, **kwargs) -
     those are handed back as-is for the caller's existing status-code checks.
     """
     fn = getattr(requests, method.lower())
+    is_get = method.upper() == "GET"
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
             return fn(url, **kwargs)
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except requests.ConnectionError as exc:
+            # The request never reached the server (or the connection reset
+            # before it could) — safe to retry regardless of method.
             last_err = exc
             if attempt < retries:
                 time.sleep(2 ** attempt)
+        except requests.Timeout as exc:
+            # Unlike ConnectionError, a timeout means we simply stopped
+            # waiting for a response — the request may have already reached
+            # the server and taken effect (created a topic, triggered an
+            # ingest, deleted a spec, ...) before we gave up. Retrying a
+            # non-GET call here risks duplicating that side effect, so only
+            # GET (no side effects to duplicate) retries on timeout.
+            last_err = exc
+            if not is_get or attempt >= retries:
+                raise
+            time.sleep(2 ** attempt)
     raise last_err  # type: ignore[misc]
 
 
@@ -232,8 +315,8 @@ _model_lock = threading.RLock()  # guards all writes to the three globals above
 # the process has access to — the expected behavior for the common case of a
 # single trusted developer running it locally via Claude Desktop over stdio.
 # Set MCP_ALLOWED_FILE_ROOT to confine ifc_load/ifc_save/speckle_export_csv/
-# speckle_upload_document/speckle_upload_ids_spec to that directory (and its
-# subdirectories) — recommended for any streamable-http/SSE deployment reachable
+# speckle_upload_document/speckle_upload_ids_spec/ifc5d_boq_export to that
+# directory (and its subdirectories) — recommended for any streamable-http/SSE deployment reachable
 # by less-trusted clients, since those tools otherwise let a client read or
 # write any file the server process can reach.
 _ALLOWED_FILE_ROOT = os.getenv("MCP_ALLOWED_FILE_ROOT", "")
@@ -267,16 +350,20 @@ def _require_model() -> "ifcopenshell.file":
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-def _gql(query: str, variables: dict | None = None, _retries: int = 2) -> dict:
-    if not _SPECKLE_TOKEN:
+def _gql(query: str, variables: dict | None = None, _retries: int = 2, url: str = "", token: str = "") -> dict:
+    """url/token override the default server/token — see _resolve_server."""
+    target_url = (url or _SPECKLE_URL).rstrip("/")
+    tok = token or _SPECKLE_TOKEN
+    if not tok:
         raise ValueError("SPECKLE_TOKEN is not set.")
+    is_mutation = query.lstrip().lower().startswith("mutation")
     last_err: Exception | None = None
     for attempt in range(_retries + 1):
         try:
             resp = requests.post(
-                f"{_SPECKLE_URL}/graphql",
+                f"{target_url}/graphql",
                 json={"query": query, "variables": variables or {}},
-                headers={"Authorization": f"Bearer {_SPECKLE_TOKEN}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
                 timeout=30,
             )
             resp.raise_for_status()
@@ -284,10 +371,20 @@ def _gql(query: str, variables: dict | None = None, _retries: int = 2) -> dict:
             if "errors" in body:
                 raise ValueError(f"GraphQL errors: {body['errors']}")
             return body["data"]
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except requests.ConnectionError as exc:
             last_err = exc
             if attempt < _retries:
                 time.sleep(2 ** attempt)
+        except requests.Timeout as exc:
+            # Same reasoning as _requests_with_retry: a timeout means the
+            # mutation may have already executed server-side before the
+            # response came back — retrying blindly here risks duplicating
+            # it (a second commit, a second delete, ...). Only a query (no
+            # side effects) retries on timeout.
+            last_err = exc
+            if is_mutation or attempt >= _retries:
+                raise
+            time.sleep(2 ** attempt)
     raise last_err  # type: ignore[misc]
 
 
@@ -301,14 +398,20 @@ class _OriginalBlobFetchError(Exception):
     actually broken, not just unavailable."""
 
 
-def _download_original_ifc_blob(stream_id: str) -> bytes | None:
+def _download_original_ifc_blob(stream_id: str, server_url: str = "", token: str = "") -> bytes | None:
     """
     Query the Speckle server for IFC blobs on a stream and return the raw bytes
     of the most recent successfully uploaded one. Returns None if the stream
     genuinely has none. Raises _OriginalBlobFetchError if reaching or parsing
     the Speckle API itself fails.
+
+    server_url/token override the default server — used by speckle_load to
+    reach a stream on whichever server it was actually ingested from
+    (bim_models.server_url), not always the default _SPECKLE_URL.
     """
-    if not _SPECKLE_TOKEN:
+    url = (server_url or _SPECKLE_URL).rstrip("/")
+    tok = token or _SPECKLE_TOKEN
+    if not tok:
         return None
     try:
         data = _gql("""
@@ -319,7 +422,7 @@ def _download_original_ifc_blob(stream_id: str) -> bytes | None:
                     }
                 }
             }
-        """, {"id": stream_id})
+        """, {"id": stream_id}, url=url, token=tok)
         blobs = sorted(
             (
                 b for b in (data.get("stream") or {}).get("blobs", {}).get("items", [])
@@ -332,8 +435,8 @@ def _download_original_ifc_blob(stream_id: str) -> bytes | None:
             return None
         blob_id = blobs[0]["id"]
         resp = requests.get(
-            f"{_SPECKLE_URL}/api/stream/{stream_id}/blob/{blob_id}",
-            headers={"Authorization": f"Bearer {_SPECKLE_TOKEN}"},
+            f"{url}/api/stream/{stream_id}/blob/{blob_id}",
+            headers={"Authorization": f"Bearer {tok}"},
             timeout=120,
         )
         resp.raise_for_status()
@@ -678,17 +781,39 @@ def ifc_dependency_graph(element_id: str, max_depth: int = 2) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def speckle_list_projects(limit: int = 25) -> str:
-    """List projects on our Speckle server (SPECKLE_SERVER_URL)."""
+def speckle_list_servers() -> str:
+    """
+    List every Speckle server this MCP server knows about: the default
+    (SPECKLE_SERVER_URL, what every other tool uses when `server` is
+    omitted) plus any extras configured via VITE_EXTRA_SPECKLE_SERVERS —
+    the same env var and server list the dashboard itself offers.
+    Pass a server's name or URL as the `server` argument to
+    speckle_list_projects/_models/_versions/_delete_*/_get_object to target
+    it instead of the default. Tokens are not shown.
+    """
+    if not _SPECKLE_SERVERS_LIST:
+        return "No Speckle server configured (SPECKLE_SERVER_URL is unset)."
+    lines = [f"{len(_SPECKLE_SERVERS_LIST)} Speckle server(s) configured:"]
+    for i, s in enumerate(_SPECKLE_SERVERS_LIST):
+        tag = " (default, used when `server` is omitted)" if i == 0 else ""
+        lines.append(f"  name={s['name']!r}  url={s['url']}{tag}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_list_projects(limit: int = 25, server: str = "") -> str:
+    """List projects on a Speckle server. server: optional name/URL from
+    speckle_list_servers() — defaults to SPECKLE_SERVER_URL."""
+    url, token = _resolve_server(server)
     data = _gql("""
         query($limit: Int!) {
             streams(limit: $limit) {
                 items { id name description updatedAt }
             }
         }
-    """, {"limit": limit})
+    """, {"limit": limit}, url=url, token=token)
     items = data["streams"]["items"]
-    lines = [f"{len(items)} project(s) on {_SPECKLE_URL}:"]
+    lines = [f"{len(items)} project(s) on {url}:"]
     for p in items:
         updated = (p.get("updatedAt") or "")[:10]
         desc = (p.get("description") or "").strip()
@@ -697,8 +822,10 @@ def speckle_list_projects(limit: int = 25) -> str:
 
 
 @mcp.tool()
-def speckle_list_models(project_id: str) -> str:
-    """List models (branches) in a Speckle project."""
+def speckle_list_models(project_id: str, server: str = "") -> str:
+    """List models (branches) in a Speckle project. server: optional
+    name/URL from speckle_list_servers() — defaults to SPECKLE_SERVER_URL."""
+    url, token = _resolve_server(server)
     data = _gql("""
         query($id: String!) {
             stream(id: $id) {
@@ -706,7 +833,7 @@ def speckle_list_models(project_id: str) -> str:
                 branches { items { id name description } }
             }
         }
-    """, {"id": project_id})
+    """, {"id": project_id}, url=url, token=token)
     stream = data["stream"]
     branches = stream["branches"]["items"]
     lines = [f"Project '{stream['name']}' — {len(branches)} model(s):"]
@@ -717,8 +844,11 @@ def speckle_list_models(project_id: str) -> str:
 
 
 @mcp.tool()
-def speckle_list_versions(project_id: str, model_name: str, limit: int = 10) -> str:
-    """List recent versions (commits) of a model. model_name is the branch name."""
+def speckle_list_versions(project_id: str, model_name: str, limit: int = 10, server: str = "") -> str:
+    """List recent versions (commits) of a model. model_name is the branch
+    name. server: optional name/URL from speckle_list_servers() — defaults
+    to SPECKLE_SERVER_URL."""
+    url, token = _resolve_server(server)
     data = _gql("""
         query($streamId: String!, $branchName: String!, $limit: Int!) {
             stream(id: $streamId) {
@@ -731,7 +861,7 @@ def speckle_list_versions(project_id: str, model_name: str, limit: int = 10) -> 
                 }
             }
         }
-    """, {"streamId": project_id, "branchName": model_name, "limit": limit})
+    """, {"streamId": project_id, "branchName": model_name, "limit": limit}, url=url, token=token)
     commits = data["stream"]["branch"]["commits"]["items"]
     lines = [f"{len(commits)} version(s) of '{model_name}':"]
     for c in commits:
@@ -754,13 +884,14 @@ def _confirm_or_refuse(kind: str, target: str, confirm: bool, warning: str) -> s
 
 
 @mcp.tool()
-def speckle_delete_project(project_id: str, confirm: bool = False) -> str:
+def speckle_delete_project(project_id: str, confirm: bool = False, server: str = "") -> str:
     """
     PERMANENTLY delete a Speckle project (stream) — all its models, versions,
     comments, and webhooks go with it. Cannot be undone.
     Refuses unless called with confirm=True (first call without it to see the
     warning; re-call with confirm=True once you're sure).
-    Use speckle_list_projects() to find project_id.
+    Use speckle_list_projects() to find project_id. server: optional
+    name/URL from speckle_list_servers() — defaults to SPECKLE_SERVER_URL.
     """
     refusal = _confirm_or_refuse(
         "project", project_id, confirm,
@@ -768,22 +899,24 @@ def speckle_delete_project(project_id: str, confirm: bool = False) -> str:
     )
     if refusal:
         return refusal
+    url, token = _resolve_server(server)
     _gql("""
         mutation($id: String!) {
             projectMutations { delete(id: $id) }
         }
-    """, {"id": project_id})
-    return f"Project {project_id} permanently deleted."
+    """, {"id": project_id}, url=url, token=token)
+    return f"Project {project_id} permanently deleted from {url}."
 
 
 @mcp.tool()
-def speckle_delete_model(project_id: str, model_name: str, confirm: bool = False) -> str:
+def speckle_delete_model(project_id: str, model_name: str, confirm: bool = False, server: str = "") -> str:
     """
     PERMANENTLY delete a model (branch) from a project, including all of its
     versions. Cannot be undone.
     Refuses unless called with confirm=True (first call without it to see the
     warning; re-call with confirm=True once you're sure).
-    Use speckle_list_models(project_id) to find model_name.
+    Use speckle_list_models(project_id) to find model_name. server: optional
+    name/URL from speckle_list_servers() — defaults to SPECKLE_SERVER_URL.
     """
     refusal = _confirm_or_refuse(
         "model", f"'{model_name}' in project {project_id}", confirm,
@@ -791,11 +924,12 @@ def speckle_delete_model(project_id: str, model_name: str, confirm: bool = False
     )
     if refusal:
         return refusal
+    url, token = _resolve_server(server)
     data = _gql("""
         query($streamId: String!, $branchName: String!) {
             stream(id: $streamId) { branch(name: $branchName) { id } }
         }
-    """, {"streamId": project_id, "branchName": model_name})
+    """, {"streamId": project_id, "branchName": model_name}, url=url, token=token)
     branch = (data.get("stream") or {}).get("branch")
     if not branch:
         return f"Model '{model_name}' not found in project {project_id}. Use speckle_list_models() to verify."
@@ -803,18 +937,19 @@ def speckle_delete_model(project_id: str, model_name: str, confirm: bool = False
         mutation($input: DeleteModelInput!) {
             modelMutations { delete(input: $input) }
         }
-    """, {"input": {"projectId": project_id, "id": branch["id"]}})
-    return f"Model '{model_name}' deleted from project {project_id}."
+    """, {"input": {"projectId": project_id, "id": branch["id"]}}, url=url, token=token)
+    return f"Model '{model_name}' deleted from project {project_id} on {url}."
 
 
 @mcp.tool()
-def speckle_delete_version(project_id: str, version_ids: str, confirm: bool = False) -> str:
+def speckle_delete_version(project_id: str, version_ids: str, confirm: bool = False, server: str = "") -> str:
     """
     PERMANENTLY delete one or more versions (commits) from a project. Cannot be undone.
     version_ids: comma-separated commit ids (e.g. "abc123" or "abc123,def456").
     Refuses unless called with confirm=True (first call without it to see the
     warning; re-call with confirm=True once you're sure).
     Use speckle_list_versions(project_id, model_name) to find version ids (commit_id).
+    server: optional name/URL from speckle_list_servers() — defaults to SPECKLE_SERVER_URL.
     """
     ids = [v.strip() for v in version_ids.split(",") if v.strip()]
     if not ids:
@@ -825,12 +960,13 @@ def speckle_delete_version(project_id: str, version_ids: str, confirm: bool = Fa
     )
     if refusal:
         return refusal
+    url, token = _resolve_server(server)
     _gql("""
         mutation($input: DeleteVersionsInput!) {
             versionMutations { delete(input: $input) }
         }
-    """, {"input": {"projectId": project_id, "versionIds": ids}})
-    return f"Deleted {len(ids)} version(s) from project {project_id}: {', '.join(ids)}"
+    """, {"input": {"projectId": project_id, "versionIds": ids}}, url=url, token=token)
+    return f"Deleted {len(ids)} version(s) from project {project_id} on {url}: {', '.join(ids)}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -913,8 +1049,13 @@ def speckle_query_elements(
 
     lines = [f"{len(elements)} element(s) (limit={limit}):"]
     for e in elements:
+        # .get(...) not e["ifc_class"] — an element that failed
+        # classification can lack this field, same as every other field
+        # here already assumes (speckle_element_detail reads the identical
+        # normalizer field with .get too); the direct-index version raised
+        # an uncaught KeyError instead of this tool's usual clean messages.
         lines.append(
-            f"  [{e['ifc_class']}] {e.get('name') or '(unnamed)'}"
+            f"  [{e.get('ifc_class') or '?'}] {e.get('name') or '(unnamed)'}"
             f"  storey={e.get('storey') or '?'}"
             f"  speckle_id={e.get('speckle_id') or ''}"
             f"  element_id={e.get('element_id') or ''}"
@@ -1121,8 +1262,15 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
         # so we don't accidentally serve the full original IFC for a filtered model.
         original_blob_warning = None
         if not is_derived and "ifc" in source and stream_id:
+            # This model may have been ingested from a non-default Speckle
+            # server (bim_models.server_url) — resolve its actual server and
+            # matching token instead of always assuming _SPECKLE_URL, which
+            # would silently query the wrong server (or 404) for anything
+            # not on the default one.
+            model_server_url = (meta.get("server_url") or "").rstrip("/") or _SPECKLE_URL
+            model_server_token = _token_for_server_url(model_server_url)
             try:
-                ifc_bytes = _download_original_ifc_blob(stream_id)
+                ifc_bytes = _download_original_ifc_blob(stream_id, model_server_url, model_server_token)
             except _OriginalBlobFetchError as exc:
                 # Still fall through to the slower re-export below (a working
                 # fallback beats a hard failure), but note the real cause in
@@ -1141,7 +1289,7 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
                 count = len(list(m))
                 elements = len(m.by_type("IfcElement"))
                 return (
-                    f"Loaded ORIGINAL IFC from Speckle server (stream {stream_id}).\n"
+                    f"Loaded ORIGINAL IFC from Speckle server {model_server_url} (stream {stream_id}).\n"
                     f"  Schema: {m.schema}\n"
                     f"  Total entities: {count}\n"
                     f"  IfcElement instances: {elements}\n"
@@ -1220,18 +1368,20 @@ def speckle_load(model_id: str, coord_unit: str = "mm") -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def speckle_get_object(stream_id: str, object_id: str) -> str:
+def speckle_get_object(stream_id: str, object_id: str, server: str = "") -> str:
     """
     Fetch a raw Speckle object and show its top-level properties.
     The object_id is the hash returned by speckle_list_versions (referencedObject).
     Only reads the first line of the JSONL response (the requested object itself),
     so large models are not fully downloaded.
+    server: optional name/URL from speckle_list_servers() — defaults to SPECKLE_SERVER_URL.
     """
-    if not _SPECKLE_TOKEN:
+    url, token = _resolve_server(server)
+    if not token:
         raise ValueError("SPECKLE_TOKEN is not set.")
     with requests.get(
-        f"{_SPECKLE_URL}/objects/{stream_id}/{object_id}",
-        headers={"Authorization": f"Bearer {_SPECKLE_TOKEN}"},
+        f"{url}/objects/{stream_id}/{object_id}",
+        headers={"Authorization": f"Bearer {token}"},
         stream=True,
         timeout=30,
     ) as resp:
@@ -2115,6 +2265,9 @@ def ifc5d_boq_export(output_path: str = "") -> str:
         suffix = ".ods" if (_IFC5D_AVAILABLE and _Ifc5DOdsWriter) else ".csv"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=tempfile.gettempdir()) as f:
             output_path = f.name
+    denied = _check_path_allowed(output_path)
+    if denied:
+        return denied
 
     # Try ifc5d ODS writer first
     if _IFC5D_AVAILABLE and _Ifc5DOdsWriter and output_path.endswith(".ods"):
@@ -3559,36 +3712,119 @@ def speckle_document_detail(stream_id: str, doc_id: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def speckle_upload_document(stream_id: str, file_path: str, doc_type: str = "document", model_id: str = "") -> str:
-    """
-    Upload a local file as a new CDE document — always lands in WIP; must go
-    through review → approval → verification (speckle_set_document_review /
-    _approval / _verification) before reaching Published/Archived.
-
-    doc_type: "document" (default) or "drawing" — "drawing" requires model_id.
-    """
-    if not os.path.isfile(file_path):
-        return f"File not found: {file_path}"
-    denied = _check_path_allowed(file_path)
-    if denied:
-        return denied
+def _upload_document_file(
+    stream_id: str, filename: str, file_obj, doc_type: str, model_id: str, folder_path: str,
+) -> str:
+    """Shared POST /projects/{stream_id}/documents/upload for both
+    speckle_upload_document (an open file handle, streamed — not read fully
+    into memory, since local documents can be large) and
+    speckle_create_document (an in-memory bytes payload built from inline
+    content) — requests' files= param accepts either interchangeably."""
     data = {"doc_type": doc_type}
     if model_id:
         data["model_id"] = model_id
+    if folder_path:
+        data["folder_path"] = folder_path
     try:
-        with open(file_path, "rb") as fh:
-            resp = _dashboard_request(
-                "POST", f"/projects/{stream_id}/documents/upload",
-                data=data, files={"file": (os.path.basename(file_path), fh)},
-                timeout=120,
-            )
+        resp = _dashboard_request(
+            "POST", f"/projects/{stream_id}/documents/upload",
+            data=data, files={"file": (filename, file_obj)},
+            timeout=120,
+        )
     except RuntimeError as exc:
         return str(exc)
     if resp.status_code not in (200, 201):
         return f"Upload failed: {_error_detail(resp)}"
     d = resp.json()
     return f"Uploaded '{d.get('filename')}' as doc_id={d.get('doc_id')} (status=WIP)."
+
+
+@mcp.tool()
+def speckle_upload_document(
+    stream_id: str, file_path: str, doc_type: str = "document", model_id: str = "", folder_path: str = "",
+) -> str:
+    """
+    Upload a local file as a new CDE document — always lands in WIP; must go
+    through review → approval → verification (speckle_set_document_review /
+    _approval / _verification) before reaching Published/Archived.
+
+    doc_type: "document" (default) or "drawing" — "drawing" requires model_id.
+    folder_path: optional subfolder within WIP (e.g. "Structural/Drawings").
+    For content generated on the fly (a report, a summary) with no local
+    file to point at, use speckle_create_document instead.
+    """
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}"
+    denied = _check_path_allowed(file_path)
+    if denied:
+        return denied
+    with open(file_path, "rb") as fh:
+        return _upload_document_file(stream_id, os.path.basename(file_path), fh, doc_type, model_id, folder_path)
+
+
+@mcp.tool()
+def speckle_create_document(
+    stream_id: str, filename: str, content: str, doc_type: str = "document",
+    model_id: str = "", folder_path: str = "", encoding: str = "utf8",
+) -> str:
+    """
+    Create a new CDE document directly from inline content — no local file
+    needed. Useful for saving generated content (a report, a summary, a
+    CSV/markdown export) straight into a project's Nextcloud space. Always
+    lands in WIP; must go through review → approval → verification (same as
+    speckle_upload_document) before reaching Published/Archived.
+
+    filename: e.g. "clash-report-2026-08-11.md" — include the extension,
+    since the CDE and Nextcloud both use it (naming convention checks,
+    preview rendering).
+    content: the document's full text (or base64 payload if encoding="base64").
+    encoding: "utf8" (default, for text content) or "base64" (for binary
+    content — a PDF, image, etc. — pass its base64 encoding).
+    doc_type: "document" (default) or "drawing" — "drawing" requires model_id.
+    folder_path: optional subfolder within WIP (e.g. "Structural/Drawings").
+    """
+    if encoding == "base64":
+        try:
+            data = base64.b64decode(content, validate=True)
+        except Exception as exc:
+            return f"Invalid base64 content: {exc}"
+    elif encoding == "utf8":
+        data = content.encode("utf-8")
+    else:
+        return "encoding must be 'utf8' or 'base64'."
+    return _upload_document_file(stream_id, filename, data, doc_type, model_id, folder_path)
+
+
+@mcp.tool()
+def speckle_read_document(stream_id: str, doc_id: str) -> str:
+    """
+    Download a CDE document and extract its text content — supports .docx
+    (paragraphs + tables) and .xlsx (every sheet's cell values). Other file
+    types aren't parsed; use speckle_document_detail for their metadata
+    instead, or speckle_get_object-style tools for IFC-native data.
+    Use speckle_list_documents(stream_id) to find doc_id.
+    """
+    try:
+        resp = _dashboard_request("GET", f"/projects/{stream_id}/documents/{doc_id}/download")
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code == 404:
+        return f"Document {doc_id} not found in project {stream_id}."
+    if resp.status_code != 200:
+        return f"Could not download document: {_error_detail(resp)}"
+
+    cd_match = re.search(r'filename="([^"]+)"', resp.headers.get("Content-Disposition", ""))
+    filename = cd_match.group(1) if cd_match else doc_id
+    ext = os.path.splitext(filename)[1].lower()
+
+    from documents.office_export import read_docx_text, read_xlsx_text
+    if ext == ".docx":
+        text = read_docx_text(resp.content)
+    elif ext == ".xlsx":
+        text = read_xlsx_text(resp.content)
+    else:
+        return f"'{filename}' is not a .docx/.xlsx file — text extraction isn't supported for {ext or 'this type'}."
+    return f"--- {filename} ---\n{text}"
 
 
 @mcp.tool()
@@ -3915,8 +4151,20 @@ def speckle_upload_ids_spec(model_id: str, file_path: str) -> str:
 
 
 @mcp.tool()
-def speckle_delete_ids_spec(model_id: str, spec_id: str) -> str:
-    """Delete an uploaded IDS specification."""
+def speckle_delete_ids_spec(model_id: str, spec_id: str, confirm: bool = False) -> str:
+    """
+    PERMANENTLY delete an uploaded IDS specification. Cannot be undone —
+    unlike speckle_delete_document (a recoverable soft-delete/tombstone),
+    this is a hard delete, same as speckle_delete_project/_model/_version.
+    Refuses unless called with confirm=True (first call without it to see
+    the warning; re-call with confirm=True once you're sure).
+    """
+    refusal = _confirm_or_refuse(
+        "IDS spec", f"{spec_id!r} on model {model_id}", confirm,
+        "This permanently deletes the IDS specification — irreversible.",
+    )
+    if refusal:
+        return refusal
     resp = _requests_with_retry("DELETE", f"{_NORMALIZER_URL}/models/{model_id}/ids-specs/{spec_id}", timeout=30)
     if resp.status_code not in (200, 204):
         return f"Delete failed: {_error_detail(resp)}"
@@ -3973,6 +4221,101 @@ def speckle_ids_check(model_id: str, spec_id: str) -> str:
                     f"{req.get('total_pass', 0)} passed / {req.get('total_fail', 0)} failed"
                 )
     return "\n".join(lines)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BIM REPORT GENERATION  (docx/xlsx/pdf — proxies bim-normalizer's own
+# POST /reports/generate, which shares reports/generate.py's 10 gatherers
+# with the in-app AI Assistant (chat/agent.py) and the dashboard's own
+# "Generate Report" button — one implementation, three surfaces, this
+# being the third. Session-login required, same as the Documents tools.)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def speckle_generate_report(
+    report_type: str,
+    model_id: str = "",
+    stream_id: str = "",
+    output_format: str = "pdf",
+    filename: str = "",
+    upload: bool = False,
+    folder_path: str = "",
+    compared_model_id: str = "",
+    rules_json: str = "",
+    spec_id: str = "",
+    doc_type: str = "document",
+) -> str:
+    """
+    Generate one of converge's standard BIM report types as a real document
+    (.docx/.xlsx/.pdf) — either saved to a local temp file or uploaded
+    straight into a project's CDE (Nextcloud) space.
+
+    report_type — one of:
+      "bom"        Bill of Materials, quantities grouped by material (needs model_id)
+      "qa"         Data Quality Report (needs model_id)
+      "clashes"    Clash Detection Report (needs model_id, rules_json; optional compared_model_id — see speckle_clash_check)
+      "ids"        IDS Compliance Report (needs model_id, spec_id — see speckle_list_ids_specs)
+      "documents"  CDE Document Register (needs stream_id)
+      "rooms"      Room / Space Schedule (needs model_id)
+      "schedule"   4D Schedule Report (needs model_id)
+      "changes"    Model Change Report (needs model_id as current/newer, compared_model_id as baseline/older)
+      "bcf"        BCF Coordination Issues Report (needs model_id)
+      "anomalies"  Anomaly / Outlier Report, volume outliers by category (needs model_id)
+      "concrete_beams" / "steel_beams"  IfcBeam elements split by material_category (needs model_id)
+      "walls" / "columns" / "floors" / "foundations" / "doors" / "windows"  element schedule for that category (needs model_id)
+      "model_summary"  one-page project fact sheet — source/author/quantities/category breakdowns (needs model_id; no 3D view via MCP, that needs the dashboard's own Generate Report button)
+
+    output_format: "pdf" (default), "docx", or "xlsx" — any report type
+    works in any format; xlsx suits tabular reports (bom/rooms/documents)
+    best, docx/pdf suit narrative ones (qa/clashes/ids/schedule/bcf/changes/
+    anomalies) best, but it's your call.
+
+    upload: if True, uploads the generated report into the CDE at stream_id
+    (required in that case) — needs an author/reviewer/approver role on
+    that project, same gate as speckle_upload_document. If False (default),
+    saves to a local temp file and returns its path — pair with
+    speckle_upload_document to send it later, or just re-run with upload=True.
+    filename: optional — auto-generated from report_type + timestamp if omitted.
+    doc_type: "document" (default) or "drawing" — only used when upload=True.
+    """
+    if output_format not in ("docx", "xlsx", "pdf"):
+        return "output_format must be 'docx', 'xlsx', or 'pdf'."
+
+    body: dict = {"report_type": report_type, "output_format": output_format, "upload": upload}
+    for key, val in (
+        ("model_id", model_id), ("stream_id", stream_id), ("filename", filename),
+        ("folder_path", folder_path), ("compared_model_id", compared_model_id),
+        ("spec_id", spec_id), ("doc_type", doc_type),
+    ):
+        if val:
+            body[key] = val
+    if rules_json:
+        try:
+            body["rules"] = json.loads(rules_json)
+        except json.JSONDecodeError as exc:
+            return f"Invalid JSON in rules_json: {exc}"
+
+    try:
+        resp = _dashboard_request("POST", "/reports/generate", json=body, timeout=300)
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code != 200:
+        return f"Report generation failed: {_error_detail(resp)}"
+
+    if upload:
+        d = resp.json()
+        return f"Generated report and uploaded it as '{d.get('filename')}' (doc_id={d.get('doc_id')}, status=WIP)."
+
+    cd_match = re.search(r'filename="([^"]+)"', resp.headers.get("Content-Disposition", ""))
+    out_name = cd_match.group(1) if cd_match else f"{report_type}-report.{output_format}"
+    out_path = os.path.join(tempfile.gettempdir(), out_name)
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
+    return (
+        f"Generated report ({len(resp.content)} bytes) → {out_path}\n"
+        f"Upload it with speckle_upload_document(stream_id, {out_path!r}), "
+        f"or re-run speckle_generate_report with upload=True and stream_id set to send it straight to the CDE."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

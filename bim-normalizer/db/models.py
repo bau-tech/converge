@@ -24,6 +24,19 @@ CREATE TABLE IF NOT EXISTS bim_models (
 -- env-configured one.
 ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS server_url TEXT;
 
+-- 'in_progress' | 'complete'. pipeline/normalize.py's ingest_commit() commits
+-- per BATCH_SIZE-element batch rather than in one big transaction (keeps
+-- Postgres's shared lock table bounded on large models — see its own
+-- comment), which means a model_id becomes visible/queryable by every other
+-- feature (chat, reports, dashboard) as soon as the first batch commits,
+-- long before ingestion actually finishes. A crash mid-loop used to leave a
+-- model that LOOKS fully ingested (fully queryable everywhere) but is
+-- silently missing a chunk of its elements, with nothing to tell a caller
+-- apart from re-running the element count against Speckle's own total.
+-- Existing rows default to 'complete' — they've been live and usable all
+-- along, so there's nothing to retroactively flag as incomplete.
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS ingest_status TEXT NOT NULL DEFAULT 'complete';
+
 CREATE TABLE IF NOT EXISTS bim_elements (
     element_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id        UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,

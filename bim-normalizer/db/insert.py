@@ -81,18 +81,24 @@ def _resolve_canonical(pset: str | None, key: str, internal_definition_name: str
 def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
                  source: str, author: str, message: str,
                  server_url: str | None = None) -> str:
-    """Insert or update a bim_model row. Returns model_id (UUID string)."""
+    """Insert or update a bim_model row. Returns model_id (UUID string).
+
+    ingest_status is explicitly reset to 'in_progress' on both the insert
+    and the update (force=True re-ingest) path — pipeline/normalize.py's
+    ingest_commit() flips it to 'complete' once the whole ingest actually
+    finishes; see db/models.py's ingest_status column comment for why."""
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO bim_models (stream_id, commit_id, branch_name, source, author, message, server_url)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO bim_models (stream_id, commit_id, branch_name, source, author, message, server_url, ingest_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'in_progress')
             ON CONFLICT (stream_id, commit_id) DO UPDATE SET
-                branch_name  = EXCLUDED.branch_name,
-                source       = EXCLUDED.source,
-                author       = EXCLUDED.author,
-                message      = EXCLUDED.message,
-                server_url   = EXCLUDED.server_url,
-                ingested_at  = NOW()
+                branch_name   = EXCLUDED.branch_name,
+                source        = EXCLUDED.source,
+                author        = EXCLUDED.author,
+                message       = EXCLUDED.message,
+                server_url    = EXCLUDED.server_url,
+                ingested_at   = NOW(),
+                ingest_status = 'in_progress'
             RETURNING model_id
         """, (stream_id, commit_id, branch_name, source, author, message, server_url))
         return str(cur.fetchone()[0])

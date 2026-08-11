@@ -30,6 +30,7 @@ from bcf.schemas import (
     DocumentRoleCreate,
     ExtensionValueCreate,
     OrganizationCreate,
+    UserAdminUpdate,
     UserCreate,
     UserNotifyEmailUpdate,
     UserOrgUpdate,
@@ -115,9 +116,16 @@ def login_form():
 
 @router.post("/admin/login")
 def login_submit(request: Request, email: str = Form(...), password: str = Form(...)):
-    user = fetch_one("SELECT email, password_hash FROM bcf_users WHERE email = %s", (email,))
+    user = fetch_one("SELECT email, password_hash, is_admin FROM bcf_users WHERE email = %s", (email,))
     if user is None or not verify_password(password, user["password_hash"]):
         return HTMLResponse(_login_page_html(error="Invalid email or password"), status_code=401)
+    if not user["is_admin"]:
+        # A real bcf_users account, correct password, just not an admin — a
+        # distinct message from "invalid credentials" is worth the (minor,
+        # already-authenticated) info disclosure here, since a confusing
+        # generic rejection for a legitimate account is worse UX and this
+        # is an internal tool, not a public login form.
+        return HTMLResponse(_login_page_html(error="This account does not have admin access."), status_code=403)
     resp = RedirectResponse("/admin", status_code=302)
     resp.set_cookie(
         SESSION_COOKIE, _create_session_token(user["email"]),
@@ -211,7 +219,7 @@ def _admin_page_html(email: str) -> str:
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Add user</button>
   </form>
-  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Email notifications</th><th>Created</th><th></th></tr></thead>
+  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Email notifications</th><th>Admin</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
 
   <h2>Document roles (ISO 19650)</h2>
@@ -326,6 +334,19 @@ async function setUserNotifyEmail(cb) {{
     }});
 }}
 
+async function setUserAdmin(cb) {{
+    try {{
+        await api(`/admin/api/users/${{cb.dataset.guid}}/admin`, {{
+            method: 'PATCH',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ is_admin: cb.checked }}),
+        }});
+    }} catch (e) {{
+        cb.checked = !cb.checked;
+        alert(e.message || 'Could not update admin access');
+    }}
+}}
+
 async function loadUsers() {{
     const users = await api('/admin/api/users');
     const tbody = document.querySelector('#users-table tbody');
@@ -336,6 +357,8 @@ async function loadUsers() {{
         <td><select data-guid="${{u.guid}}" onchange="setUserOrg(this)">${{orgOptions(u.org_id)}}</select></td>
         <td><label class="checkbox-row"><input type="checkbox" data-guid="${{u.guid}}"
             ${{u.notify_email ? 'checked' : ''}} onchange="setUserNotifyEmail(this)"> Email me</label></td>
+        <td><label class="checkbox-row"><input type="checkbox" data-guid="${{u.guid}}"
+            ${{u.is_admin ? 'checked' : ''}} onchange="setUserAdmin(this)"> Admin</label></td>
         <td>${{esc(new Date(u.created_at).toLocaleString())}}</td>
         <td>
             <button data-guid="${{u.guid}}" data-name="${{esc(u.name)}}" onclick="resetUserPassword(this)">Reset password</button>
@@ -648,6 +671,7 @@ def _serialize_user(row: dict) -> dict:
         "org_id": str(row["org_id"]) if row.get("org_id") else None,
         "org_name": row.get("org_name"),
         "notify_email": row["notify_email"],
+        "is_admin": row.get("is_admin", False),
     }
 
 
@@ -655,7 +679,7 @@ def _serialize_user(row: dict) -> dict:
 def admin_list_users(_email: str = Depends(require_admin_session)):
     rows = fetch_all(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         ORDER BY u.created_at
         """
@@ -679,7 +703,7 @@ def admin_set_user_org(user_guid: str, body: UserOrgUpdate, _email: str = Depend
     execute("UPDATE bcf_users SET org_id = %s WHERE guid = %s", (body.org_id, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,
@@ -701,7 +725,30 @@ def admin_set_user_notify_email(
     execute("UPDATE bcf_users SET notify_email = %s WHERE guid = %s", (body.notify_email, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        WHERE u.guid = %s
+        """,
+        (user_guid,),
+    )
+    return _serialize_user(updated)
+
+
+@router.patch("/admin/api/users/{user_guid}/admin")
+def admin_set_user_admin(user_guid: str, body: UserAdminUpdate, _email: str = Depends(require_admin_session)):
+    """Grant/revoke /admin panel access. Existing sessions for a just-revoked
+    user stay valid until their cookie expires (SESSION_TTL_SECONDS, 8h) —
+    the session token only carries email + expiry, not a live is_admin
+    check, matching every other session in this codebase."""
+    row = fetch_one("SELECT guid, email FROM bcf_users WHERE guid = %s", (user_guid,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if row["email"] == _email and not body.is_admin:
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin access.")
+    execute("UPDATE bcf_users SET is_admin = %s WHERE guid = %s", (body.is_admin, user_guid))
+    updated = fetch_one(
+        """
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,
@@ -751,11 +798,13 @@ def admin_create_user(body: UserCreate, _email: str = Depends(require_admin_sess
     existing = fetch_one("SELECT guid FROM bcf_users WHERE email = %s", (body.email,))
     if existing is not None:
         raise HTTPException(status_code=409, detail="A user with this email already exists")
+    # New users are never admin by default (principle of least privilege) —
+    # promote via admin_set_user_admin below once they exist.
     row = execute_returning(
         """
         INSERT INTO bcf_users (email, name, password_hash)
         VALUES (%s, %s, %s)
-        RETURNING guid, email, name, created_at, notify_email
+        RETURNING guid, email, name, created_at, notify_email, is_admin
         """,
         (body.email, body.name, hash_password(body.password)),
     )

@@ -2,9 +2,10 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 from job_registry import _is_uuid, fire_and_forget
 from db.jobs import create_job, update_job, get_job, find_running_job, prune_jobs
 from process_pool import run_cpu_bound
@@ -45,14 +46,20 @@ class IngestRequest(BaseModel):
     force: bool = False            # bypass the "already ingested" fast path and re-run
 
 
-@router.post("/ingest")
-async def ingest(request: IngestRequest):
-    from pipeline.normalize import ingest_commit
+def _prepare_ingest(request: IngestRequest, user: CurrentUser) -> dict:
+    """All the synchronous DB work /ingest needs before it can decide
+    whether to fast-return, dedupe against a running job, or start a new
+    one — pulled out of the async def route body and run via
+    asyncio.to_thread below, since psycopg2 is blocking and this route
+    previously ran all of it inline on the event loop.
+
+    Returns {"done": <dict to return as-is>} for the fast-path/dedup cases,
+    or {"job_id": str} once a new job row has been created."""
     from db.connection import get_conn, release_conn
 
-    # Fast path: commit already ingested — return immediately without re-processing
     conn = get_conn()
     try:
+        require_project_role(conn, request.stream_id, user, ANY_PROJECT_ROLE)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT m.model_id::text, COUNT(e.element_id) AS element_count
@@ -83,12 +90,12 @@ async def ingest(request: IngestRequest):
             # entirely sequential GET /summary round trip for data this
             # request already has the connection open to compute.
             from db.query import get_model_summary
-            return {
+            return {"done": {
                 "model_id": row[0],
                 "status": "complete",
                 "element_count": int(row[1]),
                 "summary": get_model_summary(conn, row[0]),
-            }
+            }}
 
         # Deduplicate: reuse an existing running job for the same commit.
         # find_running_job()-then-create_job() is otherwise a check-then-act
@@ -111,18 +118,29 @@ async def ingest(request: IngestRequest):
             conn, "ingest", stream_id=request.stream_id, commit_id=request.commit_id,
         )
         if running_job_id:
-            return {"job_id": running_job_id, "status": "pending"}
+            return {"done": {"job_id": running_job_id, "status": "pending"}}
 
         # New ingest — start as a background asyncio task so the HTTP call returns immediately
         job_id = str(uuid.uuid4())
         create_job(conn, job_id, "ingest", payload={
             "stream_id": request.stream_id, "commit_id": request.commit_id,
         })
+        return {"job_id": job_id}
     except Exception:
         conn.rollback()
         raise
     finally:
         release_conn(conn)
+
+
+@router.post("/ingest")
+async def ingest(request: IngestRequest, user: CurrentUser = Depends(require_login)):
+    from pipeline.normalize import ingest_commit
+
+    prep = await asyncio.to_thread(_prepare_ingest, request, user)
+    if "done" in prep:
+        return prep["done"]
+    job_id = prep["job_id"]
 
     async def _run():
         from db.connection import get_conn as _get_conn, release_conn as _release_conn

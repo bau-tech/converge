@@ -457,18 +457,25 @@ def scan_server(server_url: str, token: str) -> int:
     return registered
 
 
-async def scan_all_enabled_servers() -> None:
-    """Iterate every enabled row in auto_sync_servers and scan it. Run in a
-    background thread per server since scan_server does blocking DB + HTTP work."""
-    import asyncio
-
+def _list_enabled_servers() -> list[tuple[str, str]]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT server_url, token FROM auto_sync_servers WHERE enabled")
-            rows = cur.fetchall()
+            return cur.fetchall()
     finally:
         release_conn(conn)
+
+
+async def scan_all_enabled_servers() -> None:
+    """Iterate every enabled row in auto_sync_servers and scan it. Run in a
+    background thread per server since scan_server does blocking DB + HTTP
+    work — the enabled-servers lookup itself is the same kind of blocking
+    call, previously left inline in this coroutine's own body instead of
+    also going through asyncio.to_thread."""
+    import asyncio
+
+    rows = await asyncio.to_thread(_list_enabled_servers)
 
     for server_url, token in rows:
         try:

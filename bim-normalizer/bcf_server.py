@@ -60,15 +60,17 @@ async def lifespan(app: FastAPI):
     init_pool()
     init_bcf_schema()
     if settings.BCF_ADMIN_EMAIL and settings.BCF_ADMIN_PASSWORD:
-        # Convenience only — ON CONFLICT DO NOTHING means this never resets
-        # the password on later restarts, and skipping it entirely is fine
-        # too: the admin panel is reachable via BCF_API_KEY regardless of
-        # whether any bcf_users rows exist yet.
+        # ON CONFLICT DO UPDATE only touches is_admin, never password_hash —
+        # so this never resets a password an admin has since changed, but
+        # still guarantees the designated bootstrap email always actually
+        # has admin rights (is_admin defaults to FALSE for every other
+        # account — see bcf/db_schema.py) even if this row already existed
+        # from before is_admin existed, or was demoted by another admin.
         execute(
             """
-            INSERT INTO bcf_users (email, name, password_hash)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (email) DO NOTHING
+            INSERT INTO bcf_users (email, name, password_hash, is_admin)
+            VALUES (%s, %s, %s, TRUE)
+            ON CONFLICT (email) DO UPDATE SET is_admin = TRUE
             """,
             (settings.BCF_ADMIN_EMAIL, "Admin", hash_password(settings.BCF_ADMIN_PASSWORD)),
         )

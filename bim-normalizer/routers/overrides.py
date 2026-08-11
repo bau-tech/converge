@@ -1,10 +1,25 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 
 router = APIRouter(tags=["overrides"])
 logger = logging.getLogger(__name__)
+
+
+def _require_role_for_model(conn, cur, model_id: str, user: CurrentUser) -> None:
+    """These routes are keyed on model_id, not stream_id, so the project
+    role check happens here once the model's own stream_id is looked up —
+    same pattern routers/models.py's delete_model uses. Existence has to be
+    checked first regardless of auth outcome, since the role check itself
+    needs the model's stream_id to know which project to check against."""
+    cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
 
 
 class OverrideItem(BaseModel):
@@ -39,7 +54,7 @@ def list_overrides(model_id: str):
 
 
 @router.post("/models/{model_id}/overrides")
-def upsert_overrides(model_id: str, items: list[OverrideItem]):
+def upsert_overrides(model_id: str, items: list[OverrideItem], user: CurrentUser = Depends(require_login)):
     """
     Bulk-upsert classification overrides. Matches by application_id when present,
     otherwise by speckle_id. At least one of the two must be provided per item.
@@ -48,9 +63,7 @@ def upsert_overrides(model_id: str, items: list[OverrideItem]):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Model not found")
+            _require_role_for_model(conn, cur, model_id, user)
 
             upserted = 0
             for item in items:
@@ -100,12 +113,13 @@ def upsert_overrides(model_id: str, items: list[OverrideItem]):
 
 
 @router.delete("/models/{model_id}/overrides/{override_id}")
-def delete_override(model_id: str, override_id: str):
+def delete_override(model_id: str, override_id: str, user: CurrentUser = Depends(require_login)):
     """Delete a single classification override by its UUID."""
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute("""
                 DELETE FROM bim_classification_overrides
                 WHERE override_id = %s AND model_id = %s
@@ -125,7 +139,7 @@ def delete_override(model_id: str, override_id: str):
 
 
 @router.post("/models/{model_id}/overrides/apply")
-def apply_overrides(model_id: str):
+def apply_overrides(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     Apply all stored overrides for a model: UPDATE bim_elements.ifc_class / category
     wherever an override matches by application_id or speckle_id.
@@ -135,9 +149,7 @@ def apply_overrides(model_id: str):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Model not found")
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute("""
                 UPDATE bim_elements e
                 SET ifc_class = o.ifc_class,
@@ -166,10 +178,14 @@ def apply_overrides(model_id: str):
 
 
 @router.post("/classification/reload")
-def reload_classification():
+def reload_classification(user: CurrentUser = Depends(require_login)):
     """
     Re-read all mapping config files from disk without restarting the service.
     Covers mapping_revit.json, mapping_ifc_class.json, and mapping_canonical.json.
+
+    Not project-scoped (affects every model), so require_login is the
+    strictest gate available — same reasoning as sync.py's auto-sync-server
+    write.
     """
     from ifc.classify import reload_classification_maps
     reload_classification_maps()

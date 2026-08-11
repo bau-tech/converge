@@ -160,6 +160,16 @@ ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS notify_email BOOLEAN NOT NULL DEF
 -- previous one, which is the desired "old link stops working" behaviour).
 ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS reset_token_hash TEXT;
 ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPTZ;
+
+-- Gates bcf-server's /admin panel (bcf/admin.py) — previously ANY bcf_users
+-- account (including one provisioned only for a limited document role)
+-- could log into /admin and reach every destructive action there (delete
+-- users/orgs, purge an entire project's Nextcloud folder + documents).
+-- Defaults to FALSE so no existing account silently gains admin access on
+-- upgrade; bcf_server.py's BCF_ADMIN_EMAIL bootstrap seed grants this
+-- explicitly, and admin.py's own /admin/api/users/{guid}/admin endpoint
+-- lets an existing admin grant it to others from there.
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by

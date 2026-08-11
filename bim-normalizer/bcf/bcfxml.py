@@ -78,6 +78,13 @@ def _vec_el(parent, tag, vec: dict):
 
 
 def _vec_from_el(el) -> dict:
+    if el is None:
+        # A malformed-but-plausible .bcfv from a buggy third-party export
+        # (camera element present but missing a required child vector) —
+        # raise a clean, catchable error rather than AttributeError on
+        # None.findtext(), which import_project's except clause below
+        # doesn't handle, turning this into a raw 500.
+        raise ValueError("viewpoint.bcfv camera is missing a required vector element")
     return {
         "x": float(el.findtext("X", "0")),
         "y": float(el.findtext("Y", "0")),
@@ -506,4 +513,9 @@ async def import_project(project_id: str, file: UploadFile):
         created = import_bcfzip(project_id, file_bytes)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Not a valid .bcfzip file")
+    except (ET.ParseError, ValueError) as exc:
+        # Malformed-but-plausible markup.bcf/viewpoint.bcfv content from a
+        # buggy third-party BCF export (bad XML, missing required elements)
+        # — a clean 400 with the actual reason, not a raw 500.
+        raise HTTPException(status_code=400, detail=f"Invalid BCF content in archive: {exc}")
     return {"imported_count": len(created), "topics": created}

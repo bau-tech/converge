@@ -2,9 +2,10 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import CurrentUser, require_login
 from db.jobs import create_job, update_job, find_running_job, prune_jobs
 from job_registry import fire_and_forget
 from process_pool import run_cpu_bound
@@ -90,9 +91,15 @@ def list_auto_sync_servers():
 
 
 @router.post("/auto-sync/servers")
-async def upsert_auto_sync_server(body: AutoSyncServerBody):
+async def upsert_auto_sync_server(body: AutoSyncServerBody, user: CurrentUser = Depends(require_login)):
     """Enable/disable auto-sync for a server. Enabling immediately triggers
-    one scan rather than waiting for the periodic background pass."""
+    one scan rather than waiting for the periodic background pass.
+
+    require_login rather than a project role: this isn't scoped to one
+    project (server_url can watch many streams at once), and there's no
+    broader "site admin" concept in dashboard_auth yet — login is the
+    strictest gate available today for what's otherwise an unauthenticated
+    write of Speckle credentials into this backend's own DB."""
     from config import settings
     from db.connection import get_conn, release_conn
     from speckle.webhooks import scan_server

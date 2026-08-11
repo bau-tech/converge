@@ -48,17 +48,20 @@ def _parse_mspdi_duration(val) -> float | None:
 
 
 def _link_elements(conn, db_task_id: str, model_id: str, global_ids: list[str]):
+    """Batched (one round trip via ANY(%s)) rather than one INSERT per
+    GlobalId — this runs once per IfcTask during import_from_ifc, so a
+    schedule with many tasks each referencing many products used to mean
+    one DB round trip per task-product link."""
     if not global_ids or not db_task_id:
         return
     with conn.cursor() as cur:
-        for gid in global_ids:
-            cur.execute("""
-                INSERT INTO bim_task_elements (task_id, element_id)
-                SELECT %s, e.element_id
-                FROM bim_elements e
-                WHERE e.model_id = %s AND e.application_id = %s
-                ON CONFLICT DO NOTHING
-            """, (db_task_id, model_id, gid))
+        cur.execute("""
+            INSERT INTO bim_task_elements (task_id, element_id)
+            SELECT %s, e.element_id
+            FROM bim_elements e
+            WHERE e.model_id = %s AND e.application_id = ANY(%s)
+            ON CONFLICT DO NOTHING
+        """, (db_task_id, model_id, global_ids))
 
 
 def link_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: list[str]) -> int:
@@ -66,49 +69,61 @@ def link_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: 
     any element regardless of source, unlike _link_elements' IFC-GlobalId match)."""
     if not speckle_ids:
         return 0
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO bim_task_elements (task_id, element_id)
-            SELECT %s, e.element_id
-            FROM bim_elements e
-            WHERE e.model_id = %s AND e.speckle_id = ANY(%s)
-            ON CONFLICT DO NOTHING
-        """, (task_id, model_id, speckle_ids))
-        linked = cur.rowcount
-    conn.commit()
-    return linked
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO bim_task_elements (task_id, element_id)
+                SELECT %s, e.element_id
+                FROM bim_elements e
+                WHERE e.model_id = %s AND e.speckle_id = ANY(%s)
+                ON CONFLICT DO NOTHING
+            """, (task_id, model_id, speckle_ids))
+            linked = cur.rowcount
+        conn.commit()
+        return linked
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def unlink_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: list[str]) -> int:
     if not speckle_ids:
         return 0
-    with conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM bim_task_elements te
-            USING bim_elements e
-            WHERE te.element_id = e.element_id
-              AND te.task_id = %s
-              AND e.model_id = %s
-              AND e.speckle_id = ANY(%s)
-        """, (task_id, model_id, speckle_ids))
-        unlinked = cur.rowcount
-    conn.commit()
-    return unlinked
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM bim_task_elements te
+                USING bim_elements e
+                WHERE te.element_id = e.element_id
+                  AND te.task_id = %s
+                  AND e.model_id = %s
+                  AND e.speckle_id = ANY(%s)
+            """, (task_id, model_id, speckle_ids))
+            unlinked = cur.rowcount
+        conn.commit()
+        return unlinked
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def create_task(conn, model_id: str, name: str, planned_start=None, planned_finish=None,
                 actual_start=None, actual_finish=None, parent_task_id: str | None = None,
                 wbs_code: str | None = None, is_milestone: bool = False) -> str:
-    with conn.cursor() as cur:
-        cur.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM bim_tasks WHERE model_id = %s", (model_id,))
-        sort_order = cur.fetchone()[0]
-    task_id = _insert_task(conn, model_id, None, name, 'NOTSTARTED', is_milestone, False,
-                           _parse_ifc_date(planned_start), _parse_ifc_date(planned_finish),
-                           _parse_ifc_date(actual_start), _parse_ifc_date(actual_finish),
-                           None, None, parent_task_id, wbs_code, sort_order)
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return task_id
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM bim_tasks WHERE model_id = %s", (model_id,))
+            sort_order = cur.fetchone()[0]
+        task_id = _insert_task(conn, model_id, None, name, 'NOTSTARTED', is_milestone, False,
+                               _parse_ifc_date(planned_start), _parse_ifc_date(planned_finish),
+                               _parse_ifc_date(actual_start), _parse_ifc_date(actual_finish),
+                               None, None, parent_task_id, wbs_code, sort_order)
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return task_id
+    except Exception:
+        conn.rollback()
+        raise
 
 
 _UPDATABLE_TASK_FIELDS = {
@@ -129,37 +144,49 @@ def update_task(conn, model_id: str, task_id: str, **fields) -> bool:
         if key in updates:
             updates[key] = _parse_ifc_date(updates[key])
     set_clause = ', '.join(f'{k} = %s' for k in updates)
-    with conn.cursor() as cur:
-        cur.execute(
-            f'UPDATE bim_tasks SET {set_clause} WHERE task_id = %s AND model_id = %s',
-            (*updates.values(), task_id, model_id),
-        )
-        updated = cur.rowcount > 0
-    if updated:
-        recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return updated
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'UPDATE bim_tasks SET {set_clause} WHERE task_id = %s AND model_id = %s',
+                (*updates.values(), task_id, model_id),
+            )
+            updated = cur.rowcount > 0
+        if updated:
+            recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def delete_task(conn, model_id: str, task_id: str) -> bool:
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM bim_tasks WHERE task_id = %s AND model_id = %s", (task_id, model_id))
-        deleted = cur.rowcount > 0
-    if deleted:
-        recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return deleted
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM bim_tasks WHERE task_id = %s AND model_id = %s", (task_id, model_id))
+            deleted = cur.rowcount > 0
+        if deleted:
+            recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def delete_schedule(conn, model_id: str) -> int:
     """Wipe the entire schedule for a model (bim_task_elements/bim_task_dependencies
     cascade off bim_tasks). Same statement the import_from_* functions already run
     before re-populating, exposed standalone for a plain "delete plan" action."""
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM bim_tasks WHERE model_id = %s", (model_id,))
-        deleted = cur.rowcount
-    conn.commit()
-    return deleted
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM bim_tasks WHERE model_id = %s", (model_id,))
+            deleted = cur.rowcount
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -282,51 +309,55 @@ def generate_schedule(
     if not groups:
         return {'tasks': 0, 'products_linked': 0, 'groups': 0}
 
-    with conn.cursor() as cur:
-        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+    try:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
 
-    duration = timedelta(days=days_per_group)
-    stride = duration + timedelta(days=lag_days)
+        duration = timedelta(days=days_per_group)
+        stride = duration + timedelta(days=lag_days)
 
-    tasks_created = 0
-    products_linked = 0
-    prev_task_id = None
+        tasks_created = 0
+        products_linked = 0
+        prev_task_id = None
 
-    for index, group in enumerate(groups):
-        group_start = start + index * stride
-        group_finish = group_start + duration
+        for index, group in enumerate(groups):
+            group_start = start + index * stride
+            group_finish = group_start + duration
 
-        task_id = _insert_task(
-            conn, model_id, None, group['name'], 'NOTSTARTED', False, False,
-            group_start, group_finish, None, None,
-            days_per_group, None, None, None, index,
-        )
-        if not task_id:
-            continue
-        tasks_created += 1
+            task_id = _insert_task(
+                conn, model_id, None, group['name'], 'NOTSTARTED', False, False,
+                group_start, group_finish, None, None,
+                days_per_group, None, None, None, index,
+            )
+            if not task_id:
+                continue
+            tasks_created += 1
 
-        if group['element_ids']:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO bim_task_elements (task_id, element_id)
-                    SELECT %s, unnest(%s::uuid[])
-                    ON CONFLICT DO NOTHING
-                """, (task_id, group['element_ids']))
-            products_linked += len(group['element_ids'])
+            if group['element_ids']:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO bim_task_elements (task_id, element_id)
+                        SELECT %s, unnest(%s::uuid[])
+                        ON CONFLICT DO NOTHING
+                    """, (task_id, group['element_ids']))
+                products_linked += len(group['element_ids'])
 
-        if link_sequences and prev_task_id:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
-                    VALUES (%s, %s, 'FINISH_START', %s)
-                    ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
-                        sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
-                """, (prev_task_id, task_id, lag_days if lag_days > 0 else None))
-        prev_task_id = task_id
+            if link_sequences and prev_task_id:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
+                        VALUES (%s, %s, 'FINISH_START', %s)
+                        ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
+                            sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
+                    """, (prev_task_id, task_id, lag_days if lag_days > 0 else None))
+            prev_task_id = task_id
 
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return {'tasks': tasks_created, 'products_linked': products_linked, 'groups': len(groups)}
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return {'tasks': tasks_created, 'products_linked': products_linked, 'groups': len(groups)}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _insert_task(conn, model_id, app_id, name, status, is_milestone, is_critical,
@@ -446,24 +477,28 @@ def import_from_ifc(conn, model_id: str, ifc_path: str) -> dict:
     if not schedules:
         return {'schedules': 0, 'tasks': 0}
 
-    with conn.cursor() as cur:
-        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+    try:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
 
-    task_id_map: dict[str, str] = {}
-    sort_counter = [0]
+        task_id_map: dict[str, str] = {}
+        sort_counter = [0]
 
-    for ws in schedules:
-        controls = getattr(ws, 'Controls', []) or []
-        for rel in controls:
-            for obj in (getattr(rel, 'RelatedObjects', []) or []):
-                if obj.is_a('IfcTask'):
-                    _walk_task(ifc, conn, model_id, obj, None, task_id_map, sort_counter)
+        for ws in schedules:
+            controls = getattr(ws, 'Controls', []) or []
+            for rel in controls:
+                for obj in (getattr(rel, 'RelatedObjects', []) or []):
+                    if obj.is_a('IfcTask'):
+                        _walk_task(ifc, conn, model_id, obj, None, task_id_map, sort_counter)
 
-    dependency_count = _import_dependencies(conn, ifc, task_id_map)
+        dependency_count = _import_dependencies(conn, ifc, task_id_map)
 
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return {'schedules': len(schedules), 'tasks': sort_counter[0], 'dependencies': dependency_count}
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return {'schedules': len(schedules), 'tasks': sort_counter[0], 'dependencies': dependency_count}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
@@ -496,60 +531,64 @@ def import_from_mspdi(conn, model_id: str, xml_bytes: bytes) -> dict:
     if tasks_el is None:
         raise ValueError('No <Tasks> element found - is this an MS Project XML (MSPDI) export?')
 
-    with conn.cursor() as cur:
-        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
-
-    level_stack: list[tuple[int, str]] = []  # (outline_level, db_task_id)
-    sort_order = 0
-    critical_ids: list[str] = []
-
-    for task_el in findall(tasks_el, 'Task'):
-        uid = text(task_el, 'UID')
-        if uid == '0':
-            continue  # UID 0 is MSPDI's synthetic project-summary row
-
-        name = text(task_el, 'Name') or uid or 'Unnamed Task'
-        level = int(text(task_el, 'OutlineLevel') or 1)
-        wbs = text(task_el, 'OutlineNumber')
-
-        planned_start  = _parse_ifc_date(text(task_el, 'Start'))
-        planned_finish = _parse_ifc_date(text(task_el, 'Finish'))
-        actual_start   = _parse_ifc_date(text(task_el, 'ActualStart'))
-        actual_finish  = _parse_ifc_date(text(task_el, 'ActualFinish'))
-        duration_days  = _parse_mspdi_duration(text(task_el, 'Duration'))
-
-        is_milestone = text(task_el, 'Milestone') == '1'
-        pct_complete = text(task_el, 'PercentComplete')
-        if pct_complete == '100':
-            status = 'DONE'
-        elif pct_complete and pct_complete != '0':
-            status = 'INPROGRESS'
-        else:
-            status = 'NOTSTARTED'
-
-        while level_stack and level_stack[-1][0] >= level:
-            level_stack.pop()
-        parent_db_id = level_stack[-1][1] if level_stack else None
-
-        # is_critical is set via the bulk UPDATE below (existing pattern); MSPDI's
-        # TotalSlack isn't wired to float_days yet (unverified units without a
-        # real sample) — leave None rather than guess.
-        db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
-                             planned_start, planned_finish, actual_start, actual_finish,
-                             duration_days, None, parent_db_id, wbs, sort_order)
-        sort_order += 1
-        if db_id:
-            level_stack.append((level, db_id))
-            if text(task_el, 'Critical') == '1':
-                critical_ids.append(db_id)
-
-    if critical_ids:
+    try:
         with conn.cursor() as cur:
-            cur.execute('UPDATE bim_tasks SET is_critical = TRUE WHERE task_id = ANY(%s::uuid[])', (critical_ids,))
+            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
 
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return {'schedules': 1, 'tasks': sort_order}
+        level_stack: list[tuple[int, str]] = []  # (outline_level, db_task_id)
+        sort_order = 0
+        critical_ids: list[str] = []
+
+        for task_el in findall(tasks_el, 'Task'):
+            uid = text(task_el, 'UID')
+            if uid == '0':
+                continue  # UID 0 is MSPDI's synthetic project-summary row
+
+            name = text(task_el, 'Name') or uid or 'Unnamed Task'
+            level = int(text(task_el, 'OutlineLevel') or 1)
+            wbs = text(task_el, 'OutlineNumber')
+
+            planned_start  = _parse_ifc_date(text(task_el, 'Start'))
+            planned_finish = _parse_ifc_date(text(task_el, 'Finish'))
+            actual_start   = _parse_ifc_date(text(task_el, 'ActualStart'))
+            actual_finish  = _parse_ifc_date(text(task_el, 'ActualFinish'))
+            duration_days  = _parse_mspdi_duration(text(task_el, 'Duration'))
+
+            is_milestone = text(task_el, 'Milestone') == '1'
+            pct_complete = text(task_el, 'PercentComplete')
+            if pct_complete == '100':
+                status = 'DONE'
+            elif pct_complete and pct_complete != '0':
+                status = 'INPROGRESS'
+            else:
+                status = 'NOTSTARTED'
+
+            while level_stack and level_stack[-1][0] >= level:
+                level_stack.pop()
+            parent_db_id = level_stack[-1][1] if level_stack else None
+
+            # is_critical is set via the bulk UPDATE below (existing pattern); MSPDI's
+            # TotalSlack isn't wired to float_days yet (unverified units without a
+            # real sample) — leave None rather than guess.
+            db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
+                                 planned_start, planned_finish, actual_start, actual_finish,
+                                 duration_days, None, parent_db_id, wbs, sort_order)
+            sort_order += 1
+            if db_id:
+                level_stack.append((level, db_id))
+                if text(task_el, 'Critical') == '1':
+                    critical_ids.append(db_id)
+
+        if critical_ids:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE bim_tasks SET is_critical = TRUE WHERE task_id = ANY(%s::uuid[])', (critical_ids,))
+
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return {'schedules': 1, 'tasks': sort_order}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 _CSV_HEADER_ALIASES = {
@@ -668,10 +707,14 @@ def import_from_csv(conn, model_id: str, csv_bytes: bytes) -> dict:
     rows = list(reader)
 
     if not rows:
-        with conn.cursor() as cur:
-            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
-        conn.commit()
-        return {'schedules': 1, 'tasks': 0}
+        try:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+            conn.commit()
+            return {'schedules': 1, 'tasks': 0}
+        except Exception:
+            conn.rollback()
+            raise
 
     def get(row, key):
         col = field_map.get(key)
@@ -683,56 +726,60 @@ def import_from_csv(conn, model_id: str, csv_bytes: bytes) -> dict:
         get(row, key) for row in rows for key in date_keys
     )
 
-    with conn.cursor() as cur:
-        cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
+    try:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM bim_tasks WHERE model_id = %s', (model_id,))
 
-    has_level = 'level' in field_map
-    level_stack: list[tuple[int, str]] = []
-    sort_order = 0
+        has_level = 'level' in field_map
+        level_stack: list[tuple[int, str]] = []
+        sort_order = 0
 
-    for row in rows:
-        name = get(row, 'name')
-        if not name:
-            continue
+        for row in rows:
+            name = get(row, 'name')
+            if not name:
+                continue
 
-        planned_start  = _parse_csv_date(get(row, 'start'), date_fmt)
-        planned_finish = _parse_csv_date(get(row, 'finish'), date_fmt)
-        actual_start   = _parse_csv_date(get(row, 'actual_start'), date_fmt)
-        actual_finish  = _parse_csv_date(get(row, 'actual_finish'), date_fmt)
-        duration_days  = _parse_csv_duration(get(row, 'duration'))
-        wbs = get(row, 'wbs')
-        is_milestone = _parse_csv_bool(get(row, 'milestone'))
+            planned_start  = _parse_csv_date(get(row, 'start'), date_fmt)
+            planned_finish = _parse_csv_date(get(row, 'finish'), date_fmt)
+            actual_start   = _parse_csv_date(get(row, 'actual_start'), date_fmt)
+            actual_finish  = _parse_csv_date(get(row, 'actual_finish'), date_fmt)
+            duration_days  = _parse_csv_duration(get(row, 'duration'))
+            wbs = get(row, 'wbs')
+            is_milestone = _parse_csv_bool(get(row, 'milestone'))
 
-        status = (get(row, 'status') or '').upper()
-        if status not in ('NOTSTARTED', 'INPROGRESS', 'DONE'):
-            pct_raw = get(row, 'pct_complete')
-            try:
-                pct = float(str(pct_raw).rstrip('%')) if pct_raw else 0
-            except ValueError:
-                pct = 0
-            status = 'DONE' if pct >= 100 else ('INPROGRESS' if pct > 0 else 'NOTSTARTED')
+            status = (get(row, 'status') or '').upper()
+            if status not in ('NOTSTARTED', 'INPROGRESS', 'DONE'):
+                pct_raw = get(row, 'pct_complete')
+                try:
+                    pct = float(str(pct_raw).rstrip('%')) if pct_raw else 0
+                except ValueError:
+                    pct = 0
+                status = 'DONE' if pct >= 100 else ('INPROGRESS' if pct > 0 else 'NOTSTARTED')
 
-        parent_db_id = None
-        level = 1
-        if has_level:
-            try:
-                level = int(get(row, 'level') or 1)
-            except ValueError:
-                level = 1
-            while level_stack and level_stack[-1][0] >= level:
-                level_stack.pop()
-            parent_db_id = level_stack[-1][1] if level_stack else None
+            parent_db_id = None
+            level = 1
+            if has_level:
+                try:
+                    level = int(get(row, 'level') or 1)
+                except ValueError:
+                    level = 1
+                while level_stack and level_stack[-1][0] >= level:
+                    level_stack.pop()
+                parent_db_id = level_stack[-1][1] if level_stack else None
 
-        db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
-                             planned_start, planned_finish, actual_start, actual_finish,
-                             duration_days, None, parent_db_id, wbs, sort_order)
-        sort_order += 1
-        if has_level and db_id:
-            level_stack.append((level, db_id))
+            db_id = _insert_task(conn, model_id, None, name, status, is_milestone, False,
+                                 planned_start, planned_finish, actual_start, actual_finish,
+                                 duration_days, None, parent_db_id, wbs, sort_order)
+            sort_order += 1
+            if has_level and db_id:
+                level_stack.append((level, db_id))
 
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return {'schedules': 1, 'tasks': sort_order}
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return {'schedules': 1, 'tasks': sort_order}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _would_create_cycle(conn, model_id: str, predecessor_task_id: str, successor_task_id: str) -> bool:
@@ -784,33 +831,41 @@ def create_dependency(conn, model_id: str, predecessor_task_id: str, successor_t
     if _would_create_cycle(conn, model_id, predecessor_task_id, successor_task_id):
         raise ValueError('This would create a circular dependency')
 
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
-                sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
-            RETURNING id
-        """, (predecessor_task_id, successor_task_id, sequence_type, lag_days))
-        dependency_id = cur.fetchone()[0]
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO bim_task_dependencies (predecessor_task_id, successor_task_id, sequence_type, lag_days)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (predecessor_task_id, successor_task_id) DO UPDATE SET
+                    sequence_type = EXCLUDED.sequence_type, lag_days = EXCLUDED.lag_days
+                RETURNING id
+            """, (predecessor_task_id, successor_task_id, sequence_type, lag_days))
+            dependency_id = cur.fetchone()[0]
 
-    recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return {'dependency_id': str(dependency_id)}
+        recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return {'dependency_id': str(dependency_id)}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def delete_dependency(conn, model_id: str, dependency_id: int) -> bool:
-    with conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM bim_task_dependencies d
-            USING bim_tasks t
-            WHERE d.id = %s AND d.predecessor_task_id = t.task_id AND t.model_id = %s
-        """, (dependency_id, model_id))
-        deleted = cur.rowcount > 0
-    if deleted:
-        recompute_and_persist_cpm(conn, model_id)
-    conn.commit()
-    return deleted
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM bim_task_dependencies d
+                USING bim_tasks t
+                WHERE d.id = %s AND d.predecessor_task_id = t.task_id AND t.model_id = %s
+            """, (dependency_id, model_id))
+            deleted = cur.rowcount > 0
+        if deleted:
+            recompute_and_persist_cpm(conn, model_id)
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def get_schedule(conn, model_id: str) -> dict:

@@ -4,6 +4,7 @@ import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
+from bcf.bcfxml import MAX_ZIP_MEMBER_BYTES
 from bcf.db import fetch_all, fetch_one, execute, execute_returning
 from bcf.schemas import ViewpointCreate
 
@@ -114,6 +115,16 @@ def create_viewpoint(project_id: str, topic_guid: str, body: ViewpointCreate):
     snapshot_format = None
     if body.snapshot_base64:
         snapshot_data = base64.b64decode(body.snapshot_base64)
+        # Same cap bcfxml.py's .bcfzip import already applies per zip member
+        # (a viewpoint snapshot there is the same kind of artifact as this
+        # one) — this REST path had no equivalent size check at all before,
+        # letting a caller push an arbitrarily large payload straight into
+        # Postgres per viewpoint.
+        if len(snapshot_data) > MAX_ZIP_MEMBER_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Snapshot too large ({len(snapshot_data)} bytes, max {MAX_ZIP_MEMBER_BYTES})",
+            )
         snapshot_format = "png"
 
     row = execute_returning(

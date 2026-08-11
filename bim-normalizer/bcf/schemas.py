@@ -135,5 +135,9 @@ class UserNotifyEmailUpdate(BaseModel):
     notify_email: bool
 
 
+class UserAdminUpdate(BaseModel):
+    is_admin: bool
+
+
 class UserPasswordReset(BaseModel):
     password: str

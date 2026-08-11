@@ -2,9 +2,10 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 from db.jobs import create_job, update_job, get_job, prune_jobs
 from job_registry import fire_and_forget
 
@@ -24,7 +25,7 @@ class FilterPublishRequest(BaseModel):
 
 
 @router.post("/models/{model_id}/filter-publish")
-async def filter_publish(model_id: str, request: FilterPublishRequest):
+async def filter_publish(model_id: str, request: FilterPublishRequest, user: CurrentUser = Depends(require_login)):
     """
     Filter elements from a normalized model and publish the selection as a
     new commit on the same Speckle server.
@@ -49,6 +50,7 @@ async def filter_publish(model_id: str, request: FilterPublishRequest):
             if not row:
                 raise HTTPException(status_code=404, detail="Model not found")
             stream_id, commit_id = row[0], row[1]
+        require_project_role(conn, stream_id, user, ANY_PROJECT_ROLE)
 
         job_id = str(uuid.uuid4())
         create_job(conn, job_id, "filter_publish", payload={"model_id": model_id})
