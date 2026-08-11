@@ -915,6 +915,44 @@ def get_schedule(conn, model_id: str) -> dict:
     }
 
 
+def get_tasks_for_element(conn, model_id: str, speckle_id: str) -> list[dict]:
+    """Reverse of link_elements_by_speckle_id — which tasks reference a given
+    element. Only element->task lookups (get_schedule's per-task speckle_ids,
+    get_tasks_for_export's task_elements map) existed before this; nothing
+    let a caller start from an element and find its tasks."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT t.task_id, t.name, t.wbs_code, t.status, t.is_milestone, t.is_critical,
+                   t.planned_start, t.planned_finish, t.actual_start, t.actual_finish,
+                   t.duration_days, t.float_days
+            FROM bim_tasks t
+            JOIN bim_task_elements te ON te.task_id = t.task_id
+            JOIN bim_elements e       ON e.element_id = te.element_id
+            WHERE t.model_id = %s AND e.speckle_id = %s
+            ORDER BY t.sort_order, t.planned_start NULLS LAST, t.name
+        """, (model_id, speckle_id))
+        rows = cur.fetchall()
+
+    return [
+        {
+            'task_id':        str(task_id),
+            'name':           name or 'Unnamed Task',
+            'wbs_code':       wbs,
+            'status':         status,
+            'is_milestone':   is_milestone,
+            'is_critical':    is_critical,
+            'planned_start':  p_start.isoformat()  if p_start  else None,
+            'planned_finish': p_finish.isoformat() if p_finish else None,
+            'actual_start':   a_start.isoformat()  if a_start  else None,
+            'actual_finish':  a_finish.isoformat() if a_finish else None,
+            'duration_days':  duration,
+            'float_days':     float_d,
+        }
+        for (task_id, name, wbs, status, is_milestone, is_critical,
+             p_start, p_finish, a_start, a_finish, duration, float_d) in rows
+    ]
+
+
 def get_tasks_for_export(conn, model_id: str) -> tuple[list[dict], dict[str, list[str]]]:
     """
     Tasks + task->element links in the shape ifc/export.py's export_model()

@@ -45,6 +45,7 @@ from db.query import (
     get_model_diff,
     get_quantity_takeoff,
 )
+from db.schedule import get_schedule, get_tasks_for_element
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +311,58 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_schedule",
+            "description": (
+                "Get construction schedule tasks (with planned/actual dates, status, "
+                "critical-path flag and float/slack days) and their dependencies, and highlight "
+                "the matching tasks' elements in the 3D viewer. Use for 'what's the schedule', "
+                "'what's the critical path', 'what tasks are in progress', 'what milestones are "
+                "coming up'. Returns nothing useful for a model with no imported/generated schedule."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string", "enum": ["NOTSTARTED", "INPROGRESS", "DONE"],
+                        "description": "Optional: filter by task status.",
+                    },
+                    "critical_only": {
+                        "type": "boolean",
+                        "description": "Optional: only return tasks on the critical path (zero/lowest float).",
+                    },
+                    "milestone_only": {
+                        "type": "boolean",
+                        "description": "Optional: only return milestone tasks.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_element_tasks",
+            "description": (
+                "Find which schedule tasks a specific element is linked to. Use for 'what task is "
+                "this element part of', 'when is this being built', or 'is this on the critical "
+                "path' about a specific element."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "Speckle ID or (partial) name of the element to look up tasks for.",
+                    },
+                },
+                "required": ["reference"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_nearby_elements",
             "description": (
                 "Find elements within a radius (in meters) of a reference element or coordinate. "
@@ -495,6 +548,37 @@ _TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "check_federated_clashes",
+            "description": (
+                "Run geometric clash detection between this model and a DIFFERENT model (e.g. "
+                "structure vs architecture, cross-discipline coordination) — unlike check_clashes, "
+                "which only compares categories within the current model. Use when the user asks to "
+                "check clashes 'against' or 'with' another model/discipline. Only elements from the "
+                "current model can be highlighted in the 3D viewer; the other model's clashing "
+                "elements are reported by name/id in the text only. Can take up to a minute or more."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "compared_model_id": {"type": "string", "description": "The model_id UUID of the other model to check against."},
+                    "selector_a": {"type": "string", "description": "IFC class or category to check in the current model, e.g. IfcColumn or Walls."},
+                    "selector_b": {
+                        "type": "string",
+                        "description": "Optional: IFC class/category to check in the other model. Defaults to selector_a.",
+                    },
+                    "mode": {
+                        "type": "string", "enum": ["collision", "intersection", "clearance"],
+                        "description": "Clash mode (default collision).",
+                    },
+                    "clearance": {"type": "number", "description": "Required minimum clearance in meters, only for mode=clearance."},
+                },
+                "required": ["compared_model_id", "selector_a"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_ids_specs",
             "description": (
                 "List IDS (buildingSMART Information Delivery Specification) compliance specs "
@@ -529,10 +613,14 @@ _TOOLS = [
             "name": "list_documents",
             "description": (
                 "List CDE (Common Data Environment) documents for this project — drawings, specs, "
-                "and other files with their WIP/Shared/Published/Archived status and approval "
-                "gates. Use when the user asks 'what documents are there', 'is X approved', or "
-                "'what's in WIP'. Read-only — approving/moving documents happens in the Documents "
-                "panel, not here."
+                "and other files with their WIP/Shared/Published/Archived status, approval gates, "
+                "ISO 19650 suitability code and filename-naming-convention compliance, folder, and "
+                "any linked element. Use when the user asks 'what documents are there', 'is X "
+                "approved', 'what's in WIP', 'what's in the Structural folder', or 'what documents "
+                "cover this element'. Read-only — approving/moving documents happens in the "
+                "Documents panel, not here. WIP visibility respects the asker's organization the "
+                "same way the Documents panel does — a logged-in user only sees their own org's WIP "
+                "(plus unscoped WIP); an anonymous/share-link session sees only unscoped WIP."
             ),
             "parameters": {
                 "type": "object",
@@ -540,6 +628,14 @@ _TOOLS = [
                     "status": {
                         "type": "string", "enum": ["WIP", "Shared", "Published", "Archived"],
                         "description": "Optional: filter by status.",
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "Optional: restrict to one folder's direct contents, e.g. 'Structural' or 'Structural/Drawings'. Omit for all folders.",
+                    },
+                    "linked_element": {
+                        "type": "string",
+                        "description": "Optional: only documents linked to this element — pass its Speckle ID (e.g. from the Currently Selected Element context).",
                     },
                 },
                 "required": [],
@@ -646,6 +742,26 @@ _TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_notifications",
+            "description": (
+                "Get the current user's notifications (document uploads, BCF issue assignments, "
+                "etc.) for this project. Use for 'do I have any notifications', 'what's new for me', "
+                "'any unread issues assigned to me'. Only works for a logged-in user — tell the user "
+                "to log in if this reports it's unavailable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "unread_only": {"type": "boolean", "description": "Optional: only unread notifications (default false)."},
+                    "limit": {"type": "integer", "description": "Max notifications to return (default 20)."},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -693,8 +809,210 @@ def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
     return resp  # pragma: no cover — loop always returns or raises above
 
 
+# ---------------------------------------------------------------------------
+# Anthropic provider — Messages API has a genuinely different wire shape
+# (top-level `system`, `input_schema` tools, `content` blocks instead of
+# `choices[0].message`, tool results merged into one `user` message instead
+# of one `role:"tool"` message per call). Rather than reshaping the agentic
+# loop, translation is isolated to this boundary: _call_llm_anthropic and
+# _call_llm_stream_anthropic take/return the exact same canonical shapes
+# every other provider already uses, so run_chat_agent/stream_chat_agent and
+# _TOOLS need no changes at all.
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _to_anthropic_tools(tools: list) -> list[dict]:
+    """OpenAI function-calling shape -> Anthropic's {name, description,
+    input_schema}. Pure reshape of _TOOLS (the single source of truth), not
+    a second copy of any tool definition."""
+    return [
+        {
+            "name": t["function"]["name"],
+            "description": t["function"]["description"],
+            "input_schema": t["function"]["parameters"],
+        }
+        for t in tools
+    ]
+
+
+def _messages_to_anthropic(messages: list) -> tuple[str, list[dict]]:
+    """Canonical OpenAI-shaped messages -> (system_prompt, anthropic_messages).
+    Anthropic requires every tool_result for a given assistant turn's
+    tool_use blocks to be combined into a SINGLE following user message —
+    unlike OpenAI's one role:"tool" message per call — so consecutive
+    role=="tool" messages are collapsed here into one user message."""
+    system_prompt = ""
+    anthropic_messages: list[dict] = []
+    pending_tool_results: list[dict] = []
+
+    def _flush_tool_results():
+        nonlocal pending_tool_results
+        if pending_tool_results:
+            anthropic_messages.append({"role": "user", "content": pending_tool_results})
+            pending_tool_results = []
+
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            system_prompt = m.get("content") or ""
+            continue
+
+        if role == "tool":
+            pending_tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id"),
+                "content": m.get("content") or "",
+            })
+            continue
+
+        _flush_tool_results()
+
+        if role == "assistant":
+            tool_calls = m.get("tool_calls") or []
+            if tool_calls:
+                content = []
+                if m.get("content"):
+                    content.append({"type": "text", "text": m["content"]})
+                for tc in tool_calls:
+                    content.append({
+                        "type": "tool_use",
+                        "id": tc.get("id"),
+                        "name": tc["function"]["name"],
+                        "input": json.loads(tc["function"]["arguments"] or "{}"),
+                    })
+                anthropic_messages.append({"role": "assistant", "content": content})
+            else:
+                anthropic_messages.append({"role": "assistant", "content": m.get("content") or ""})
+        elif role == "user":
+            anthropic_messages.append({"role": "user", "content": m.get("content") or ""})
+
+    _flush_tool_results()
+    return system_prompt, anthropic_messages
+
+
+def _anthropic_response_to_canonical(data: dict) -> dict:
+    """Anthropic Messages API response -> the same {"role","content",
+    "tool_calls"} assistant-message shape run_chat_agent/stream_chat_agent
+    already expect from every other provider."""
+    text_parts = []
+    tool_calls = []
+    for block in data.get("content") or []:
+        if block.get("type") == "text":
+            text_parts.append(block.get("text") or "")
+        elif block.get("type") == "tool_use":
+            tool_calls.append({
+                "id": block.get("id"),
+                "type": "function",
+                "function": {
+                    "name": block.get("name"),
+                    "arguments": json.dumps(block.get("input") or {}),
+                },
+            })
+    msg: dict = {"role": "assistant", "content": "".join(text_parts) or None}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return msg
+
+
+def _anthropic_request_body(model: str, messages: list, tools: list, stream: bool) -> dict:
+    system_prompt, anthropic_messages = _messages_to_anthropic(messages)
+    body = {
+        "model": model,
+        "max_tokens": 2048,
+        "temperature": 0.1,
+        # cache_control on the system block is Anthropic's native prompt
+        # caching — the system prompt is by far the largest, most-repeated
+        # part of every turn (see _get_static_model_context's own caching
+        # above), so this is a direct fit for this project's existing
+        # chat-prompt-caching work, just on the provider side instead.
+        "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        "messages": anthropic_messages,
+        "tools": _to_anthropic_tools(tools),
+    }
+    if stream:
+        body["stream"] = True
+    return body
+
+
+def _anthropic_headers(api_key: str) -> dict:
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": _ANTHROPIC_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def _call_llm_anthropic(model: str, api_key: str, messages: list, tools: list) -> dict:
+    body = _anthropic_request_body(model, messages, tools, stream=False)
+    resp = _post_with_retries(_ANTHROPIC_API_URL, _anthropic_headers(api_key), body, timeout=60)
+    resp.raise_for_status()
+    return _anthropic_response_to_canonical(resp.json())
+
+
+def _call_llm_stream_anthropic(model: str, api_key: str, messages: list, tools: list) -> Generator:
+    body = _anthropic_request_body(model, messages, tools, stream=True)
+    # Retries only cover establishing the connection/initial response, same
+    # reasoning as _call_llm_stream's own comment below.
+    resp = _post_with_retries(_ANTHROPIC_API_URL, _anthropic_headers(api_key), body, timeout=120, stream=True)
+    resp.raise_for_status()
+
+    full_content = ""
+    tool_calls: list[dict] = []
+    current_block: dict | None = None
+    current_json = ""
+
+    for raw_line in resp.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+        if not line.startswith("data: "):
+            continue
+        try:
+            chunk = json.loads(line[6:])
+        except json.JSONDecodeError:
+            continue
+
+        ctype = chunk.get("type")
+        if ctype == "content_block_start":
+            block = chunk.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                current_block = {"id": block.get("id"), "name": block.get("name"), "type": "tool_use"}
+                current_json = ""
+            else:
+                current_block = {"type": "text"}
+        elif ctype == "content_block_delta":
+            delta = chunk.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text") or ""
+                full_content += text
+                yield ("text_delta", text)
+            elif delta.get("type") == "input_json_delta":
+                current_json += delta.get("partial_json") or ""
+        elif ctype == "content_block_stop":
+            if current_block and current_block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": current_block["id"],
+                    "type": "function",
+                    "function": {"name": current_block["name"], "arguments": current_json or "{}"},
+                })
+            current_block = None
+            current_json = ""
+        # message_start/message_delta/message_stop carry nothing else needed here
+
+    msg: dict = {"role": "assistant", "content": full_content or None}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    yield ("message", msg)
+
+
 def _call_llm(provider: str, model: str, api_key: str, base_url: str,
               messages: list, tools: list) -> dict:
+    if provider == "anthropic":
+        msg = _call_llm_anthropic(model, api_key, messages, tools)
+        return {"choices": [{"message": msg}]}
     url, headers = _get_url_and_headers(provider, api_key, base_url)
     body = {
         "model": model,
@@ -717,6 +1035,9 @@ def _call_llm(provider: str, model: str, api_key: str, base_url: str,
 
 def _call_llm_stream(provider: str, model: str, api_key: str, base_url: str,
                      messages: list, tools: list) -> Generator:
+    if provider == "anthropic":
+        yield from _call_llm_stream_anthropic(model, api_key, messages, tools)
+        return
     url, headers = _get_url_and_headers(provider, api_key, base_url)
     body = {
         "model": model,
@@ -1113,6 +1434,27 @@ async def _resolve_and_check_clashes(model_id: str, rule: dict) -> tuple[list[di
     return results, ifc_source
 
 
+async def _resolve_and_check_federated_clashes(model_id_a: str, model_id_b: str, rule: dict) -> tuple[list[dict], str, str]:
+    """Like _resolve_and_check_clashes, but between two different models —
+    model_id_a is always the current chat session's model (the one loaded in
+    the viewer), model_id_b the one the user asked to check against. No
+    guid_map is passed on either side, matching _resolve_and_check_clashes'
+    own level of sophistication above (it doesn't resolve Revit GUIDs
+    either) — synthetic-export models resolve via application_id, same as
+    the single-model path."""
+    from routers.ifc_export import resolve_model_ifc_bytes
+    from clash_check import run_cross_model_clash_checks
+    from process_pool import run_cpu_bound
+
+    ifc_bytes_a, ifc_source_a = await resolve_model_ifc_bytes(model_id_a, None, None, "mm")
+    ifc_bytes_b, ifc_source_b = await resolve_model_ifc_bytes(model_id_b, None, None, "mm")
+    results = await run_cpu_bound(
+        run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, [rule],
+        ifc_source_a == "synthetic_export", ifc_source_b == "synthetic_export",
+    )
+    return results, ifc_source_a, ifc_source_b
+
+
 async def _resolve_and_check_ids(model_id: str, ids_content: str) -> tuple[dict, str]:
     from routers.ifc_export import resolve_model_ifc_bytes
     from ids_check import run_ids_check
@@ -1218,15 +1560,20 @@ def _add_comment_row(conn, topic_guid: str, comment: str, author: str = "AI Assi
 # Returns (tool_result_str, new_element_ids_or_None)
 # ---------------------------------------------------------------------------
 
-def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[str] | None]:
+def _execute_tool(conn, model_id: str, fn: str, args: dict, user=None) -> tuple[str, list[str] | None]:
     """Thin safety-net wrapper around _execute_tool_impl: any unhandled
     exception (a bad query, a write that half-completed, ...) must roll the
     connection back before returning — otherwise release_conn() (called by
     routers/chat.py's finally block) hands a poisoned aborted-transaction
     connection back to the shared pool, breaking the *next* unrelated
-    request that happens to draw it."""
+    request that happens to draw it.
+
+    `user` is the dashboard_auth CurrentUser for this chat session, or None
+    for an anonymous/share-link session (routers/chat.py's auth is optional
+    by design) — only get_notifications and list_documents/get_document_status's
+    org-scoped WIP visibility use it; every other tool ignores it."""
     try:
-        return _execute_tool_impl(conn, model_id, fn, args)
+        return _execute_tool_impl(conn, model_id, fn, args, user)
     except Exception as exc:
         try:
             conn.rollback()
@@ -1236,7 +1583,7 @@ def _execute_tool(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[s
         return f"Tool '{fn}' failed: {exc}", None
 
 
-def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, list[str] | None]:
+def _execute_tool_impl(conn, model_id: str, fn: str, args: dict, user=None) -> tuple[str, list[str] | None]:
     if fn == "filter_elements":
         ids = _query_elements(conn, model_id, **{k: v for k, v in args.items()
                                                   if k in ("category", "ifc_class", "storey", "name")})
@@ -1344,6 +1691,44 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
             v["by_category"] = {k: v["by_category"][k] for k in top_cats}
             v["volume_by_category"] = {k: v["volume_by_category"].get(k, 0) for k in top_cats}
         return _jdump(versions), None
+
+    if fn == "get_schedule":
+        schedule = get_schedule(conn, model_id)
+        tasks = schedule["tasks"]
+        if args.get("status"):
+            tasks = [t for t in tasks if t["status"] == args["status"]]
+        if args.get("critical_only"):
+            tasks = [t for t in tasks if t["is_critical"]]
+        if args.get("milestone_only"):
+            tasks = [t for t in tasks if t["is_milestone"]]
+        if not tasks:
+            if not schedule["tasks"]:
+                return "No schedule found for this model — it may not have an imported or generated schedule.", None
+            return "No tasks matched that filter.", None
+        ids: list[str] = []
+        for t in tasks:
+            ids.extend(t.get("speckle_ids") or [])
+        summary_tasks = [{k: v for k, v in t.items() if k != "speckle_ids"} for t in tasks[:300]]
+        result = {
+            "tasks": summary_tasks,
+            "task_count": len(tasks),
+            "dependencies": schedule["dependencies"][:500],
+            "project_start": schedule["project_start"],
+            "project_end": schedule["project_end"],
+        }
+        return _jdump(result), (ids or None)
+
+    if fn == "get_element_tasks":
+        reference = args.get("reference", "")
+        if not reference:
+            return "'reference' is required.", None
+        element = get_element_details(conn, model_id, reference)
+        if not element:
+            return f"No element found matching '{reference}'.", None
+        tasks = get_tasks_for_element(conn, model_id, element["speckle_id"])
+        if not tasks:
+            return f"No schedule tasks linked to '{reference}'.", None
+        return _jdump(tasks), None
 
     if fn == "find_nearby_elements":
         reference = args.get("reference", "")
@@ -1474,6 +1859,46 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
             )
         return result, ids
 
+    if fn == "check_federated_clashes":
+        compared_model_id = args.get("compared_model_id", "")
+        selector_a = args.get("selector_a", "")
+        if not compared_model_id or not selector_a:
+            return "'compared_model_id' and 'selector_a' are required.", None
+        rule = {
+            "name": f"{selector_a} vs {args.get('selector_b') or selector_a} (federated)",
+            "selector_a": selector_a,
+            "mode": args.get("mode", "collision"),
+        }
+        if args.get("selector_b"):
+            rule["selector_b"] = args["selector_b"]
+        if args.get("clearance") is not None:
+            rule["clearance"] = args["clearance"]
+        try:
+            results, ifc_source_a, _ifc_source_b = _run_async(
+                _resolve_and_check_federated_clashes(model_id, compared_model_id, rule)
+            )
+        except Exception as exc:
+            return f"Federated clash check failed: {exc}", None
+
+        r = results[0] if results else {"count": 0, "clashes": []}
+        count = r.get("count", 0)
+        ids = None
+        if count and ifc_source_a == "synthetic_export":
+            app_ids = list({c.get("a_global_id") for c in r["clashes"] if c.get("a_global_id")})
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT speckle_id FROM bim_elements WHERE model_id = %s AND application_id = ANY(%s)",
+                    (model_id, app_ids),
+                )
+                ids = [row[0] for row in cur.fetchall() if row[0]]
+        result = f"Federated clash check ({rule['name']}, mode={rule['mode']}): {count} clash(es) found."
+        if count and ifc_source_a != "synthetic_export":
+            result += (
+                " (3D highlighting unavailable — the current model's original IFC file has no "
+                "Speckle-ID mapping.)"
+            )
+        return result, ids
+
     if fn == "list_ids_specs":
         with conn.cursor() as cur:
             cur.execute(
@@ -1523,7 +1948,11 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
         if not stream_id:
             return "Could not determine the project for this model.", None
         from db.documents import list_documents as _list_docs
-        docs = _list_docs(conn, stream_id, status=args.get("status"))
+        docs = _list_docs(
+            conn, stream_id, status=args.get("status"),
+            folder_path=args.get("folder_path"), linked_element=args.get("linked_element"),
+            viewer_org_id=user.org_id if user else None,
+        )
         if not docs:
             filt = f" with status={args['status']}" if args.get("status") else ""
             return f"No documents found{filt}.", None
@@ -1531,6 +1960,9 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
             {
                 "filename": d["filename"], "status": d["status"], "revision": d["revision"],
                 "reviewed": d["reviewed"], "approved": d["approved"], "verified": d["verified"],
+                "folder": d["nc_group_folder"], "suitability_code": d["suitability_code"],
+                "naming_compliant": d["naming_compliant"], "linked_element": d["linked_element"],
+                "doc_type": d["doc_type"],
             }
             for d in docs
         ]
@@ -1544,7 +1976,7 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
         if not stream_id:
             return "Could not determine the project for this model.", None
         from db.documents import list_documents as _list_docs, list_events
-        docs = _list_docs(conn, stream_id)
+        docs = _list_docs(conn, stream_id, viewer_org_id=user.org_id if user else None)
         match = next((d for d in docs if filename.lower() in d["filename"].lower()), None)
         if not match:
             return f"No document matching '{filename}' found.", None
@@ -1635,6 +2067,19 @@ def _execute_tool_impl(conn, model_id: str, fn: str, args: dict) -> tuple[str, l
         except Exception as exc:
             return f"Could not add comment: {exc}", None
         return f"Comment added to '{topic['title']}'.", None
+
+    if fn == "get_notifications":
+        if user is None:
+            return "Notifications require being logged in — not available in this session.", None
+        from db.notifications import list_notifications
+        notifications = list_notifications(
+            conn, user.guid,
+            unread_only=bool(args.get("unread_only", False)),
+            limit=int(args.get("limit") or 20),
+        )
+        if not notifications:
+            return "No notifications.", None
+        return _jdump(notifications), None
 
     return "Unknown tool.", None
 
@@ -1841,6 +2286,8 @@ _TOOLS_AND_REASONING_TRAILER = (
         "- check_data_quality: BIM QA score + issues (missing names/storeys/materials/geometry, duplicates)\n"
         "- get_parameter_completeness: fill-rate % per parameter, worst-covered first\n"
         "- get_version_history: element-count/volume/area trend (overall + per category) across all ingested versions of this model\n"
+        "- get_schedule: construction schedule tasks (status, critical path, float) and dependencies\n"
+        "- get_element_tasks: which schedule tasks a specific element is linked to\n"
         "- find_nearby_elements: find elements within a radius (meters) of a reference element or coordinate\n"
         "- get_related_elements: parent/room/space relationships (host wall, room contents, etc.) for an element\n"
         "- get_connectivity: multi-hop connectivity graph for an element — structural/IFC relationships plus "
@@ -1848,11 +2295,14 @@ _TOOLS_AND_REASONING_TRAILER = (
         "- get_qa_elements: drill into a specific data-quality issue and highlight the affected elements\n"
         "- get_element_details: full details (geometry, all parameters) for one specific element\n"
         "- semantic_search: find elements by meaning/description rather than exact text match\n"
-        "- check_clashes: geometric clash detection between two categories/IFC classes (can be slow)\n"
+        "- check_clashes: geometric clash detection between two categories/IFC classes within this model (can be slow)\n"
+        "- check_federated_clashes: geometric clash detection between this model and a different model (can be slow)\n"
         "- list_ids_specs / check_ids_compliance: buildingSMART IDS spec compliance checking (can be slow)\n"
-        "- list_documents / get_document_status: CDE document status and approval gates (read-only)\n"
+        "- list_documents / get_document_status: CDE document status, approval gates, suitability code, "
+        "folder, and linked element (read-only, org-scoped WIP visibility)\n"
         "- list_topics / get_topic / create_topic / update_topic / list_topic_comments / add_topic_comment: "
-        "BCF coordination issues — log/track/discuss findings as trackable topics\n\n"
+        "BCF coordination issues — log/track/discuss findings as trackable topics\n"
+        "- get_notifications: the current logged-in user's notifications for this project (unavailable when anonymous)\n\n"
         "## Reasoning Guidance\n"
         "Before calling tools, briefly state your plan in one sentence (e.g. 'I'll filter beams by "
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "
@@ -1897,8 +2347,12 @@ def run_chat_agent(
     model_name: str,
     base_url: str,
     model_context: dict | None = None,
+    user=None,
 ) -> dict:
-    """Run the agentic chat loop. Returns {text, elementIds, toolsUsed}."""
+    """Run the agentic chat loop. Returns {text, elementIds, toolsUsed}.
+
+    `user` is the dashboard_auth CurrentUser, or None for an anonymous
+    session — see _execute_tool's docstring."""
     system_prompt = _build_system_prompt(conn, model_id, model_context)
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1937,7 +2391,7 @@ def run_chat_agent(
             tools_used.append(fn)
             tc_id = tc.get("id", fn)
 
-            tool_result, new_ids = _execute_tool(conn, model_id, fn, args)
+            tool_result, new_ids = _execute_tool(conn, model_id, fn, args, user)
             if new_ids is not None:
                 element_ids = new_ids
 
@@ -1970,6 +2424,7 @@ def stream_chat_agent(
     model_name: str,
     base_url: str,
     model_context: dict | None = None,
+    user=None,
 ) -> Generator[str, None, None]:
     """
     Generator that runs the agentic loop and yields SSE events:
@@ -1979,6 +2434,9 @@ def stream_chat_agent(
       {"type": "text_delta", "delta": "..."}  — streamed LLM text token
       {"type": "elements", "ids": [...]}       — final highlighted element IDs
       {"type": "done", "toolsUsed": [...]}     — all done
+
+    `user` is the dashboard_auth CurrentUser, or None for an anonymous
+    session — see _execute_tool's docstring.
     """
     system_prompt = _build_system_prompt(conn, model_id, model_context)
 
@@ -2023,7 +2481,7 @@ def stream_chat_agent(
 
             yield _sse({"type": "tool_start", "name": fn})
 
-            tool_result, new_ids = _execute_tool(conn, model_id, fn, args)
+            tool_result, new_ids = _execute_tool(conn, model_id, fn, args, user)
             if new_ids is not None:
                 element_ids = new_ids
 

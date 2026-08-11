@@ -118,11 +118,57 @@ If the source is IFC, the original blob uploaded to the Speckle server is served
 
 #### AI Chat
 
+An agentic tool-calling loop (`chat/agent.py`) over BIM/CDE data — up to `MAX_TOOL_ROUNDS` (10) tool
+rounds per user turn, each round highlighting matched elements in the 3D viewer via the response's
+`elementIds`. `ai_provider` selects one of `openai` / `anthropic` / `mistral` / `ollama` / `lmstudio`
+(with a matching `*_config` body key — `openai_config`, `anthropic_config`, etc. — carrying
+`apiKey`/`model`/`baseUrl` as applicable); OpenAI/Anthropic/Mistral/Ollama/LM Studio all funnel through
+one provider-agnostic tool-dispatch loop, with the Anthropic Messages API's different wire shape
+(`system` field, `input_schema` tools, `content` blocks, collapsed `tool_result` messages) translated
+at the request/response boundary only (`_call_llm_anthropic`/`_call_llm_stream_anthropic`).
+
+Auth on `/chat` and `/chat/stream` is **optional, not required** — these routes intentionally also
+serve anonymous `/shareXXX` visitors (see `App.jsx`'s auth-gate comment). A logged-in user
+additionally gets ISO 19650 org-scoped WIP visibility in `list_documents`/`get_document_status`
+results (same scoping `GET .../documents` enforces, see Documents below) and a working
+`get_notifications` tool; an anonymous session sees only unscoped WIP and gets a graceful
+"requires being logged in" message from `get_notifications` instead of a guess or an error.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/servers` | List configured Speckle servers (name/url/token) for the frontend's server-switcher dropdown — despite living under this section in the code, it has nothing to do with AI providers |
 | `POST` | `/chat` | Agentic chat with BIM context. Body: `{model_id, message, history, ai_provider, ...}`. Returns `{text, elementIds, toolsUsed}` |
-| `POST` | `/chat/stream` | Same as `/chat`, streamed (SSE) |
+| `POST` | `/chat/stream` | Same as `/chat`, streamed (SSE): `reasoning` / `tool_start` / `tool_done` / `text_delta` / `elements` / `done` events |
+
+**Tool catalog** (`_TOOLS` in `chat/agent.py`) — every tool highlights its matched elements in the
+viewer unless noted otherwise:
+
+| Tool | Description |
+|------|-------------|
+| `filter_elements` | Highlight elements by category, ifc_class, storey, name |
+| `get_summary` | Aggregate counts/volumes grouped by category, storey, or ifc_class |
+| `query_by_parameter` | Find elements by any parameter key/value; numeric ops (gt/lt/gte/lte) |
+| `get_materials` | List materials with element counts and volumes |
+| `get_profiles` | List structural profiles and steel grades |
+| `estimate_cost` | Apply user-supplied unit rates to quantities for a rough cost estimate |
+| `get_model_changes` | Diff current model against another version (added/removed/changed) |
+| `check_data_quality` | BIM QA score + issue breakdown (missing names/storeys/materials/geometry, duplicates) |
+| `get_qa_elements` | Drill into one data-quality issue and highlight the affected elements |
+| `get_parameter_completeness` | Fill-rate % per parameter, worst-covered first |
+| `get_version_history` | Element-count/volume/area trend across every ingested version |
+| `get_schedule` | 4D schedule tasks (status, critical path, float) and dependencies, filterable by status/critical/milestone |
+| `get_element_tasks` | Which schedule tasks a specific element is linked to |
+| `find_nearby_elements` | Elements within a radius (m) of a reference element or coordinate |
+| `get_related_elements` | One-hop parent/room/space relationships (host wall, room contents) |
+| `get_connectivity` | Multi-hop connectivity graph — IFC relationships plus geometric touching |
+| `get_element_details` | Full details (geometry, all parameters) for one element |
+| `semantic_search` | Find elements by meaning/description rather than exact text match |
+| `check_clashes` | Geometric clash detection between two categories/IFC classes within this model |
+| `check_federated_clashes` | Geometric clash detection between this model and a *different* model — only the current model's elements are highlightable |
+| `list_ids_specs` / `check_ids_compliance` | buildingSMART IDS spec compliance checking |
+| `list_documents` / `get_document_status` | CDE document status, approval gates, suitability code, folder, and linked element — read-only, org-scoped WIP visibility |
+| `list_topics` / `get_topic` / `create_topic` / `update_topic` / `list_topic_comments` / `add_topic_comment` | BCF coordination issues — log/track/discuss findings as trackable topics |
+| `get_notifications` | The logged-in user's notifications for this project — unavailable when anonymous |
 
 #### Auth
 
@@ -363,6 +409,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `VITE_OLLAMA_BASE_URL` / `VITE_OLLAMA_MODEL` | No | Local Ollama endpoint and model name |
 | `VITE_LMSTUDIO_BASE_URL` / `VITE_LMSTUDIO_MODEL` | No | LM Studio endpoint and model name |
 | `VITE_MISTRAL_API_KEY` | No | Mistral AI key (also becomes `MISTRAL_API_KEY` server-side) |
+| `VITE_ANTHROPIC_API_KEY` | No | Anthropic (Claude) key for the AI chat agent (also becomes `ANTHROPIC_API_KEY` server-side) |
 
 ### `bim-normalizer/.env` — local Claude Code MCP integration only
 

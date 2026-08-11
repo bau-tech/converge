@@ -35,6 +35,24 @@ def require_login(request: Request) -> CurrentUser:
     )
 
 
+def get_current_user_optional(request: Request) -> CurrentUser | None:
+    """Same session decode as require_login, but never raises — for endpoints
+    that must keep working for anonymous callers (e.g. chat.py's /chat and
+    /chat/stream, which intentionally serve anonymous /shareXXX visitors,
+    see App.jsx's auth gate comment) while still unlocking extra behavior
+    (org-scoped WIP visibility, user-scoped notifications) for whoever is
+    actually logged in."""
+    if settings.DASHBOARD_AUTH_BYPASS:
+        return CurrentUser(guid=_BYPASS_USER_GUID, email="dev-bypass@local", name="Dev Bypass")
+    payload = decode_session(request.cookies.get(SESSION_COOKIE))
+    if not payload:
+        return None
+    return CurrentUser(
+        guid=payload["sub"], email=payload["email"], name=payload["name"],
+        org_id=payload.get("org_id"), org_name=payload.get("org_name"),
+    )
+
+
 # Any CDE role at all — used where an endpoint just needs "some standing on
 # this project," not a specific tier (e.g. uploading, deleting, linking).
 ANY_PROJECT_ROLE = ("author", "reviewer", "approver")

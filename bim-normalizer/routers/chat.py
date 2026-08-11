@@ -2,9 +2,11 @@ import asyncio
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from dashboard_auth.dependencies import CurrentUser, get_current_user_optional
 
 router = APIRouter(tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -19,6 +21,7 @@ class ChatRequest(BaseModel):
     ollama_config: dict | None = None
     lmstudio_config: dict | None = None
     mistral_config: dict | None = None
+    anthropic_config: dict | None = None
     model_context: dict | None = None  # optional frontend-supplied context (families, phases, worksets, etc.)
 
 
@@ -42,6 +45,11 @@ def _resolve_provider(request: ChatRequest) -> tuple[str, str, str, str]:
         api_key = cfg.get("apiKey") or os.getenv("MISTRAL_API_KEY", "")
         model_name = cfg.get("model", "mistral-large-latest")
         base_url = ""
+    elif provider == "anthropic":
+        cfg = request.anthropic_config or {}
+        api_key = cfg.get("apiKey") or os.getenv("ANTHROPIC_API_KEY", "")
+        model_name = cfg.get("model", "claude-sonnet-5")
+        base_url = ""
     elif provider == "ollama":
         cfg = request.ollama_config or {}
         api_key = ""
@@ -56,11 +64,17 @@ def _resolve_provider(request: ChatRequest) -> tuple[str, str, str, str]:
 
 
 @router.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, user: CurrentUser | None = Depends(get_current_user_optional)):
     """
     Agentic chat endpoint. Calls the configured LLM with tools that can
     query the normalizer DB (filter elements, get summaries). Returns
     {text, elementIds, toolsUsed} so the frontend can highlight elements.
+
+    Auth is optional (not required) — this endpoint intentionally also
+    serves anonymous /shareXXX visitors (see App.jsx's auth-gate comment).
+    `user` is None for those; tools that need real identity (notifications,
+    org-scoped WIP document visibility) degrade gracefully rather than
+    guessing when it's absent.
     """
     from chat.agent import run_chat_agent
     from db.connection import get_conn, release_conn
@@ -83,6 +97,7 @@ async def chat(request: ChatRequest):
             model_name,
             base_url,
             request.model_context,
+            user,
         )
         return result
     except Exception as exc:
@@ -93,7 +108,7 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, user: CurrentUser | None = Depends(get_current_user_optional)):
     """
     SSE streaming variant of /chat. Yields events:
       data: {"type":"reasoning","text":"..."}
@@ -102,6 +117,8 @@ async def chat_stream(request: ChatRequest):
       data: {"type":"text_delta","delta":"..."}
       data: {"type":"elements","ids":[...]}
       data: {"type":"done","toolsUsed":[...]}
+
+    Auth is optional here too — see chat()'s docstring above.
     """
     import asyncio
     from chat.agent import stream_chat_agent
@@ -125,6 +142,7 @@ async def chat_stream(request: ChatRequest):
                 model_name,
                 base_url,
                 request.model_context,
+                user,
             ):
                 yield event
                 await asyncio.sleep(0)  # yield control so FastAPI can flush

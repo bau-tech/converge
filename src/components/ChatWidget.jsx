@@ -120,6 +120,10 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         apiKey: localStorage.getItem('chat_mistral_key') || RUNTIME_CONFIG.MISTRAL_API_KEY,
         model: localStorage.getItem('chat_mistral_model') || 'mistral-large-latest'
     }))
+    const [anthropicConfig, setAnthropicConfig] = useState(() => ({
+        apiKey: localStorage.getItem('chat_anthropic_key') || RUNTIME_CONFIG.ANTHROPIC_API_KEY,
+        model: localStorage.getItem('chat_anthropic_model') || 'claude-sonnet-5'
+    }))
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -139,6 +143,8 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         localStorage.setItem('chat_lmstudio_model', lmStudioConfig.model)
         localStorage.setItem('chat_mistral_key', mistralConfig.apiKey)
         localStorage.setItem('chat_mistral_model', mistralConfig.model)
+        localStorage.setItem('chat_anthropic_key', anthropicConfig.apiKey)
+        localStorage.setItem('chat_anthropic_model', anthropicConfig.model)
         setShowSettings(false)
     }
 
@@ -167,6 +173,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             ollama_config: provider === 'ollama' ? ollamaConfig : undefined,
             lmstudio_config: provider === 'lmstudio' ? lmStudioConfig : undefined,
             mistral_config: provider === 'mistral' ? mistralConfig : undefined,
+            anthropic_config: provider === 'anthropic' ? anthropicConfig : undefined,
             model_context: modelContext || undefined,
         })
 
@@ -322,7 +329,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 <div>
                                     <h3 className="font-medium text-xs">AI Assistant</h3>
                                     <p className="text-[9px] text-zinc-400">
-                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
+                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'anthropic' ? `Claude (${anthropicConfig.model})` : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
                                     </p>
                                 </div>
                             </div>
@@ -376,13 +383,20 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                     <div className="p-2 space-y-2">
                                         <div className="space-y-1.5">
                                             <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">AI Provider</label>
-                                            <div className="grid grid-cols-2 gap-1.5">
+                                            <div className="grid grid-cols-3 gap-1.5">
                                                 <button
                                                     onClick={() => setProvider('openai')}
                                                     className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'openai' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
                                                     <Cpu className="w-2.5 h-2.5" />
                                                     OpenAI
+                                                </button>
+                                                <button
+                                                    onClick={() => setProvider('anthropic')}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'anthropic' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                >
+                                                    <Cpu className="w-2.5 h-2.5" />
+                                                    Claude
                                                 </button>
                                                 <button
                                                     onClick={() => setProvider('mistral')}
@@ -477,6 +491,31 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                         value={mistralConfig.model}
                                                         onChange={(e) => setMistralConfig(prev => ({ ...prev, model: e.target.value }))}
                                                         placeholder="mistral-large-latest"
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {provider === 'anthropic' && (
+                                            <div className="space-y-1.5 pt-1">
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Anthropic API Key</label>
+                                                    <input
+                                                        type="password"
+                                                        value={anthropicConfig.apiKey}
+                                                        onChange={(e) => setAnthropicConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                                                        placeholder="sk-ant-..."
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
+                                                    <input
+                                                        type="text"
+                                                        value={anthropicConfig.model}
+                                                        onChange={(e) => setAnthropicConfig(prev => ({ ...prev, model: e.target.value }))}
+                                                        placeholder="claude-sonnet-5"
                                                         className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
                                                     />
                                                 </div>

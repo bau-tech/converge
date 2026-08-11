@@ -1,0 +1,6 @@
+# Local test-only dependencies — not installed in the production image (the
+# Dockerfile only ever runs `pip install -r requirements.txt`; this file and
+# tests/ are excluded from the build context by .dockerignore). Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+pytest
+pytest-mock
