@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import {
     ReactFlow, ReactFlowProvider, Background, Handle, Position, useReactFlow,
-    useNodesState, useEdgesState,
+    useNodesState, useEdgesState, MarkerType,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { X, Loader2, Waypoints } from 'lucide-react'
@@ -42,6 +42,29 @@ const CATEGORY_LABEL = {
     opening: 'openings',
 }
 const categoryFor = (type) => EDGE_CATEGORY[type] || 'structural'
+
+// "touches" is the only geometric-inference edge (zero-tolerance bbox
+// overlap, a heuristic) — every other type comes from real, stored
+// relationship data (Revit parent/room/space parameters, or actual IFC
+// relationship entities extracted at ingest time — see
+// get_element_connectivity's own docstring in db/query.py). Rendered dashed
+// vs solid so confidence is visible without reading the edge label.
+const INFERRED_TYPES = new Set(['touches'])
+
+// Types whose (source, target) direction carries real hierarchical meaning —
+// confirmed against the actual write side (db/insert.py's build_relationships
+// for parent/room/space, ifc/relationship_types.py's IFC_GRAPH_REL_TYPES for
+// the rest): parent/room/space point element->host, aggregates points
+// whole->part, contained_in points container->contained, voids points
+// element->opening, fills points opening->filler. "connects" and "touches"
+// are both peer relationships between two elements with no meaningful
+// "which one is upstream" — left unmarked rather than guessing a direction.
+const DIRECTIONAL_TYPES = new Set(['parent', 'room', 'space', 'aggregates', 'contained_in', 'voids', 'fills'])
+
+// Baseline opacity by hop distance from the traced element — reinforces "how
+// far is this" before anyone has to parse ring position. Center (hop 0)
+// always full opacity; floors out at 0.35 so even distant nodes stay legible.
+const hopOpacity = (hop) => Math.max(0.35, 1 - hop * 0.28)
 
 // Plain, read-only node card — no delete/edit affordances since this graph
 // is never edited, unlike idsGraphNodeTypes.jsx's NodeShell.
@@ -130,7 +153,7 @@ function layoutRadial(nodes, edges, centerElementId) {
     return positioned
 }
 
-function ConnectivityGraphInner({ normalizerUrl, elementId, hops, onCenterChange, viewerRef }) {
+function ConnectivityGraphInner({ normalizerUrl, elementId, hops, onCenterChange, viewerRef, hoveredCategory }) {
     const [graph, setGraph] = useState(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
@@ -170,26 +193,65 @@ function ConnectivityGraphInner({ normalizerUrl, elementId, hops, onCenterChange
     useEffect(() => {
         if (!graph || !centerElementId) { setNodes([]); setEdges([]); return }
         const positions = layoutRadial(graph.nodes, graph.edges, centerElementId)
+        const hopById = new Map(graph.nodes.map((n) => [n.element_id, n.hop]))
         setNodes(graph.nodes.map((n) => ({
             id: n.element_id,
             type: 'connectivity',
             position: positions.get(n.element_id) || { x: 0, y: 0 },
             data: {
                 name: n.name, category: n.category, ifcClass: n.ifc_class,
-                speckleId: n.speckle_id, isCenter: n.element_id === centerElementId,
+                speckleId: n.speckle_id, isCenter: n.element_id === centerElementId, hop: n.hop,
             },
         })))
-        setEdges(graph.edges.map((e, i) => ({
-            id: `e${i}`,
-            source: e.source,
-            target: e.target,
-            label: e.type,
-            labelStyle: { fontSize: 9, fill: 'var(--speckle-foreground-3)' },
-            style: { stroke: CATEGORY_COLOR[categoryFor(e.type)], strokeWidth: 1.6 },
-        })))
+        setEdges(graph.edges.map((e, i) => {
+            const category = categoryFor(e.type)
+            // An edge "belongs" to whichever endpoint is further from center —
+            // fades to match that node's own hop-distance opacity.
+            const edgeHop = Math.max(hopById.get(e.source) ?? 0, hopById.get(e.target) ?? 0)
+            return {
+                id: `e${i}`,
+                source: e.source,
+                target: e.target,
+                label: e.type,
+                labelStyle: { fontSize: 9, fill: 'var(--speckle-foreground-3)' },
+                data: { category, hop: edgeHop },
+                style: {
+                    stroke: CATEGORY_COLOR[category],
+                    strokeWidth: 1.6,
+                    strokeDasharray: INFERRED_TYPES.has(e.type) ? '5 4' : undefined,
+                },
+                markerEnd: DIRECTIONAL_TYPES.has(e.type)
+                    ? { type: MarkerType.ArrowClosed, width: 14, height: 14, color: CATEGORY_COLOR[category] }
+                    : undefined,
+            }
+        }))
         setTimeout(() => fitView({ padding: 0.25 }), 0)
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [graph, centerElementId])
+
+    // Hop-distance fade and legend hover-highlight both just adjust opacity at
+    // render time — computed here rather than baked into the stored nodes/
+    // edges state above, so dragging a node (which persists via
+    // onNodesChange) and hovering the legend never fight over the same field.
+    const displayNodes = useMemo(() => {
+        // A node stays fully visible on hover-highlight if it's the center, or
+        // has at least one edge in the hovered category — otherwise it dims
+        // along with everything else not in that category.
+        const litNodeIds = hoveredCategory
+            ? new Set(edges.filter((e) => e.data?.category === hoveredCategory).flatMap((e) => [e.source, e.target]))
+            : null
+        return nodes.map((n) => {
+            const baseOpacity = hopOpacity(n.data.hop ?? 0)
+            const dim = litNodeIds && !n.data.isCenter && !litNodeIds.has(n.id)
+            return { ...n, style: { ...n.style, opacity: dim ? baseOpacity * 0.25 : baseOpacity } }
+        })
+    }, [nodes, edges, hoveredCategory])
+
+    const displayEdges = useMemo(() => edges.map((e) => {
+        const baseOpacity = hopOpacity(e.data?.hop ?? 0)
+        const dim = hoveredCategory && e.data?.category !== hoveredCategory
+        return { ...e, style: { ...e.style, opacity: dim ? baseOpacity * 0.15 : baseOpacity } }
+    }), [edges, hoveredCategory])
 
     const handleNodeClick = (_evt, node) => {
         if (node.data?.speckleId) viewerRef?.current?.selectObject(node.data.speckleId)
@@ -222,8 +284,8 @@ function ConnectivityGraphInner({ normalizerUrl, elementId, hops, onCenterChange
 
     return (
         <ReactFlow
-            nodes={nodes}
-            edges={edges}
+            nodes={displayNodes}
+            edges={displayEdges}
             nodeTypes={nodeTypes}
             colorMode={colorMode}
             onNodesChange={onNodesChange}
@@ -243,6 +305,7 @@ export function ElementConnectivityPanel({ normalizerUrl, elementId, elementName
     const [width, startResize] = useDrawerWidth()
     const [hops, setHops] = useState(2)
     const [center, setCenter] = useState({ elementId, name: elementName })
+    const [hoveredCategory, setHoveredCategory] = useState(null)
 
     useEffect(() => {
         setCenter({ elementId, name: elementName })
@@ -291,7 +354,13 @@ export function ElementConnectivityPanel({ normalizerUrl, elementId, elementName
                     </div>
                     <div className="flex items-center gap-3 text-[10px] text-zinc-500">
                         {Object.entries(CATEGORY_LABEL).map(([cat, label]) => (
-                            <span key={cat} className="flex items-center gap-1.5">
+                            <span
+                                key={cat}
+                                className="flex items-center gap-1.5 cursor-default rounded px-1 -mx-1 transition-colors"
+                                style={hoveredCategory === cat ? { color: 'var(--speckle-foreground)', background: 'var(--speckle-outline-3)' } : undefined}
+                                onMouseEnter={() => setHoveredCategory(cat)}
+                                onMouseLeave={() => setHoveredCategory((c) => (c === cat ? null : c))}
+                            >
                                 <span className="w-3 h-0.5 rounded shrink-0" style={{ background: CATEGORY_COLOR[cat] }} />
                                 {label}
                             </span>
@@ -308,12 +377,15 @@ export function ElementConnectivityPanel({ normalizerUrl, elementId, elementName
                             hops={hops}
                             onCenterChange={setCenter}
                             viewerRef={viewerRef}
+                            hoveredCategory={hoveredCategory}
                         />
                     </ReactFlowProvider>
                 </div>
 
                 <p className="text-[10.5px] text-zinc-600 shrink-0">
-                    Click a node to recenter the graph on it and highlight it in the 3D view.
+                    Click a node to recenter and highlight it in 3D · hover a legend item to isolate it · dashed
+                    lines are inferred from geometry, solid lines are real relationship data · arrows show
+                    direction where it&apos;s meaningful.
                 </p>
             </div>
         </motion.div>
