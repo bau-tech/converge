@@ -755,7 +755,7 @@ def admin_create_user(body: UserCreate, _email: str = Depends(require_admin_sess
         """
         INSERT INTO bcf_users (email, name, password_hash)
         VALUES (%s, %s, %s)
-        RETURNING guid, email, name, created_at
+        RETURNING guid, email, name, created_at, notify_email
         """,
         (body.email, body.name, hash_password(body.password)),
     )
