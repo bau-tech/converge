@@ -65,6 +65,20 @@ def _should_skip(speckle_type: str) -> bool:
     return any(frag in speckle_type for frag in _SKIP_FRAGMENTS)
 
 
+def _child_elements(obj: Base) -> list | None:
+    """Read an object's child collection, checking both the plain `elements`
+    attribute and specklepy's `@elements` "detached property" convention —
+    Speckle's own server-side IFC FileImportService puts every aggregated
+    child (e.g. an IfcStair's IfcRailing/IfcMember/IfcStairFlight, related via
+    IFC's Decomposes/IfcRelAggregates) under `@elements`, not `elements`;
+    Revit/Tekla connector output observed elsewhere in this file uses the
+    plain name. Confirmed via a live ingest of a native-IFC-imported Speckle
+    commit where `getattr(child, "elements", None)` silently returned None
+    for every aggregated child, dropping them from flatten_elements' results
+    entirely (no error, no fallback — they just never appeared)."""
+    return getattr(obj, "elements", None) or getattr(obj, "@elements", None)
+
+
 def _fetch_commit_meta(stream_id: str, commit_id: str, token: str,
                        server_url: str = None) -> dict:
     """
@@ -372,7 +386,7 @@ def flatten_elements(
         return []
 
     results: list[tuple] = []
-    elements = getattr(root, "elements", None) or []
+    elements = _child_elements(root) or []
 
     for child in elements:
         if not isinstance(child, Base):
@@ -421,7 +435,7 @@ def flatten_elements(
             # through, so e.g. a floor-hosted Opening classifies from its own
             # speckle_type instead of short-circuiting to "Floors" via
             # classify_element()'s category_hint-first Revit branch.
-            if getattr(child, "elements", None) and st != "Objects.Data.TeklaObject":
+            if _child_elements(child) and st != "Objects.Data.TeklaObject":
                 results.extend(flatten_elements(child, _depth + 1, _max_depth, ""))
 
     return results

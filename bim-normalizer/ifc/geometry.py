@@ -96,10 +96,55 @@ def _centroid(bbox_min: list, bbox_max: list) -> list[float]:
 
 
 def _bbox_volume_m3(bbox_min: list, bbox_max: list, units: str) -> float:
-    dx = length_to_m(abs(bbox_max[0] - bbox_min[0]), units)
-    dy = length_to_m(abs(bbox_max[1] - bbox_min[1]), units)
-    dz = length_to_m(abs(bbox_max[2] - bbox_min[2]), units)
+    factor = _plausible_length_factor(bbox_min, bbox_max, units)
+    dx = abs(bbox_max[0] - bbox_min[0]) * factor
+    dy = abs(bbox_max[1] - bbox_min[1]) * factor
+    dz = abs(bbox_max[2] - bbox_min[2]) * factor
     return dx * dy * dz
+
+
+def _bbox_area_m2(bbox_min: list, bbox_max: list, units: str) -> float:
+    """Total surface area of the bounding box — extract_geometry's no-mesh
+    fallback estimate, and the fallback when mesh-derived area is
+    implausible (see _plausible_length_factor)."""
+    factor = _plausible_length_factor(bbox_min, bbox_max, units)
+    dx = abs(bbox_max[0] - bbox_min[0]) * factor
+    dy = abs(bbox_max[1] - bbox_min[1]) * factor
+    dz = abs(bbox_max[2] - bbox_min[2]) * factor
+    return 2 * (dx * dy + dy * dz + dx * dz)
+
+
+# Plausible single-BIM-element bounding-box diagonal range, in metres: from
+# 1cm (a small fitting) to 300m (a large roof/site slab) — deliberately wide,
+# this only needs to separate "obviously already metres" from "obviously not."
+_PLAUSIBLE_BBOX_DIAGONAL_M = (0.01, 300.0)
+
+
+def _plausible_length_factor(bbox_min: list, bbox_max: list, units: str) -> float:
+    """Like length_to_m(1.0, units), but cross-checked against the object's
+    own raw (unconverted) bbox diagonal — confirmed via a live ingest of a
+    native-IFC-imported Speckle commit that a leaf object's own `units`
+    metadata can disagree with the actual scale of its coordinates: walls
+    were correctly tagged "m", but door/window/furniture objects were tagged
+    "mm" despite their raw mesh coordinates already being in metres (a
+    46cm-wide door's raw, unconverted bbox was already ~0.47, not ~470).
+    Applying the declared mm->m factor on top of already-metre-scale
+    coordinates silently produced volumes/areas ~1e9x/1e6x too small instead
+    of erroring.
+
+    A real building element's raw bbox diagonal is never plausible as
+    millimetres if it's already under ~1 in its raw scale (a "1mm door"
+    doesn't exist), so: if the declared unit's factor is not already 1.0
+    (metres) but the RAW, unconverted diagonal already falls in a plausible
+    metre range, trust the raw scale over the declared unit."""
+    declared_factor = length_to_m(1.0, units)
+    if declared_factor == 1.0:
+        return declared_factor
+    raw_diag = sum((bbox_max[i] - bbox_min[i]) ** 2 for i in range(3)) ** 0.5
+    lo, hi = _PLAUSIBLE_BBOX_DIAGONAL_M
+    if lo <= raw_diag <= hi:
+        return 1.0
+    return declared_factor
 
 
 def _get_transform_matrix(transform_obj) -> list | None:
@@ -367,11 +412,25 @@ def extract_geometry(obj: Base, instance_defs: dict | None = None) -> dict | Non
 
         bbox_min, bbox_max = _compute_bbox(pts)
         centroid = _centroid(bbox_min, bbox_max)
+
+        # Resolved once here (cross-checked against this object's own raw
+        # bbox — see _plausible_length_factor) and reused for both volume and
+        # area, rather than each independently re-deriving a conversion
+        # factor from the (possibly wrong) `units` string.
+        length_factor = _plausible_length_factor(bbox_min, bbox_max, units)
+        if length_factor != length_to_m(1.0, units):
+            logger.warning(
+                "extract_geometry: object %s declares units=%r but its raw bbox diagonal "
+                "looks like it's already in metres — treating as metres instead of trusting "
+                "the declared unit for volume/area",
+                getattr(obj, "id", "?"), units,
+            )
+
         volume_m3 = (
-            _compute_volume_from_mesh(pts, faces, units)
+            _compute_volume_from_mesh(pts, faces, length_factor)
             or _bbox_volume_m3(bbox_min, bbox_max, units)
         )
-        area_m2 = _compute_area_from_faces(pts, faces, units)
+        area_m2 = _compute_area_from_faces(pts, faces, length_factor)
 
         # Trim to storage limit, remove faces that reference truncated vertices
         trimmed_pts = pts[:_MESH_VERTEX_LIMIT]
@@ -666,11 +725,16 @@ def extract_axis_footprint(obj: Base, bbox_min: list | None, bbox_max: list | No
     }
 
 
-def _compute_volume_from_mesh(pts: list, faces: list, units: str) -> float | None:
+def _compute_volume_from_mesh(pts: list, faces: list, length_factor: float) -> float | None:
     """
     Signed-volume sum (divergence theorem) over triangulated faces.
     Accurate for closed, watertight meshes. Returns None if the mesh sums to zero
     (open/degenerate mesh), so the caller can fall back to a bbox estimate.
+
+    `length_factor` (raw-units-to-metres) is resolved by the caller via
+    _plausible_length_factor rather than a bare length_to_m(1.0, units) here —
+    see that function's docstring for why a per-object `units` string alone
+    isn't trustworthy for this codebase's Speckle-IFC-imported data.
     """
     if not faces or len(pts) < 4:
         return None
@@ -706,14 +770,14 @@ def _compute_volume_from_mesh(pts: list, faces: list, units: str) -> float | Non
             i = end
         if total == 0.0:
             return None
-        factor = length_to_m(1.0, units) ** 3
-        return abs(total) / 6.0 * factor
+        return abs(total) / 6.0 * (length_factor ** 3)
     except Exception:
         return None
 
 
-def _compute_area_from_faces(pts: list, faces: list, units: str) -> float | None:
-    """Approximate surface area by summing triangle areas from face list."""
+def _compute_area_from_faces(pts: list, faces: list, length_factor: float) -> float | None:
+    """Approximate surface area by summing triangle areas from face list.
+    See _compute_volume_from_mesh's docstring re: `length_factor`."""
     if not faces or len(pts) < 3:
         return None
 
@@ -751,7 +815,6 @@ def _compute_area_from_faces(pts: list, faces: list, units: str) -> float | None
                 total += (cx*cx + cy*cy + cz*cz) ** 0.5 / 2
             i = end
 
-        # Convert from source units² to m²
-        return total * length_to_m(1.0, units) ** 2
+        return total * (length_factor ** 2)
     except Exception:
         return None
