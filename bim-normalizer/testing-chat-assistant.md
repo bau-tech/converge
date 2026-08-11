@@ -156,7 +156,41 @@ shape as every other provider, confirming the Anthropic response/stream
 converters produce output indistinguishable from the OpenAI-compatible path
 to everything downstream.
 
-## 7. Manual UI spot-check (required once per non-trivial change to this feature)
+## 7. Report generation tool + tool-call resilience
+
+The `generate_report` tool shares `reports/generate.py` with the REST
+endpoint and MCP server — see `testing-reports.md` for full report-type/
+format coverage and its "cross-surface consistency" step (generate the same
+report via REST, chat, and MCP, confirm identical content). Here, just
+confirm the tool is reachable from chat at all:
+
+```bash
+curl -sX POST "http://<host>:<port>/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"model_id": "<model_id>", "message": "Generate a bill of materials report", "history": []}' \
+  | python3 -m json.tool
+```
+
+Expect a `generate_report` tool call and a text response describing the
+generated file (chat has no live 3D viewer, so a `model_summary` request
+here should still succeed, just without a 3D-view section — same as the
+MCP surface).
+
+Two narrower resilience checks worth confirming after touching the tool
+dispatch loop (`run_chat_agent`/`stream_chat_agent` in `chat/agent.py`):
+
+- **Malformed tool-call JSON shouldn't crash the whole turn.** Hard to
+  trigger from a well-behaved hosted provider — this mostly matters with
+  local ollama/lmstudio backends, which are more prone to truncated/invalid
+  JSON in tool-call arguments. If you hit one, confirm the chat response
+  still completes (with the model retrying or explaining the failure)
+  instead of the request just dying with a 500.
+- **`get_qa_elements` ignores an absurd `limit`.** Ask something like "show
+  me 999999 unclassified elements" and confirm the tool result stays
+  bounded (500 rows max — `min(int(args.get("limit") or 50), 500)`) rather
+  than dumping an unbounded result into the conversation's token context.
+
+## 8. Manual UI spot-check (required once per non-trivial change to this feature)
 
 Open the dashboard, open the AI Assistant chat widget, open Settings, and
 confirm a fifth **Claude** provider tab is selectable alongside
