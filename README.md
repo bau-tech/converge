@@ -45,7 +45,7 @@ Browser — React + Vite
 Claude Code / Claude.ai — MCP client
   │ stdio (local)  or  HTTPS/streamable-HTTP (remote)
   ▼
-speckle_mcp.py :8003  (speckle-ifc server)
+converge_mcp.py :8003  (converge-mcp server)
   FastMCP — 72 tools + 2 resources · ifcopenshell in-memory IFC session
   │
   └─ REST ─► bim-normalizer :8002
@@ -82,7 +82,7 @@ Both the Speckle connectors **v3** instance/definition split (geometry on `obj.d
 
 ## System requirements
 
-Idle, the full stack (postgres, nextcloud, bim-normalizer, bcf-server, speckle-mcp, dashboard) sits around 500MB RAM. The real constraint is ingest, not steady state: each ingest worker can independently balloon to several GB while processing a large Revit/IFC/Tekla commit (specklepy materializes the whole commit tree — meshes included — before any per-element processing), and bim-normalizer runs `cpu_count - 2` of those workers concurrently (see `bim-normalizer/process_pool.py`). More cores means more workers means more simultaneous multi-GB spikes possible, so RAM and CPU count should scale together, not RAM alone.
+Idle, the full stack (postgres, nextcloud, bim-normalizer, bcf-server, converge-mcp, dashboard) sits around 500MB RAM. The real constraint is ingest, not steady state: each ingest worker can independently balloon to several GB while processing a large Revit/IFC/Tekla commit (specklepy materializes the whole commit tree — meshes included — before any per-element processing), and bim-normalizer runs `cpu_count - 2` of those workers concurrently (see `bim-normalizer/process_pool.py`). More cores means more workers means more simultaneous multi-GB spikes possible, so RAM and CPU count should scale together, not RAM alone.
 
 | Tier | RAM | Fits |
 |---|---|---|
@@ -109,7 +109,7 @@ Everything is orchestrated by the single [docker-compose.yml](docker-compose.yml
 ```bash
 cp .env.example .env        # fill in SPECKLE_TOKEN, PG_*, MCP_API_KEY, BCF_API_KEY, etc.
 docker compose up -d        # starts postgres, nextcloud, bim-normalizer (:8002),
-                             # bcf-server (:8004), speckle-mcp (:8003), dashboard (:8080)
+                             # bcf-server (:8004), converge-mcp (:8003), dashboard (:8080)
 ```
 
 `docker compose up -d` builds both application images locally on first run. To skip the build and run the already-published release images from Docker Hub instead:
@@ -123,7 +123,7 @@ See [Deployment (Docker)](#deployment-docker) below for pinning a specific versi
 
 ### 3. MCP server (local, Claude Code)
 
-Copy `.mcp.json.example` to `.mcp.json` (git-ignored — it holds your local Python path and Speckle server URL) and fill in the `command`/`args`/`env` values for your machine. Claude Code picks it up automatically and runs `speckle_mcp.py` directly over stdio. Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — see [MCP server](#mcp-server-speckle_mcppy) below and `bim-normalizer/.env.example`.
+Copy `.mcp.json.example` to `.mcp.json` (git-ignored — it holds your local Python path and Speckle server URL) and fill in the `command`/`args`/`env` values for your machine. Claude Code picks it up automatically and runs `converge_mcp.py` directly over stdio. Set `SPECKLE_TOKEN` in `bim-normalizer/.env` — see [MCP server](#mcp-server-converge_mcppy) below and `bim-normalizer/.env.example`.
 
 Every environment variable (required and optional) is documented inline in `.env.example` / `bim-normalizer/.env.example` — see [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md#environment-variables) for the full table if you'd rather read it as reference than as comments.
 
@@ -154,7 +154,7 @@ A standalone, session-authenticated admin panel (`/admin`, linked from the "Admi
 
 ---
 
-## MCP server (`speckle_mcp.py`)
+## MCP server (`converge_mcp.py`)
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server — 72 tools + 2 resources — that lets Claude read and reason over your Speckle models: an in-memory `ifcopenshell` IFC session, Speckle GraphQL, normalizer REST queries, filters/overrides, QA/diff/semantic-search intelligence tools, clash/schedule checks, Nextcloud documents + BCF, and 5D quantity/BoQ export.
 
@@ -170,7 +170,7 @@ See [`bim-normalizer/npm-mcp-setup.md`](bim-normalizer/npm-mcp-setup.md) for the
 
 **Summary:**
 1. Set a strong `MCP_API_KEY` (and `MCP_ALLOWED_HOSTS`) in `.env`
-2. Start the `speckle-mcp` Docker service: `docker compose up -d speckle-mcp`
+2. Start the `converge-mcp` Docker service: `docker compose up -d converge-mcp`
 3. In NPM, create a proxy host pointing to `<docker-host-IP>:8003`
 4. Enable SSL
 5. On remote machines, use this `.mcp.json`:
@@ -178,7 +178,7 @@ See [`bim-normalizer/npm-mcp-setup.md`](bim-normalizer/npm-mcp-setup.md) for the
 ```json
 {
   "mcpServers": {
-    "speckle-ifc": {
+    "converge-mcp": {
       "type": "http",
       "url": "https://mcp.example.com/mcp",
       "headers": { "X-Api-Key": "<your MCP_API_KEY>" }
@@ -224,7 +224,7 @@ Clash/IDS check run ──► failures/clashes mapped to speckle_id ──► vi
 ### Deployment (Docker)
 
 ```bash
-# Build and start all services (postgres, bim-normalizer, speckle-mcp, bcf-server, dashboard)
+# Build and start all services (postgres, bim-normalizer, converge-mcp, bcf-server, dashboard)
 docker compose up -d --build
 
 # Frontend served at :8080 (nginx proxies /normalizer/ and /bcf/)
@@ -240,7 +240,7 @@ Both images are published on every push to `master` and on every `v*.*.*` tag ([
 
 Each push produces four tags per image: `latest` (default branch only), a semver `X.Y.Z` + `X.Y` pair (tag pushes only, e.g. `0.1.0` / `0.1`), and the short commit SHA. The dashboard image bakes in no secrets — all `VITE_*` config is injected at container start from environment variables (`config.js.template`, `src/runtimeConfig.js`), so the same published image works for any deployment without a rebuild.
 
-[`docker-compose.release.yml`](docker-compose.release.yml) is a ready-to-use copy of `docker-compose.yml` with `bim-normalizer`/`speckle-mcp`/`bcf-server`/`converge` pulling from Docker Hub instead of building:
+[`docker-compose.release.yml`](docker-compose.release.yml) is a ready-to-use copy of `docker-compose.yml` with `bim-normalizer`/`converge-mcp`/`bcf-server`/`converge` pulling from Docker Hub instead of building:
 
 ```bash
 cp .env.example .env

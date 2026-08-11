@@ -2,7 +2,7 @@
 BCF-API server (2.1 + 3.0)
 ============================
 Standalone FastAPI process (separate container from bim-normalizer, same
-Dockerfile/build context — mirrors how speckle-mcp is wired in
+Dockerfile/build context — mirrors how converge-mcp is wired in
 docker-compose.yml). Talks to the same Postgres instance via its own
 connection pool.
 

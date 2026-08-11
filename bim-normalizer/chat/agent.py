@@ -1153,7 +1153,7 @@ _COST_UNIT_FIELDS = {"m3": "volume_m3", "m2": "area_m2", "count": "count"}
 
 def _apply_cost_rates(summary_rows: list[dict], rates: list[dict]) -> dict:
     """Match rate rules (case-insensitive substring on group label) against
-    _query_summary() rows and price each group. Mirrors speckle_mcp.py's
+    _query_summary() rows and price each group. Mirrors converge_mcp.py's
     speckle_cost_estimate — kept as a separate in-process implementation
     (not a shared import) since the two tool ecosystems are intentionally
     decoupled; see the "keep them separate" decision for the chat agent vs

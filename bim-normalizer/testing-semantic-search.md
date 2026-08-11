@@ -8,7 +8,7 @@ section for what each one does and why.
 ## Architecture recap
 
 ```
-speckle_mcp.py (stdio or streamable-HTTP)
+converge_mcp.py (stdio or streamable-HTTP)
       │ REST (requests)
 bim-normalizer  GET /models/{id}/elements/semantic-search
       │
@@ -70,7 +70,7 @@ re-check Step 1, not a bug in the query itself.
 
 ## Step 3 — Verify via the MCP tools
 
-**Local (stdio)** — this repo's `.mcp.json` already wires up `speckle-ifc` for Claude Code; no
+**Local (stdio)** — this repo's `.mcp.json` already wires up `converge-mcp` for Claude Code; no
 extra setup. Just ask, in a Claude Code session with this project open:
 
 > Use speckle_semantic_search on model `<model_id>` to find "fire rated door"
@@ -79,9 +79,9 @@ extra setup. Just ask, in a Claude Code session with this project open:
 
 > Run speckle_full_qa_report on model `<model_id>`
 
-**Remote (streamable HTTP)** — if you're using the containerized `speckle-mcp` service instead
+**Remote (streamable HTTP)** — if you're using the containerized `converge-mcp` service instead
 (see [`npm-mcp-setup.md`](npm-mcp-setup.md)), the same tools are available there — it's the same
-`speckle_mcp.py` file, just running with `--transport streamable-http`. No separate deployment
+`converge_mcp.py` file, just running with `--transport streamable-http`. No separate deployment
 step for the MCP server itself; rebuilding `bim-normalizer` is what matters, since these tools
 are thin REST clients over it.
 

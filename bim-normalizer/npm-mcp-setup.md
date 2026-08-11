@@ -1,9 +1,9 @@
-# Speckle MCP Server — Nginx Proxy Manager Setup
+# Converge MCP Server — Nginx Proxy Manager Setup
 
 ## Architecture
 
 ```
-Claude Code (remote) ──HTTPS──► NPM (LXC) ──HTTP──► speckle-mcp container (port 8003)
+Claude Code (remote) ──HTTPS──► NPM (LXC) ──HTTP──► converge-mcp container (port 8003)
                                                            │
                                                            └──► bim-normalizer:8002
 ```
@@ -16,9 +16,9 @@ openssl rand -hex 32
 ```
 
 Set the result as `MCP_API_KEY` in the **root** `.env` (`z:\AppData\converge\.env` —
-this is the compose file that actually defines the `speckle-mcp` service), then rebuild:
+this is the compose file that actually defines the `converge-mcp` service), then rebuild:
 ```bash
-docker compose up -d --build speckle-mcp
+docker compose up -d --build converge-mcp
 ```
 
 Also set `MCP_ALLOWED_HOSTS` in the same `.env` to a comma-separated list of every
@@ -59,7 +59,7 @@ Replace the stdio entry with:
 ```json
 {
   "mcpServers": {
-    "speckle-ifc": {
+    "converge-mcp": {
       "type": "http",
       "url": "https://mcp.example.com/mcp",
       "headers": {
@@ -70,14 +70,14 @@ Replace the stdio entry with:
 }
 ```
 
-> Note: `speckle_mcp.py` also supports `--transport sse` (legacy, endpoint `/sse`) for
+> Note: `converge_mcp.py` also supports `--transport sse` (legacy, endpoint `/sse`) for
 > clients that don't yet support streamable HTTP. Prefer `streamable-http` /
 > `"type": "http"` for new setups.
 
 ## Local machine (this server) — keep stdio
 
 The local `.mcp.json` at `z:\AppData\converge\.mcp.json` stays as `stdio`.
-It talks to `speckle_mcp.py` directly without going through NPM.
+It talks to `converge_mcp.py` directly without going through NPM.
 
 ## Verify
 

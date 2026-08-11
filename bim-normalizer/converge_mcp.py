@@ -1,6 +1,6 @@
 """
-Speckle IFC MCP server
-======================
+Converge MCP server
+====================
 A single MCP server combining:
 
   IFC tools  (ifcopenshell in-memory session)
@@ -125,7 +125,7 @@ _NORMALIZER_URL = os.getenv("NORMALIZER_URL", "http://localhost:8002").rstrip("/
 # Empty string disables auth (safe for stdio; always set a key for streamable-http/SSE/remote)
 _MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
-mcp = FastMCP("speckle-ifc")
+mcp = FastMCP("converge-mcp")
 
 
 def _requests_with_retry(method: str, url: str, *, retries: int = 2, **kwargs) -> "requests.Response":
@@ -194,7 +194,7 @@ def speckle_cache_clear() -> str:
 # ── MCP resources ─────────────────────────────────────────────────────────────
 # Unlike tools (actions/queries a client invokes deliberately), resources are
 # read-only context a client can browse/attach without an explicit call — e.g.
-# Claude Code's resource picker or an `@speckle-ifc:speckle://...` reference.
+# Claude Code's resource picker or an `@converge-mcp:speckle://...` reference.
 # Both are thin JSON views over existing REST endpoints, via the same
 # short-TTL cache the tools use.
 
@@ -3456,16 +3456,26 @@ def _error_detail(resp: "requests.Response") -> str:
 
 
 @mcp.tool()
-def speckle_list_documents(stream_id: str, status: str = "") -> str:
+def speckle_list_documents(stream_id: str, status: str = "", folder_path: str = "", linked_element: str = "") -> str:
     """
     List CDE documents for a Speckle project (stream_id, not model_id — a
     document is scoped to the whole project so it survives re-ingestion).
 
     status: optional filter, one of WIP / Shared / Published / Archived.
+    folder_path: optional — restrict to one folder's direct contents (e.g.
+        "Structural" or "Structural/Drawings"). Omit for every folder.
+    linked_element: optional — only documents linked to this element's
+        Speckle ID.
     → drill into one with: speckle_document_detail(stream_id, doc_id)
     """
     try:
-        params = {"status": status} if status else {}
+        params = {}
+        if status:
+            params["status"] = status
+        if folder_path:
+            params["folder_path"] = folder_path
+        if linked_element:
+            params["linked_element"] = linked_element
         resp = _dashboard_request("GET", f"/projects/{stream_id}/documents", params=params)
     except RuntimeError as exc:
         return str(exc)
@@ -3486,6 +3496,34 @@ def speckle_list_documents(stream_id: str, status: str = "") -> str:
             f"gates={gates}  doc_id={d.get('doc_id')}"
         )
     lines.append("\n(gates: R=reviewed A=approved V=verified)")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def speckle_list_notifications(unread_only: bool = False, limit: int = 50) -> str:
+    """
+    The logged-in MCP dashboard user's own notifications (document uploads,
+    status changes, BCF issue assignments) across every project — personal
+    to the account, not scoped to one stream/model. Requires a real
+    dashboard login (MCP_DASHBOARD_EMAIL/_PASSWORD, or the BCF_ADMIN_EMAIL/
+    _PASSWORD fallback), same as the document tools above.
+
+    unread_only: only return unread notifications (default false).
+    limit: max notifications to return (default 50).
+    """
+    try:
+        resp = _dashboard_request("GET", "/notifications", params={"unread_only": unread_only, "limit": limit})
+    except RuntimeError as exc:
+        return str(exc)
+    if resp.status_code != 200:
+        return f"Could not list notifications: {_error_detail(resp)}"
+    notifications = resp.json()
+    if not notifications:
+        return "No notifications."
+    lines = [f"{len(notifications)} notification(s):"]
+    for n in notifications:
+        flag = "" if n.get("read_at") else " [unread]"
+        lines.append(f"  [{n.get('created_at')}] {n.get('event_type')}: {n.get('message')}{flag}  id={n.get('id')}")
     return "\n".join(lines)
 
 

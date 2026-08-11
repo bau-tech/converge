@@ -7,17 +7,17 @@ two `speckle://` resources.
 
 ## Important: no backend rebuild needed
 
-Unlike the semantic search round, **this round only touches `speckle_mcp.py`** — no new REST
+Unlike the semantic search round, **this round only touches `converge_mcp.py`** — no new REST
 endpoints, no schema changes, no new Python dependencies. It's a thin client over REST endpoints
 that already existed (`/clash-check`, `/schedule`, `/models`, `/models/{id}/summary`).
 
-- **Local (stdio)** — Claude Code re-reads `speckle_mcp.py` the next time it (re)starts the MCP
+- **Local (stdio)** — Claude Code re-reads `converge_mcp.py` the next time it (re)starts the MCP
   subprocess. If tools/resources from this round don't show up, restart your Claude Code session
   (or explicitly restart the MCP connection if your client exposes that).
-- **Remote (streamable HTTP)** — only the `speckle-mcp` container needs a rebuild, **not**
+- **Remote (streamable HTTP)** — only the `converge-mcp` container needs a rebuild, **not**
   `bim-normalizer`:
   ```bash
-  docker compose up -d --build speckle-mcp
+  docker compose up -d --build converge-mcp
   ```
 
 ## Testing `speckle_clash_check` / `speckle_investigate_clashes`
@@ -93,8 +93,8 @@ docker compose logs bim-normalizer -f --tail 0
 
 Resources are context, not actions — how you "call" them depends on the client:
 
-- **Claude Code**: reference `@speckle-ifc:speckle://models` or
-  `@speckle-ifc:speckle://models/<model_id>/summary` directly in a prompt, or use the client's
+- **Claude Code**: reference `@converge-mcp:speckle://models` or
+  `@converge-mcp:speckle://models/<model_id>/summary` directly in a prompt, or use the client's
   resource-attachment UI if it has one (check `/mcp` or the paperclip/context menu).
 - Expect JSON back (`mime_type="application/json"`) — a list of models for `speckle://models`,
   a single model's summary object for the templated one.

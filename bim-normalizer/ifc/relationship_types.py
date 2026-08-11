@@ -1,6 +1,6 @@
 """
 Shared IFC relationship-graph walking logic. IFC_GRAPH_REL_TYPES and
-build_ifc_graph_edges were extracted from speckle_mcp.py's ifc_dependency_graph
+build_ifc_graph_edges were extracted from converge_mcp.py's ifc_dependency_graph
 tool so the relationship-type/attribute-name table isn't duplicated.
 extract_relationship_pairs and resolve_relationship_element_ids are new,
 reusing that same table for bim-normalizer's own ingest-time extraction into

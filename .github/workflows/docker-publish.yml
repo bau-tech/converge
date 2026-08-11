@@ -4,7 +4,7 @@ name: Publish Docker images
 # no secrets baked in, see config.js.template/src/runtimeConfig.js for how
 # it's configured per-deployment at container start instead) and
 # bim-normalizer (bim-normalizer/Dockerfile — also runs bcf-server and
-# speckle-mcp, same image, different command/port per docker-compose.yml).
+# converge-mcp, same image, different command/port per docker-compose.yml).
 on:
   push:
     branches: [master]

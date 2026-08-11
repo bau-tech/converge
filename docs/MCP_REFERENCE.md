@@ -1,23 +1,22 @@
 # MCP Server Tool Reference
 
-Full tool catalog for `speckle_mcp.py`, split out of the main [README](../README.md) to keep that file focused on onboarding. See the README's [MCP server](../README.md#mcp-server-speckle_mcppy) section for local/remote setup.
+Full tool catalog for `converge_mcp.py`, split out of the main [README](../README.md) to keep that file focused on onboarding. See the README's [MCP server](../README.md#mcp-server-converge_mcppy) section for local/remote setup.
 
 ---
 
 ## Tool groups
 
 #### IFC session tools
-Work on an in-memory `ifcopenshell` model loaded with `ifc_load`. The code's own docstrings and
-error messages also point to a `speckle_load(model_id)` bridge tool (export a normalizer-ingested
-model as IFC and load it into this session) — but that function (`speckle_mcp.py:740`) has no
-`@mcp.tool()` decorator, so it is **not actually registered/callable** (confirmed absent from the
-live tool listing). Likely a bug: currently there's no way to load a normalizer-ingested model into
-an IFC session via MCP, only a local `.ifc` file via `ifc_load`.
+Work on an in-memory `ifcopenshell` model loaded with `ifc_load` — or with `speckle_load(model_id)`,
+which bridges a normalizer-ingested model into the session by exporting it via the normalizer's own
+`/models/{id}/export/ifc` job endpoints (`routers/ifc_export.py`) and loading the result, fast-pathing
+through the original uploaded IFC blob when the source model came from one.
 
 | Tool | Description |
 |------|-------------|
 | `ifc_new` | Create empty IFC model |
 | `ifc_load(path)` | Load a local `.ifc` file |
+| `speckle_load(model_id, coord_unit?)` | Export a normalizer-ingested model as IFC and load it into this session |
 | `ifc_reset` | Unload current model |
 | `ifc_save(path)` | Save to disk |
 | `ifc_summary` | Schema, project name, entity counts |
@@ -99,19 +98,20 @@ you just need the raw result rather than a synthesized report.
 
 #### Documents & BCF tools
 Mirror the Documents and BCF REST APIs above, for use from Claude without going through the
-dashboard UI. Document tools need a real dashboard login (`MCP_DASHBOARD_EMAIL`/`_PASSWORD`, or
-the `BCF_ADMIN_EMAIL`/`_PASSWORD` fallback) since they're role-gated; BCF topic tools work with
-just `BCF_API_KEY`.
+dashboard UI. Document and notification tools need a real dashboard login
+(`MCP_DASHBOARD_EMAIL`/`_PASSWORD`, or the `BCF_ADMIN_EMAIL`/`_PASSWORD` fallback) since they're
+role-gated; BCF topic tools work with just `BCF_API_KEY`.
 
 | Tool | Description |
 |------|-------------|
-| `speckle_list_documents(stream_id, status?)` | List documents for a project |
+| `speckle_list_documents(stream_id, status?, folder_path?, linked_element?)` | List documents for a project, optionally scoped to one folder or one linked element |
 | `speckle_document_detail(stream_id, doc_id)` | Metadata + audit event history |
 | `speckle_upload_document(stream_id, ...)` | Upload a document — lands in `01_WIP` |
 | `speckle_move_document(stream_id, doc_id, status)` | Move between WIP/Shared/Published/Archived (app-enforced gate) |
 | `speckle_set_document_review(stream_id, doc_id)` / `speckle_set_document_approval(...)` / `speckle_set_document_verification(...)` | Set the reviewed / approved / verified stage |
 | `speckle_link_document_topic(stream_id, doc_id, topic_id)` / `speckle_link_document_element(...)` | Link a document to a BCF topic or model element |
 | `speckle_delete_document(stream_id, doc_id)` | Soft-delete (audit trail survives) |
+| `speckle_list_notifications(unread_only?, limit?)` | The logged-in MCP dashboard user's own notifications, across every project |
 | `speckle_list_topics(stream_id)` | List BCF topics for a project |
 | `speckle_topic_detail(stream_id, topic_id)` | Full topic detail |
 | `speckle_create_topic(stream_id, ...)` / `speckle_update_topic(...)` | Create/update a BCF topic |
@@ -124,7 +124,7 @@ just `BCF_API_KEY`.
 Read-heavy tools (`speckle_get_summary`, `speckle_qa_check`, `speckle_qa_elements`,
 `speckle_semantic_search`, `speckle_parameter_keys`, `speckle_get_materials`,
 `speckle_get_profiles`, and the workflow tools' internal calls to those same endpoints) share a
-45-second in-process cache in `speckle_mcp.py` — smooths a burst of related calls in one exchange
+45-second in-process cache in `converge_mcp.py` — smooths a burst of related calls in one exchange
 without ever risking staleness beyond well under a minute. Every write/mutating call bypasses it
 entirely.
 
@@ -140,7 +140,7 @@ entirely.
 
 See [`bim-normalizer/testing-clash-schedule-resources.md`](../bim-normalizer/testing-clash-schedule-resources.md)
 for how to verify the clash/schedule tools, cache, and resources end-to-end. Unlike the semantic
-search round, this one only touches `speckle_mcp.py` — no `bim-normalizer` rebuild needed.
+search round, this one only touches `converge_mcp.py` — no `bim-normalizer` rebuild needed.
 
 #### 5D / Quantity tools (IFC session)
 Work on the model loaded with `ifc_load` (see the `speckle_load` bug note above — there is

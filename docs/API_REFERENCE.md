@@ -304,7 +304,7 @@ bcf_organizations    a user's employer/company (ISO 19650 contractual-container 
 
 ## bcf-server modules
 
-A standalone FastAPI process (`bcf_server.py`, same `bim-normalizer/` build context, separate container — mirrors how `speckle-mcp` is wired) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` since BIMcollab ZOOM only understands 2.1. Shares the same Postgres instance as bim-normalizer (`bcf_*` tables, initialised by `bcf/db_schema.py`).
+A standalone FastAPI process (`bcf_server.py`, same `bim-normalizer/` build context, separate container — mirrors how `converge-mcp` is wired) implementing the [BCF-API](https://github.com/buildingSMART/BCF-API) spec for issue tracking, mounted under both `/bcf/2.1` and `/bcf/3.0` since BIMcollab ZOOM only understands 2.1. Shares the same Postgres instance as bim-normalizer (`bcf_*` tables, initialised by `bcf/db_schema.py`).
 
 `bcf/projects.py` and `bcf/topics.py` share their router instances across both version mounts (`bcf_server.py`'s prefix loop), but the 2.1 and 3.0 schemas aren't identical — confirmed against the official `release_2_1`/`release_3_0` branches of the BCF-API spec, two fields differ and are branched at request time via `bcf.versions.is_bcf_v3(request)`: the assignable-users list in `GET .../extensions` is `user_id_type` in 2.1 but `users` in 3.0, and 3.0's `topic_GET`/`topic_POST` responses additionally require a `server_assigned_id` string (sourced from the otherwise-unused `"index"` column, backfilled for pre-existing rows by `BACKFILL_INDEX_SQL`). Getting either of these wrong under `/bcf/3.0/` is what made 3.0-based BIMcollab Manager plugins show "no assignable team members" when creating an issue, even though the same data is fine over `/bcf/2.1/`.
 
@@ -377,7 +377,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 
 ### Root `.env` — the single source of truth for the whole stack
 
-`docker-compose.yml` reads this file and passes each value into whichever container(s) need it (frontend build args, bim-normalizer, bcf-server, speckle-mcp, or the `postgres`/`nextcloud` services directly) — see the `environment:`/`args:` blocks in [docker-compose.yml](../docker-compose.yml) for the exact wiring. There is no per-service `.env` for any of these containers. Every variable below (required and optional) is documented inline in [`.env.example`](../.env.example) — copy it to `.env` and fill in the values.
+`docker-compose.yml` reads this file and passes each value into whichever container(s) need it (frontend build args, bim-normalizer, bcf-server, converge-mcp, or the `postgres`/`nextcloud` services directly) — see the `environment:`/`args:` blocks in [docker-compose.yml](../docker-compose.yml) for the exact wiring. There is no per-service `.env` for any of these containers. Every variable below (required and optional) is documented inline in [`.env.example`](../.env.example) — copy it to `.env` and fill in the values.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -392,7 +392,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 | `LOG_LEVEL` | No | `debug` / `info` / `warning` — passed to both bim-normalizer and bcf-server. Default `debug` |
 | `MCP_API_KEY` | No | Shared secret for remote streamable-HTTP MCP access; empty disables auth (local stdio MCP integration is unaffected — see below) |
 | `MCP_ALLOWED_HOSTS` | No | Comma-separated Host-header allow-list (DNS-rebinding protection) for the remote MCP server |
-| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login the MCP server uses for its Documents/CDE tools when `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set — passed through to the `speckle-mcp` container |
+| `MCP_DASHBOARD_EMAIL` / `MCP_DASHBOARD_PASSWORD` | No | Dashboard login the MCP server uses for its Documents/CDE tools when `BCF_ADMIN_EMAIL`/`BCF_ADMIN_PASSWORD` aren't set — passed through to the `converge-mcp` container |
 | `BCF_API_KEY` | Yes (for BCF) | Shared Bearer credential between bcf-server and the dashboard's BCF panel. Required — an empty value sends `Authorization: Bearer ` and bcf-server rejects it |
 | `BCF_OIDC_SECRET` | No | Signs the `id_token` issued by the OAuth2/OIDC login flow (`bcf/oauth.py`) for clients like BIMcollab ZOOM. Falls back to `BCF_API_KEY`, then a hardcoded dev value, if unset |
 | `BCF_ADMIN_EMAIL` / `BCF_ADMIN_PASSWORD` | No | Idempotent startup seed for one `bcf_users` account, for convenience only — the `/admin` panel is always reachable via `BCF_API_KEY` regardless, so leaving these unset can't lock you out |
@@ -413,7 +413,7 @@ Clash and IDS check results are turned into BCF topics by the frontend calling t
 
 ### `bim-normalizer/.env` — local Claude Code MCP integration only
 
-Unrelated to the container stack above. `.mcp.json` runs `speckle_mcp.py` directly on your machine via stdio, and `python-dotenv` loads this file for whichever variables `.mcp.json`'s own `env` block doesn't already set, plus the BCF/Documents tool credentials below:
+Unrelated to the container stack above. `.mcp.json` runs `converge_mcp.py` directly on your machine via stdio, and `python-dotenv` loads this file for whichever variables `.mcp.json`'s own `env` block doesn't already set, plus the BCF/Documents tool credentials below:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -514,7 +514,7 @@ converge/
 ├── bim-normalizer/
 │   ├── main.py                        FastAPI app: lifespan, middleware, /health, router wiring
 │   ├── job_registry.py                UUID validation + Content-Disposition header helpers shared by routers (job state itself lives in db/jobs.py, not here)
-│   ├── speckle_mcp.py                 MCP server (72 tools + 2 resources)
+│   ├── converge_mcp.py                MCP server (72 tools + 2 resources)
 │   ├── bcf_server.py                  BCF-API 2.1/3.0 server (separate process/container)
 │   ├── clash_check.py                 Clash detection via ifcclash
 │   ├── ids_check.py                   IDS validation via ifctester
@@ -525,7 +525,7 @@ converge/
 │   ├── nextcloud/                     WebDAV/OCS client, provisioning, group folders, drift-detector reconciliation
 │   ├── dashboard_auth/                Dashboard login session handling (session.py, dependencies.py)
 │   ├── Dockerfile                     Python 3.11 image (shared by normalizer/MCP/BCF) — also builds LibreDWG from source
-│   ├── docker-compose.yml             normalizer + speckle-mcp services (standalone dev compose)
+│   ├── docker-compose.yml             normalizer + converge-mcp services (standalone dev compose)
 │   ├── requirements.txt
 │   ├── .env                           secrets (not committed)
 │   ├── npm-mcp-setup.md               NPM reverse proxy setup guide
@@ -586,7 +586,7 @@ converge/
 ├── public/                            Static assets: logos/icons, fonts/, wasm/ (web-ifc, web-ifc-mt)
 ├── nextcloud-hooks/                   post-installation/ — auto-installs groupfolders on first Nextcloud boot
 ├── postgres-init/                     01-nextcloud-db.sh — creates Nextcloud's DB on a fresh Postgres volume
-├── docker-compose.yml                 Full stack: postgres, bim-normalizer, speckle-mcp, bcf-server, dashboard
+├── docker-compose.yml                 Full stack: postgres, bim-normalizer, converge-mcp, bcf-server, dashboard
 ├── Dockerfile                         Frontend build (Vite, no baked-in secrets) + nginx serve
 ├── nginx.conf.template                Proxies /normalizer/ and /bcf/ to backend containers
 ├── config.js.template                 Runtime frontend config template (envsubst'd into window.__CONFIG__)

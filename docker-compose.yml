@@ -5,7 +5,7 @@
 # Sized from observed idle usage (docker stats) plus headroom for real spikes
 # (ifcopenshell/specklepy can balloon several GB processing a large model —
 # see process_pool.py), not from a formal load test. bim-normalizer and
-# speckle-mcp get the most headroom since both hold whole models in memory;
+# converge-mcp get the most headroom since both hold whole models in memory;
 # hitting the cap there OOM-kills the offending process (a pool worker, or,
 # worst case, the container itself, which restart: unless-stopped recovers
 # from) instead of pressuring the whole host.
@@ -116,7 +116,7 @@ services:
       - speckle-net
 
   # ── BIM Normalizer ───────────────────────────────────────────────────────────
-  # speckle-mcp and bcf-server below share this same image: bim-normalizer:latest
+  # converge-mcp and bcf-server below share this same image: bim-normalizer:latest
   # tag (same codebase, different entrypoint command) — all three also need
   # pull_policy: build, otherwise Compose's default policy tries to PULL that
   # tag from Docker Hub first (since an explicit image: name makes Compose
@@ -214,15 +214,15 @@ services:
     networks:
       - speckle-net
 
-  # ── Speckle IFC MCP Server (streamable HTTP, remote access) ──────────────────
-  speckle-mcp:
+  # ── Converge MCP Server (streamable HTTP, remote access) ──────────────────
+  converge-mcp:
     build:
       context: ./bim-normalizer
     image: bim-normalizer:latest
     pull_policy: build
-    container_name: speckle-mcp
+    container_name: converge-mcp
     mem_limit: 3g
-    command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
+    command: ["python", "converge_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
       - "8003:8003"
     environment:
@@ -236,7 +236,7 @@ services:
       BCF_SERVER_URL: http://bcf-server:8004
       BCF_API_KEY: ${BCF_API_KEY:-}
       # Documents/CDE tools need a real dashboard login, not just this key.
-      # speckle_mcp.py falls back to BCF_ADMIN_EMAIL/PASSWORD (bcf-server's
+      # converge_mcp.py falls back to BCF_ADMIN_EMAIL/PASSWORD (bcf-server's
       # own optional bootstrap admin account) when the dedicated pair below
       # isn't set — passing both through here, Python picks the right one.
       BCF_ADMIN_EMAIL: ${BCF_ADMIN_EMAIL:-}
@@ -248,7 +248,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     # Override the image's HEALTHCHECK (CMD curl http://localhost:8002/health) — this
-    # container only serves speckle_mcp.py on 8003, nothing listens on 8002.
+    # container only serves converge_mcp.py on 8003, nothing listens on 8002.
     healthcheck:
       disable: true
     networks:

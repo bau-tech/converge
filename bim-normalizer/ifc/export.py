@@ -142,7 +142,7 @@ _OBJECT_TYPE_KEYS = frozenset({
 })
 
 # Same "material" key convention chat/agent.py's _query_materials and
-# speckle_mcp.py's speckle_get_materials already use (p.key ILIKE
+# converge_mcp.py's speckle_get_materials already use (p.key ILIKE
 # 'material%') — keeping this in sync means the exported IFC's material
 # grouping matches whatever the rest of the app already considers "the
 # material" for a given element.

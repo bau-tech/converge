@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "speckle-ifc": {
+    "converge-mcp": {
       "type": "stdio",
       "command": "python",
-      "args": ["bim-normalizer/speckle_mcp.py"],
+      "args": ["bim-normalizer/converge_mcp.py"],
       "env": {
         "SPECKLE_SERVER_URL": "https://your-speckle-server.com",
         "NORMALIZER_URL": "http://localhost:8002"

@@ -150,13 +150,13 @@ services:
     networks:
       - speckle-net
 
-  # ── Speckle IFC MCP Server (streamable HTTP, remote access) ──────────────────
-  speckle-mcp:
+  # ── Converge MCP Server (streamable HTTP, remote access) ──────────────────
+  converge-mcp:
     image: docker.io/euch/converge-normalizer:${CONVERGE_VERSION:-latest}
     pull_policy: always
-    container_name: speckle-mcp
+    container_name: converge-mcp
     mem_limit: 3g
-    command: ["python", "speckle_mcp.py", "--transport", "streamable-http", "--port", "8003"]
+    command: ["python", "converge_mcp.py", "--transport", "streamable-http", "--port", "8003"]
     ports:
       - "8003:8003"
     environment:
