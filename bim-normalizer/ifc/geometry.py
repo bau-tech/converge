@@ -735,13 +735,31 @@ def _compute_volume_from_mesh(pts: list, faces: list, length_factor: float) -> f
     _plausible_length_factor rather than a bare length_to_m(1.0, units) here —
     see that function's docstring for why a per-object `units` string alone
     isn't trustworthy for this codebase's Speckle-IFC-imported data.
+
+    Points are recentered around their own first vertex before summing. The
+    origin-referenced tetrahedron-sum formula below is mathematically exact
+    regardless of reference point, but for real-world/survey-coordinate BIM
+    projects — vertices at e.g. ~6-7-digit UTM/Gauss-Krüger eastings/
+    northings rather than near (0,0,0), common for georeferenced
+    civil/structural models — summing the raw, un-recentered coordinates
+    hits catastrophic floating-point cancellation (the individual product
+    terms are ~(1e6)^3 while the true volume is orders of magnitude
+    smaller) and produces wildly wrong volumes. Confirmed live: a single
+    ArchiCAD wall at ~689,257/5,340,293 easting/northing with a true volume
+    of ~4.7 m³ computed as ~930,000 m³ before this fix — 98.6% of a whole
+    model's reported total_volume_m3 from one element. Recentering keeps
+    every term near the object's own (small) scale instead; not needed for
+    _compute_area_from_faces below, which only ever sums edge-difference
+    vectors (already small local values) rather than raw absolute positions.
     """
     if not faces or len(pts) < 4:
         return None
     try:
+        ref = pts[0]
+        local_pts = [[p[0] - ref[0], p[1] - ref[1], p[2] - ref[2]] for p in pts]
         total = 0.0
         i = 0
-        n_pts = len(pts)
+        n_pts = len(local_pts)
         face_list = list(faces)
         while i < len(face_list):
             raw_n = face_list[i]
@@ -754,14 +772,14 @@ def _compute_volume_from_mesh(pts: list, faces: list, length_factor: float) -> f
             if idx0 >= n_pts:
                 i = end
                 continue
-            p0 = pts[idx0]
+            p0 = local_pts[idx0]
             for j in range(2, n):
                 idx1 = face_list[i + j]
                 idx2 = face_list[i + j + 1]
                 if idx1 >= n_pts or idx2 >= n_pts:
                     continue
-                p1 = pts[idx1]
-                p2 = pts[idx2]
+                p1 = local_pts[idx1]
+                p2 = local_pts[idx2]
                 total += (
                     p0[0] * (p1[1] * p2[2] - p1[2] * p2[1])
                     + p0[1] * (p1[2] * p2[0] - p1[0] * p2[2])
