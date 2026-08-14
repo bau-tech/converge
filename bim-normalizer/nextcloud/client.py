@@ -13,6 +13,7 @@ member of that project's group.
 """
 import logging
 import mimetypes
+from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import quote, urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
@@ -31,6 +32,23 @@ _DAV_NS = {"d": "DAV:", "oc": "http://owncloud.org/ns", "nc": "http://nextcloud.
 # chatty (a PROPFIND per folder navigation, per upload, per hourly reconcile
 # sweep), so connection reuse is a meaningful win, not a micro-optimisation.
 _session = requests.Session()
+# Every call here authenticates fresh via Basic Auth (_auth()/_admin_auth())
+# and none of this integration is session-based, so any Set-Cookie Nextcloud
+# happens to send back (it hands out an nc_session_id even for pure Basic-Auth
+# API requests) is pure accident, not something a later call should replay.
+# Because the session above is shared process-wide across every identity this
+# module authenticates as (the WebDAV service account and the OCS admin
+# account), letting requests' cookie jar persist that cookie meant a later
+# call — possibly authenticating as a *different* account via a fresh
+# Authorization header — still carried the earlier call's stale session
+# cookie. Nextcloud then evaluated that request against the leftover
+# session's password-confirmation state instead of treating it as a fresh
+# Basic-Auth exchange, intermittently failing OCS admin calls (e.g. POST
+# cloud/groups) with a false 403 "Password confirmation is required" even
+# though a one-off request with identical credentials succeeds immediately.
+# Rejecting all cookies outright removes the leak while keeping the
+# connection-pooling this session exists for.
+_session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 
 
 class NextcloudError(Exception):
@@ -189,9 +207,13 @@ def _parse_oc_fileid(header_value: str | None) -> int | None:
         return None
 
 
+_MAX_COLLISION_RETRIES = 20  # " (1)" through " (20)" before giving up
+
+
 def upload_bytes(path: str, content: bytes, overwrite: bool) -> dict:
     """Upload to `path`. overwrite=False (new document) refuses to clobber an
-    existing file and instead retries once with a "(1)" suffix on collision;
+    existing file and instead retries with a "(1)", "(2)", ... suffix on
+    collision, same as a browser's own "keep both files" behaviour;
     overwrite=True (a revision) omits If-None-Match so Nextcloud auto-versions
     the prior content instead of rejecting the write.
 
@@ -204,16 +226,23 @@ def upload_bytes(path: str, content: bytes, overwrite: bool) -> dict:
     header) doesn't need sniffing precision for that.
     """
     headers = {} if overwrite else {"If-None-Match": "*"}
+    stem, _, ext = path.rpartition(".")
+
     resp = _session.put(_dav_url(path), auth=_auth(), data=content, headers=headers, timeout=120)
-    if resp.status_code == 412 and not overwrite:
-        stem, _, ext = path.rpartition(".")
-        alt_path = f"{stem} (1).{ext}" if stem else f"{path} (1)"
-        # Keep If-None-Match: * on the retry too — omitting it here meant a
-        # second collision (the " (1)" path already existing, e.g. two
-        # racing uploads of the same filename) silently overwrote it instead
-        # of raising, bypassing the "refuse to clobber" contract this
-        # function documents for overwrite=False: no version bump, no
-        # bim_document_events record, none of revise()'s gate resets.
+    attempt = 0
+    # Only the FIRST collision was ever retried before this loop — dropping
+    # the same filename a second time (its "(1)" already taken too, e.g. from
+    # an earlier duplicate upload) fell straight through to the "raise below
+    # 400+" branch as a raw 502 instead of trying "(2)", "(3)", etc., the way
+    # a normal file browser's "keep both" would. Keep If-None-Match: * on
+    # every retry — omitting it on a later attempt would silently overwrite
+    # whatever is at that path instead of raising, bypassing the "refuse to
+    # clobber" contract this function documents for overwrite=False: no
+    # version bump, no bim_document_events record, none of revise()'s gate
+    # resets.
+    while resp.status_code == 412 and not overwrite and attempt < _MAX_COLLISION_RETRIES:
+        attempt += 1
+        alt_path = f"{stem} ({attempt}).{ext}" if stem else f"{path} ({attempt})"
         resp = _session.put(_dav_url(alt_path), auth=_auth(), data=content, headers=headers, timeout=120)
         path = alt_path
     if resp.status_code >= 400:

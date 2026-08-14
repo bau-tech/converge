@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
@@ -9,6 +10,15 @@ router = APIRouter(tags=["models"])
 logger = logging.getLogger(__name__)
 
 _VALID_MODEL_STATUSES = ("WIP", "Shared", "Published", "Archived")
+
+# Shared across every upload_ifc_status poll below instead of opening a fresh
+# TLS connection to the Speckle server every ~3s — that per-poll connection
+# churn made transient slowness on Speckle's own end (its fileimport-service
+# saturating the host's resources while converting a large IFC) much worse:
+# a failed poll cost the full timeout instead of failing fast and letting the
+# frontend's retry loop try again promptly. A `fileUploads` GraphQL lookup is
+# a cheap query — it should never legitimately need more than a few seconds.
+_status_http_client = httpx.AsyncClient(timeout=8)
 
 # Speckle server's own FileUpload.convertedStatus values (packages/server's
 # FileuploadConvertedStatus enum) — Speckle assigns these, we don't control
@@ -329,14 +339,13 @@ async def upload_ifc_model(
 @router.get("/projects/{stream_id}/models/upload-ifc/{upload_id}/status")
 async def upload_ifc_status(stream_id: str, upload_id: str, token: str | None = None, server_url: str | None = None):
     """Poll Speckle's own Stream.fileUploads for this upload's conversion status."""
-    import httpx
     from config import settings
 
     tok = token or settings.SPECKLE_TOKEN
     srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
+    try:
+        resp = await _status_http_client.post(
             f"{srv}/graphql",
             json={
                 "query": """
@@ -357,7 +366,22 @@ async def upload_ifc_status(stream_id: str, upload_id: str, token: str | None = 
             },
             headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
         )
-    resp.raise_for_status()
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        # Speckle's own API being briefly unresponsive (e.g. fileimport-service
+        # saturating the host while converting a large IFC) shouldn't surface
+        # as an opaque 500 — 502 + a clear message lets the frontend's poll
+        # loop tell "still working, try again" apart from a real failure.
+        raise HTTPException(status_code=502, detail=f"Speckle status check failed: {exc}")
+    finally:
+        # _status_http_client is shared across polls from potentially different
+        # users/tokens/Speckle servers (see its definition above) purely to
+        # reuse the connection pool — never let it accumulate Set-Cookie state
+        # from one identity into the next request. This is the same class of
+        # cross-identity leakage a shared requests.Session caused for Nextcloud
+        # (see nextcloud/client.py), fixed by making that policy explicit there;
+        # clearing the jar here is the httpx equivalent for this client.
+        _status_http_client.cookies.clear()
     body = resp.json()
     if "errors" in body:
         raise HTTPException(status_code=502, detail=body["errors"][0]["message"])
