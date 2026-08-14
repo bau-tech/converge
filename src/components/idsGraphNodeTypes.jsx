@@ -10,10 +10,20 @@ import { getBsddEntityProperties, searchBsddDictionaries, searchBsddClasses } fr
 // The exact `data` keys read by each type are dictated by
 // ../utils/idsGraphToXml.js's converter, not chosen freely here.
 
-const ACCENTS = {
+// Exported so the palette in IdsGraphEditor.jsx can color each entry to
+// match its node on canvas. Chosen to sit ~45-60° apart around the hue
+// wheel (0 red, 38 amber, 82 lime, 142 green, 189 cyan, 221 blue, 271
+// purple, 330 pink) so all eight stay distinguishable at a glance, not just
+// pairwise-different from whichever neighbor prompted the last tweak — the
+// original spec/entity blues were near-identical (#276FE5 vs #3b82f6), and
+// the entity/property fix that followed just swapped entity to cyan without
+// checking it against property's teal, landing two different-but-adjacent
+// blue-greens 14° apart. property now sits in the (previously empty) gap
+// between amber and green instead of next to entity's cyan.
+export const ACCENTS = {
     spec: '#276FE5',
-    entity: '#3b82f6',
-    property: '#14b8a6',
+    entity: '#06b6d4',
+    property: '#84cc16',
     attribute: '#ef4444',
     classification: '#f59e0b',
     material: '#22c55e',
@@ -47,19 +57,28 @@ function useRemoveNode(id) {
     }
 }
 
-// Finds the IFC class of an Entity node wired into the same spec
-// applicability/requirements port as this node, so Property/Classification
-// nodes can narrow their bSDD suggestions to the entity actually being
-// checked instead of the whole IFC schema. Entity/property/etc. nodes don't
-// connect to each other directly — they're siblings converging on the same
-// spec handle — so this walks source->spec->sibling-sources rather than a
-// direct edge.
+// Finds the IFC class of an Entity node wired into the same spec as this
+// node, so Property/Classification nodes can narrow their bSDD suggestions
+// to the entity actually being checked instead of the whole IFC schema.
+// Entity/property/etc. nodes don't connect to each other directly — they're
+// siblings converging on the same Specification node — so this walks
+// source->spec->sibling-sources rather than a direct edge.
+//
+// Deliberately matches siblings by target NODE only (`e.target ===
+// edge.target`), not target handle — an Entity always wires into the spec's
+// "applicability" handle while a Property/Classification/etc. wires into
+// "requirements" (see SpecHandleRow's handle ids), so a same-node *and*
+// same-handle match (the previous condition here) could never find the
+// Entity from a Property's edge at all: the two are siblings on the same
+// spec but never share a handle. This is exactly why "Connect an Entity
+// node to filter suggestions" kept showing even with a real
+// Entity->Specification connection in place.
 function useConnectedEntityClass(id) {
     const nodes = useNodes()
     const edges = useEdges()
     for (const edge of edges) {
         if (edge.source !== id) continue
-        const siblings = edges.filter(e => e.target === edge.target && e.targetHandle === edge.targetHandle)
+        const siblings = edges.filter(e => e.target === edge.target)
         for (const sibling of siblings) {
             const node = nodes.find(n => n.id === sibling.source)
             if (node?.type === 'entity' && node.data?.name) return node.data.name
@@ -211,19 +230,60 @@ const COMMON_IFC_CLASSES = [
     'IFCBUILDINGSTOREY', 'IFCBUILDING', 'IFCSITE', 'IFCPIPESEGMENT', 'IFCDUCTSEGMENT',
 ]
 
+// Shared connection-point styling — react-flow's default handle is a bare
+// 6px square in a low-contrast grey, easy to miss against this dark theme.
+// A larger circle with a page-colored ring gives every handle a clear "this
+// is a plug, drag from here" affordance regardless of which node it's on.
+const HANDLE_STYLE = {
+    width: 12,
+    height: 12,
+    borderRadius: '50%',
+    border: '2px solid var(--speckle-foundation)',
+    zIndex: 1,
+}
+
 function SourceHandle() {
-    return <Handle type="source" position={Position.Right} style={{ background: 'var(--speckle-foreground-3)' }} />
+    return <Handle type="source" position={Position.Right} style={{ ...HANDLE_STYLE, background: 'var(--speckle-foreground-3)' }} />
+}
+
+// Fixed-height row per handle instead of percentage-based `top` — the
+// previous version wrapped both handles in a bare `position: relative` div
+// with no content of its own, which collapses to zero height (absolutely-
+// positioned children don't contribute to their parent's height). `top:
+// 30%`/`70%` of a 0px-tall box are both ~0, so the two handles (and their
+// "applic."/"req." labels) landed stacked on top of each other and
+// overlapping into the Name field right below — this gives the wrapper a
+// real height so each row gets its own unambiguous space.
+function SpecHandleRow({ handleId, label }) {
+    return (
+        <div className="relative flex items-center h-4">
+            {/* Position.Left's own default (vertically centered, flush with
+                this row's left edge) would park the dot ~13px inside the
+                node's actual border (NodeShell's 3px border-left + this
+                content area's 10px padding, p-2.5) — visible but reading as
+                "just some UI element" rather than a connector. -12px centers
+                it ON the border line instead, measured directly against the
+                rendered node/handle boxes (getBoundingClientRect) rather than
+                assumed from the padding/border CSS values, since react-flow's
+                own zoom transform and Handle default styling both affect the
+                final on-screen offset in ways the raw box-model numbers alone
+                don't capture. Gray (not blue/red) to match every other
+                handle in this editor (Entity/Property/etc. all use the same
+                neutral --speckle-foreground-3) — color-coding just these two
+                made them look like a different kind of control. */}
+            <Handle type="target" position={Position.Left} id={handleId} style={{ ...HANDLE_STYLE, left: -12, background: 'var(--speckle-foreground-3)' }} />
+            <span className="text-[10px] font-medium text-[var(--speckle-foreground-2)] pl-3">{label}</span>
+        </div>
+    )
 }
 
 export function SpecNode({ id, data, selected }) {
     const set = useNodeField(id)
     return (
         <NodeShell id={id} type="spec" minWidth={260} selected={selected}>
-            <div style={{ position: 'relative' }}>
-                <Handle type="target" position={Position.Left} id="applicability" style={{ top: '30%', background: '#60a5fa' }} />
-                <span className="absolute text-[8px] text-[var(--speckle-foreground-3)]" style={{ left: -2, top: 'calc(30% - 14px)' }}>applic.</span>
-                <Handle type="target" position={Position.Left} id="requirements" style={{ top: '70%', background: '#f87171' }} />
-                <span className="absolute text-[8px] text-[var(--speckle-foreground-3)]" style={{ left: -2, top: 'calc(70% + 4px)' }}>req.</span>
+            <div className="space-y-1 mb-1.5">
+                <SpecHandleRow handleId="applicability" label="Applicability" />
+                <SpecHandleRow handleId="requirements" label="Requirements" />
             </div>
             <Field label="Name" value={data.name} onChange={v => set('name', v)} placeholder="Walls — FireRating" />
             <SelectField
@@ -506,7 +566,7 @@ export function RestrictionNode({ id, data }) {
     const restrictionType = data.restrictionType || 'enumeration'
     return (
         <NodeShell id={id} type="restriction">
-            <Handle type="target" position={Position.Left} style={{ background: 'var(--speckle-foreground-3)' }} />
+            <Handle type="target" position={Position.Left} style={{ ...HANDLE_STYLE, background: 'var(--speckle-foreground-3)' }} />
             <SelectField label="Type" value={restrictionType} onChange={v => set('restrictionType', v)} options={RESTRICTION_TYPES} />
             {restrictionType === 'enumeration' && (
                 <ChipList values={data.values || []} onChange={v => set('values', v)} />

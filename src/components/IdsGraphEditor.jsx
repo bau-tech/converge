@@ -7,7 +7,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import { X, Download, Upload, Save, Loader2, CheckCircle2, AlertTriangle, LayoutTemplate, Info } from 'lucide-react'
 import {
-    nodeTypes, PALETTE_GROUPS, VALID_SPEC_SOURCE_TYPES, VALID_RESTRICTION_SOURCE_TYPES,
+    nodeTypes, PALETTE_GROUPS, VALID_SPEC_SOURCE_TYPES, VALID_RESTRICTION_SOURCE_TYPES, ACCENTS,
 } from './idsGraphNodeTypes'
 import { convertGraphToIdsXml, graphToCanvasJson, parseCanvasJson, validateGraph } from '../utils/idsGraphToXml'
 import { SPEC_TEMPLATES, instantiateTemplate } from '../utils/idsTemplates'
@@ -212,15 +212,25 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
                         <div key={group.label}>
                             <p className="text-[10px] uppercase tracking-wider text-[var(--speckle-foreground-3)] mb-1.5">{group.label}</p>
                             <div className="space-y-1">
-                                {group.items.map(item => (
-                                    <button
-                                        key={item.type}
-                                        onClick={() => addNode(item.type, item.defaultData)}
-                                        className="w-full text-left px-2.5 py-1.5 text-xs rounded hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground)] transition-colors"
-                                    >
-                                        + {item.label}
-                                    </button>
-                                ))}
+                                {group.items.map(item => {
+                                    const accent = ACCENTS[item.type] || 'var(--speckle-foreground)'
+                                    return (
+                                        <button
+                                            key={item.type}
+                                            onClick={() => addNode(item.type, item.defaultData)}
+                                            // Same accent color as this type's node card on canvas
+                                            // (NodeShell's border-left + header text) — a colored dot
+                                            // plus matching text color here, rather than the previous
+                                            // uniform gray for every entry, so the palette itself shows
+                                            // at a glance which color you'll get on canvas.
+                                            className="w-full flex items-center gap-2 text-left px-2.5 py-1.5 text-xs rounded hover:bg-[var(--speckle-outline-3)] transition-colors"
+                                            style={{ color: accent }}
+                                        >
+                                            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: accent }} />
+                                            {item.label}
+                                        </button>
+                                    )
+                                })}
                             </div>
                         </div>
                     ))}
