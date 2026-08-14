@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react'
 import { createPortal } from 'react-dom'
-import { Vector3 } from 'three'
+import { Vector3, Mesh, PlaneGeometry, MeshBasicMaterial, TextureLoader, DoubleSide } from 'three'
 import { Flag, Paperclip } from 'lucide-react'
 import {
     Viewer,
@@ -20,17 +20,38 @@ import {
     ExplodeExtension,
     MeasurementsExtension,
     MeasurementEvent,
+    ObjectLayers,
 } from '@speckle/viewer'
 import { AnimatePresence } from 'framer-motion'
 import ViewerToolbar from './ViewerToolbar'
 import { DiffBar } from './DiffBar'
 import { FederatedBar } from './FederatedBar'
 import { getNestedValue } from '../utils/propertyScanner'
+import { AlignmentPickExtension, AlignmentPickEvent } from '../utils/AlignmentPickExtension'
+import { applyAlignmentTransform } from '../utils/alignmentTransform'
+import { installNaNSafeBoundingSphere } from '../utils/patchNaNSafeBoundingSphere'
+
+// Both the alignment-overlay plane and the federated (Combine Models) load
+// path build multi-batch scenes that can trip the NaN-bounding-sphere
+// @speckle/viewer bug patched here — install once at module load, before any
+// viewer instance exists, since it patches the shared three.js prototypes
+// rather than anything instance-specific.
+installNaNSafeBoundingSphere()
 
 // Fallback color for elements whose field value isn't in the chart's colour
 // map (e.g. it fell outside the chart's top-N cutoff) — keeps the whole
 // model painted instead of leaving a confusing mix of coloured/original.
 const CHART_COLOR_OTHER = '#71717a'
+
+// Shared by setAlignmentOverlay (replacing the previous overlay) and
+// clearAlignmentOverlay (removing the current one) — same teardown either way.
+function disposeAlignmentOverlay(scene, overlay) {
+    if (!overlay) return
+    scene?.remove(overlay.mesh)
+    overlay.mesh.geometry.dispose()
+    overlay.mesh.material.dispose()
+    overlay.texture.dispose()
+}
 
 const MeasurementType = { PERPENDICULAR: 0, POINTTOPOINT: 1, AREA: 2, POINT: 3 }
 const DEFAULT_LIGHT = { enabled: true, castShadow: false, elevation: 1.33, azimuth: 0.75 }
@@ -72,6 +93,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     federatedModels = [],
     federatedFullData = null,
     onExitFederated,
+    onSetFederatedModelHidden,
 }, ref) {
     // Refs for viewer instance and container
     const containerRef = useRef(null)
@@ -116,6 +138,14 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // the key on every call guarantees the isolation is replaced, not accumulated,
     // whenever the filter result changes.
     const filterStateKeyRef = useRef(0)
+    // Drawing-to-3D alignment (AlignmentPanel.jsx / DocumentsPanel.jsx's overlay
+    // toggle): the external 3D-pick callback registered via setAlignmentPickHandler,
+    // and the currently-shown overlay plane's {mesh, texture} (one at a time —
+    // setAlignmentOverlay replaces whatever was there) plus its opacity, kept in
+    // refs since the imperative handle's factory only runs once (deps: []).
+    const alignmentPickHandlerRef = useRef(null)
+    const alignmentOverlayRef = useRef(null)
+    const alignmentOverlayOpacityRef = useRef(1)
     // Stable ref for onReady — prevents initializeViewer from being recreated
     // every time the parent passes a new onReady arrow function reference.
     const onReadyRef = useRef(onReady)
@@ -451,10 +481,6 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         clearChartColors() {
             handleClearChartColors()
         },
-        // Show/hide one combined model by branch name (federated mode).
-        setFederatedModelVisibility(branchName, visible) {
-            handleSetFederatedVisibility(branchName, visible)
-        },
         // Capture a PNG snapshot of the current view on a white background
         // (regardless of the app's dark/light theme), for embedding in
         // generated reports. Restores the theme-correct background afterward.
@@ -475,6 +501,107 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 viewer.requestRender()
             }
         },
+        // ── Drawing-to-3D alignment (AlignmentPanel.jsx) ──────────────────
+        // 3D point picking: toggles AlignmentPickExtension's own click listener
+        // and forwards its Picked events to whatever handler AlignmentPanel
+        // registered — see utils/AlignmentPickExtension.js.
+        setAlignmentPickActive(active) {
+            try {
+                const ext = viewerRef.current?.getExtension(AlignmentPickExtension)
+                if (ext) ext.enabled = !!active
+            } catch (e) { log('setAlignmentPickActive', e) }
+        },
+        setAlignmentPickHandler(fn) {
+            alignmentPickHandlerRef.current = fn || null
+        },
+        setAlignmentPickMarker(index, point) {
+            try { viewerRef.current?.getExtension(AlignmentPickExtension)?.setMarker(index, point) }
+            catch (e) { log('setAlignmentPickMarker', e) }
+        },
+        clearAlignmentPickMarkers() {
+            try { viewerRef.current?.getExtension(AlignmentPickExtension)?.clearMarkers() }
+            catch (e) { log('clearAlignmentPickMarkers', e) }
+        },
+        // Overlay plane: a textured PlaneGeometry built from the drawing's own
+        // modelspace extents (so its local XY == drawing XY), then positioned
+        // via the solved similarity transform exactly the way
+        // alignmentTransform.js's applyAlignmentTransform maps a drawing point
+        // to world space — see that file for the derivation. One overlay at a
+        // time, matching DocumentsPanel's "showing one implicitly replaces the
+        // last" contract. OVERLAY layer + depthTest:false matches
+        // AlignmentPickExtension's marker spheres — both need to stay visible
+        // over the model regardless of what's in front, for the same reason
+        // (comparing the drawing against the model live, not hiding behind it).
+        setAlignmentOverlay({ textureUrl, extents, transform, elevationZ }) {
+            const viewer = viewerRef.current
+            if (!viewer || !extents || !transform || elevationZ == null || Number.isNaN(elevationZ)) return
+            try {
+                const renderer = viewer.getRenderer()
+                if (alignmentOverlayRef.current) {
+                    disposeAlignmentOverlay(renderer.scene, alignmentOverlayRef.current)
+                    alignmentOverlayRef.current = null
+                }
+
+                const { extminX, extminY, extmaxX, extmaxY } = extents
+                const width = extmaxX - extminX
+                const height = extmaxY - extminY
+                if (!(width > 0) || !(height > 0)) return
+
+                const texture = new TextureLoader().load(
+                    textureUrl,
+                    () => viewer.requestRender(),
+                    undefined,
+                    (e) => log('setAlignmentOverlay texture load', e)
+                )
+                const geometry = new PlaneGeometry(width, height)
+                const material = new MeshBasicMaterial({
+                    map: texture,
+                    transparent: true,
+                    opacity: alignmentOverlayOpacityRef.current,
+                    side: DoubleSide,
+                    depthTest: false,
+                    depthWrite: false,
+                })
+                const mesh = new Mesh(geometry, material)
+                mesh.layers.set(ObjectLayers.OVERLAY)
+                mesh.renderOrder = 500 // above the model, below alignment pick markers (999)
+
+                // Plane-local (0,0) is the drawing's own extent center — placing
+                // the mesh at applyAlignmentTransform(centerDrawing) and then
+                // applying the same rotation+scale as object transforms
+                // reproduces applyAlignmentTransform for every point on the
+                // plane (rotation and uniform scale commute), without needing
+                // to transform each corner by hand.
+                const centerDrawing = { x: (extminX + extmaxX) / 2, y: (extminY + extmaxY) / 2 }
+                const centerWorld = applyAlignmentTransform(transform, centerDrawing)
+                mesh.position.set(centerWorld.x, centerWorld.y, elevationZ)
+                mesh.rotation.set(0, 0, transform.rotation_rad)
+                mesh.scale.set(transform.scale, transform.scale, 1)
+
+                renderer.scene.add(mesh)
+                alignmentOverlayRef.current = { mesh, texture }
+                viewer.requestRender()
+            } catch (e) { log('setAlignmentOverlay', e) }
+        },
+        setAlignmentOverlayOpacity(opacity) {
+            alignmentOverlayOpacityRef.current = opacity
+            const overlay = alignmentOverlayRef.current
+            if (!overlay) return
+            try {
+                overlay.mesh.material.opacity = opacity
+                viewerRef.current?.requestRender()
+            } catch (e) { log('setAlignmentOverlayOpacity', e) }
+        },
+        clearAlignmentOverlay() {
+            const viewer = viewerRef.current
+            const overlay = alignmentOverlayRef.current
+            if (!overlay) return
+            try {
+                disposeAlignmentOverlay(viewer?.getRenderer()?.scene, overlay)
+                alignmentOverlayRef.current = null
+                viewer?.requestRender()
+            } catch (e) { log('clearAlignmentOverlay', e) }
+        },
         // handleApplyChartColors/handleClearChartColors (useCallback([], ...) below) are
         // deliberately omitted from deps: they're declared later in this render, so listing
         // them here would read the binding before its own initializer runs.
@@ -491,6 +618,11 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // which would otherwise capture a stale snapshot.
     const federatedFullDataRef = useRef(federatedFullData)
     useEffect(() => { federatedFullDataRef.current = federatedFullData }, [federatedFullData])
+    // Same reasoning: read at the end of the federated async load loop below
+    // so newly-loaded geometry picks up whatever filter is currently active,
+    // instead of only the filtering effect's own (unrelated) dependency change.
+    const filteredElementIdsRef = useRef(filteredElementIds)
+    useEffect(() => { filteredElementIdsRef.current = filteredElementIds }, [filteredElementIds])
 
     // Keep the viewer canvas background in sync with the dashboard theme
     useEffect(() => {
@@ -722,6 +854,11 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         viewer.createExtension(ViewModes)
         viewer.createExtension(ExplodeExtension)
         const measurementExt = viewer.createExtension(MeasurementsExtension)
+        const alignmentPickExt = viewer.createExtension(AlignmentPickExtension)
+        alignmentPickExt.enabled = false
+        alignmentPickExt.on(AlignmentPickEvent.Picked, (point) => {
+            alignmentPickHandlerRef.current?.(point)
+        })
 
         // Configure selection colors.
         // isRenderMaterial() check in setMaterial() requires color+opacity+roughness+metalness+vertexColors
@@ -991,61 +1128,110 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         }
 
         const controller = new AbortController()
-        const wantedBranches = new Set(federatedModels.map((m) => m.branchName))
+        // Debounce: FederatedBar's per-model eye toggle drives this same
+        // effect (via `federatedModels`), and each settle triggers a real
+        // resolveObjectId + loadObject network round trip per newly-wanted
+        // branch. Without this, rapidly clicking the eye icon (the natural
+        // way to compare models side by side) re-fetches/re-parses on every
+        // intermediate click instead of once the user actually stops.
+        const debounceTimer = setTimeout(() => {
+            // A hidden entry is "not wanted" here too — this is what actually
+            // makes FederatedBar's per-model eye toggle do anything: flipping
+            // `hidden` changes this set's membership, which drives the same
+            // unload/reload path as unchecking a model in CombineModelsPicker.
+            const wantedBranches = new Set(federatedModels.filter((m) => !m.hidden).map((m) => m.branchName))
 
-        // Unload any previously-combined model no longer in the current set
-        // (e.g. the user unchecked it in CombineModelsPicker).
-        for (const [branchName, url] of [...loaded.entries()]) {
-            if (!wantedBranches.has(branchName)) {
-                try { viewer.unloadObject(url) } catch (e) { console.warn('[SpeckleViewer] unloadObject failed:', e) }
-                loaded.delete(branchName)
-            }
-        }
-
-        ;(async () => {
-            let loadedAny = false
-            for (const m of federatedModels) {
-                if (loaded.has(m.branchName) || controller.signal.aborted) continue
-                const oid = await resolveObjectId(m.versionId, controller.signal)
-                if (!oid || controller.signal.aborted) continue
-                const url = `${configRef.current.speckleServer}/streams/${projectIdRef.current}/objects/${oid}`
-                try {
-                    const loader = new SpeckleLoader(viewer.getWorldTree(), url, configRef.current.speckleToken)
-                    await viewer.loadObject(loader, false)  // false = don't re-zoom per model, one zoom-to-fit below instead
-                    if (!controller.signal.aborted) { loaded.set(m.branchName, url); loadedAny = true }
-                } catch (err) {
-                    console.warn('[SpeckleViewer] federated loadObject failed for', m.branchName, err)
-                }
-            }
-            if (!controller.signal.aborted) {
-                if (loadedAny) {
-                    try { viewer.getExtension(HybridCameraController)?.setCameraView([], true) } catch {}
-                }
-                // Apply per-model tint colors only now that every combined
-                // model actually has its geometry in the scene — doing this
-                // in a separate effect keyed off federatedFullData raced
-                // ahead of this async load loop and set colors for objects
-                // that weren't in the WorldTree yet, so tints silently
-                // didn't apply (or applied to the wrong/previous set).
-                try {
-                    const filterExt = viewer.getExtension(FilteringExtension)
-                    if (filterExt && Array.isArray(federatedFullDataRef.current?.elements)) {
-                        const byModel = new Map()
-                        for (const el of federatedFullDataRef.current.elements) {
-                            if (!el.speckle_id || !el._modelKey) continue
-                            if (!byModel.has(el._modelKey)) byModel.set(el._modelKey, [])
-                            byModel.get(el._modelKey).push(el.speckle_id)
-                        }
-                        const colorGroups = federatedModels
-                            .filter((m) => byModel.has(m.branchName))
-                            .map((m) => ({ objectIds: byModel.get(m.branchName), color: m.color }))
-                        if (colorGroups.length) filterExt.setUserObjectColors(colorGroups)
+            // Unload any previously-combined model no longer in the current set
+            // (e.g. the user unchecked it in CombineModelsPicker, or hid it via
+            // FederatedBar) — same primaryUrl guard as the exit-federated-mode
+            // branch above: if the hidden/removed branch's URL happens to match
+            // the currently-viewed primary model, don't unload it out from under
+            // the user, just drop it from `loaded` bookkeeping.
+            const primaryUrl = activeObjectIdRef.current
+                ? `${configRef.current.speckleServer}/streams/${projectIdRef.current}/objects/${activeObjectIdRef.current}`
+                : null
+            for (const [branchName, url] of [...loaded.entries()]) {
+                if (!wantedBranches.has(branchName)) {
+                    if (url !== primaryUrl) {
+                        try { viewer.unloadObject(url) } catch (e) { console.warn('[SpeckleViewer] unloadObject failed:', e) }
                     }
-                } catch (e) { console.warn('[SpeckleViewer] federated tint colors error:', e) }
+                    loaded.delete(branchName)
+                }
             }
-        })()
 
-        return () => { controller.abort() }
+            ;(async () => {
+                let loadedAny = false
+                for (const m of federatedModels) {
+                    if (m.hidden || loaded.has(m.branchName) || controller.signal.aborted) continue
+                    const oid = await resolveObjectId(m.versionId, controller.signal)
+                    if (!oid || controller.signal.aborted) continue
+                    const url = `${configRef.current.speckleServer}/streams/${projectIdRef.current}/objects/${oid}`
+                    try {
+                        const loader = new SpeckleLoader(viewer.getWorldTree(), url, configRef.current.speckleToken)
+                        await viewer.loadObject(loader, false)  // false = don't re-zoom per model, one zoom-to-fit below instead
+                        if (controller.signal.aborted) {
+                            // This run was superseded (e.g. a rapid hide/show toggle)
+                            // while loadObject was in flight — it isn't cancellable
+                            // itself, so the geometry is now in the scene but this
+                            // run's own cleanup won't record it in `loaded`. Unload it
+                            // now instead of leaving it orphaned (untracked, so the
+                            // unload loop above can never remove it, and re-showing
+                            // the branch later would load a second, duplicate copy).
+                            // The new effect run will reload it fresh if it's still wanted.
+                            try { viewer.unloadObject(url) } catch (e) { console.warn('[SpeckleViewer] unloadObject on abort failed:', e) }
+                        } else {
+                            loaded.set(m.branchName, url)
+                            loadedAny = true
+                        }
+                    } catch (err) {
+                        console.warn('[SpeckleViewer] federated loadObject failed for', m.branchName, err)
+                    }
+                }
+                if (!controller.signal.aborted) {
+                    if (loadedAny) {
+                        try { viewer.getExtension(HybridCameraController)?.setCameraView([], true) } catch {}
+                    }
+                    // Apply per-model tint colors only now that every combined
+                    // model actually has its geometry in the scene — doing this
+                    // in a separate effect keyed off federatedFullData raced
+                    // ahead of this async load loop and set colors for objects
+                    // that weren't in the WorldTree yet, so tints silently
+                    // didn't apply (or applied to the wrong/previous set).
+                    try {
+                        const filterExt = viewer.getExtension(FilteringExtension)
+                        if (filterExt && Array.isArray(federatedFullDataRef.current?.elements)) {
+                            const byModel = new Map()
+                            for (const el of federatedFullDataRef.current.elements) {
+                                if (!el.speckle_id || !el._modelKey) continue
+                                if (!byModel.has(el._modelKey)) byModel.set(el._modelKey, [])
+                                byModel.get(el._modelKey).push(el.speckle_id)
+                            }
+                            const colorGroups = federatedModels
+                                .filter((m) => byModel.has(m.branchName))
+                                .map((m) => ({ objectIds: byModel.get(m.branchName), color: m.color }))
+                            if (colorGroups.length) filterExt.setUserObjectColors(colorGroups)
+                        }
+                    } catch (e) { console.warn('[SpeckleViewer] federated tint colors error:', e) }
+                    // Same reasoning as tint colors above: if a chart/legend filter is
+                    // already active, newly-loaded geometry (e.g. a model just
+                    // un-hidden via FederatedBar) hasn't picked it up — the filtering
+                    // effect only re-runs on filteredElementIds/isViewerReady changes,
+                    // not when federated geometry loads. Reapply it here now that the
+                    // new geometry actually exists in the WorldTree.
+                    try {
+                        const ids = filteredElementIdsRef.current
+                        const filterExt = viewer.getExtension(FilteringExtension)
+                        if (filterExt && ids?.length) {
+                            filterStateKeyRef.current = filterStateKeyRef.current === 0 ? 1 : 0
+                            filterExt.isolateObjects(ids, `filter-${filterStateKeyRef.current}`, true, true)
+                        }
+                    } catch (e) { console.warn('[SpeckleViewer] federated re-isolate error:', e) }
+                    viewer.requestRender()
+                }
+            })()
+        }, 300)
+
+        return () => { controller.abort(); clearTimeout(debounceTimer) }
     }, [federatedMode, federatedModels, isViewerReady, resolveObjectId])
 
     // ─────────────────────────────────────────────────────────────
@@ -1063,6 +1249,12 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 // element cyan as if the user had clicked them all.
                 filterStateKeyRef.current = filterStateKeyRef.current === 0 ? 1 : 0
                 filteringExt.isolateObjects(filteredElementIds, `filter-${filterStateKeyRef.current}`, true, true)
+                // isolateObjects alone updates filter state but doesn't paint —
+                // see the timeline-playback effect below for the same fix and
+                // the reasoning (every other FilteringExtension mutation in this
+                // file requests a render explicitly; this one was the outlier
+                // that silently never showed the isolation on an idle viewer).
+                viewerRef.current.requestRender()
             } catch (err) {
                 console.warn('[SpeckleViewer] isolateObjects error:', err)
             }
@@ -1072,7 +1264,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 // Do NOT call clearSelection() here — resetting filters does not
                 // mean the user deselected an element; clearing it would silently
                 // kill the cyan highlight every time any filter is removed.
-            } catch {}
+                viewerRef.current.requestRender()
+            } catch (err) {
+                console.warn('[SpeckleViewer] resetFilters error:', err)
+            }
         }
     }, [filteredElementIds, isViewerReady])
 
@@ -1153,7 +1348,15 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 { objectIds: pastIds, color: '#4ade80' },
                 { objectIds: currentIds, color: '#fbbf24' },
             ])
-        } catch {}
+            // Every other FilteringExtension/selection mutation in this file
+            // requests a render explicitly (see the selection/hover/screenshot
+            // effects above) — isolateObjects/setUserObjectColors don't paint
+            // on their own, they just update filter state for the next frame
+            // the viewer happens to draw. Without this, the build-up isolation
+            // silently never appears until an unrelated interaction (orbit,
+            // resize) forces a redraw.
+            viewerRef.current.requestRender()
+        } catch (e) { log('timelinePlayback', e) }
     }, [isViewerReady, timelinePlaybackIds])
 
     // "Sync charts" — when enabled, narrow the dashboard charts/tables to the
@@ -1179,7 +1382,8 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         if (timelinePlaybackIds) return
         try {
             viewerRef.current?.getExtension(FilteringExtension)?.resetFilters()
-        } catch {}
+            viewerRef.current?.requestRender()
+        } catch (e) { log('timelinePlaybackClear', e) }
     }, [timelinePlaybackIds])
 
     // ─────────────────────────────────────────────────────────────
@@ -1299,26 +1503,6 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         try {
             viewerRef.current?.getExtension(FilteringExtension)?.removeUserObjectColors()
         } catch (e) { log('clearChartColors', e) }
-    }, [])
-
-    // Show/hide one combined model by branch name (federated mode) without
-    // affecting any other combined model's visibility — each branch gets its
-    // own stable FilteringExtension stateKey, since distinct keys are
-    // independent isolation states that don't clobber each other (unlike
-    // reusing the same key, which replaces rather than merges).
-    const handleSetFederatedVisibility = useCallback((branchName, visible) => {
-        const viewer = viewerRef.current
-        const elements = federatedFullDataRef.current?.elements
-        if (!viewer || !Array.isArray(elements)) return
-        try {
-            const ids = elements.filter((el) => el._modelKey === branchName && el.speckle_id).map((el) => el.speckle_id)
-            if (!ids.length) return
-            const filterExt = viewer.getExtension(FilteringExtension)
-            const stateKey = `model-${branchName}`
-            if (visible) filterExt?.showObjects(ids, stateKey, true)
-            else filterExt?.hideObjects(ids, stateKey, true, false)
-            viewer.requestRender()
-        } catch (e) { log('setFederatedVisibility', e) }
     }, [])
 
     const handleScreenshot = useCallback(async () => {
@@ -1614,7 +1798,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     <div style={{ pointerEvents: 'auto' }}>
                         <FederatedBar
                             models={federatedModels}
-                            onToggleVisibility={handleSetFederatedVisibility}
+                            onToggleVisibility={onSetFederatedModelHidden}
                             onExit={onExitFederated}
                         />
                     </div>
