@@ -23,6 +23,7 @@ import {
     FileText,
     LogOut,
     Play,
+    MapPin,
 } from 'lucide-react'
 import { ClashLogoIcon } from './components/ClashLogoIcon'
 import { CompareVersionToggle } from './components/CompareVersionToggle'
@@ -40,6 +41,7 @@ import PivotTableWidget from './components/PivotTableWidget'
 import ValidationWidget from './components/ValidationWidget'
 import FilterWidget from './components/FilterWidget'
 import QuantityWidget from './components/QuantityWidget'
+import GeoMapWidget from './components/GeoMapWidget'
 import { VideoWidget } from './components/VideoWidget'
 import { StandaloneChartWidget } from './components/StandaloneChartWidget'
 import { IfcLogoIcon } from './components/IfcLogoIcon'
@@ -554,9 +556,11 @@ function Dashboard({ readOnly = false }) {
                                             ? 'Filter Builder'
                                             : type === 'bcf_stats'
                                                 ? 'BCF Issue Stats'
-                                                : 'New Panel',
+                                                : type === 'geo_map'
+                                                    ? 'Location Map'
+                                                    : 'New Panel',
             content: type === 'text' ? '## New Note\n\nClick edit to add content.' : undefined,
-            noPadding: type === 'table' || type === 'text' || type === 'pivot' || type === 'video',
+            noPadding: type === 'table' || type === 'text' || type === 'pivot' || type === 'video' || type === 'geo_map',
         }
         setExtraWidgets(prev => [...prev, newWidget])
     }
@@ -2016,7 +2020,7 @@ function Dashboard({ readOnly = false }) {
             const next = new Map()
             const merged = []
             for (const r of resolved) {
-                next.set(r.branchName, { branchName: r.branchName, versionId: r.versionId, color: r.color, normalizerModelId: r.normalizerModelId })
+                next.set(r.branchName, { branchName: r.branchName, versionId: r.versionId, color: r.color, normalizerModelId: r.normalizerModelId, hidden: r.hidden ?? false })
                 for (const el of r.elements) merged.push({ ...el, _modelKey: r.branchName })
             }
             setCombinedModels(next)
@@ -2300,11 +2304,12 @@ function Dashboard({ readOnly = false }) {
             if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
             if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />
+            if (w.type === 'geo_map') return <GeoMapWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} />
             return null
         })()
 
         return (
-            <GridPanel title={w.title || 'Panel'} icon={w.type === 'bcf_stats' ? <BcfLogoIcon className="w-4 h-4" /> : undefined}>
+            <GridPanel title={w.title || 'Panel'} icon={w.type === 'bcf_stats' ? <BcfLogoIcon className="w-4 h-4" /> : w.type === 'geo_map' ? <MapPin className="w-4 h-4" /> : undefined}>
                 {content}
             </GridPanel>
         )
@@ -2532,6 +2537,19 @@ function Dashboard({ readOnly = false }) {
                             </div>
 
                             <SemanticSearchStatus normalizerUrl={CONFIG.normalizerUrl} modelId={data?.normalizer_model_id} />
+
+                            {data?.project_id && data?.model_id && (
+                                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                                    onClick={() => window.open(
+                                        `${activeServer.url}/projects/${data.project_id}/models/${data.model_id}${data.version_id ? `@${data.version_id}` : ''}`,
+                                        '_blank', 'noopener,noreferrer'
+                                    )}
+                                    className="glass-card icon-btn hover:bg-white/10 shrink-0"
+                                    title="Open in Speckle"
+                                >
+                                    <ExternalLink className="w-5 h-5" />
+                                </motion.button>
+                            )}
 
                             <div className="flex-1" />
 
@@ -3123,6 +3141,7 @@ function Dashboard({ readOnly = false }) {
                             onDocumentLinksChanged={refreshDocumentPins}
                             documentLinksVersion={documentLinksVersion}
                             onOpenConnectivity={(el) => setConnectivityTarget({ elementId: el.element_id, name: el.name })}
+                            onIsolate={(el) => speckleViewerRef.current?.setFilter(el?.id ? [el.id] : null)}
                             // Documents requires a login server-side (every route in
                             // routers/documents.py needs require_login at minimum) — skip
                             // rendering the section entirely for anonymous visitors rather
