@@ -143,10 +143,6 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
     const [uploadStatus, setUploadStatus] = useState(null)
     const fileInputRef = useRef(null)
 
-    useImperativeHandle(ref, () => ({
-        triggerUpload: () => fileInputRef.current?.click(),
-    }), [])
-
     useEffect(() => { onUploadingChange?.(uploading) }, [uploading, onUploadingChange])
 
     const columns = STATUSES.reduce((acc, status) => {
@@ -315,7 +311,14 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
     // Speckle web app itself. Once conversion finishes, hands off to the
     // normal onLoadModel flow (ingest + load into the viewer) so the new
     // model shows up immediately instead of just sitting there unloaded.
-    async function uploadIfc(file) {
+    //
+    // Wrapped in useCallback (rather than a plain function declaration) so
+    // it has a stable identity across renders — the useImperativeHandle
+    // below exposes it as uploadFile() for DocumentsPanel's drag-and-drop
+    // zone to call directly, and needs a reference that's actually current
+    // for streamId/serverUrl/serverToken rather than a fresh closure on
+    // every render recreating the handle for no reason.
+    const uploadIfc = useCallback(async (file) => {
         setUploading(true)
         setActionError(null)
         const branchName = slugifyBranchName(file.name)
@@ -355,7 +358,27 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
             setUploading(false)
             setUploadStatus(null)
         }
-    }
+    }, [base, streamId, serverUrl, serverToken, load, onLoadModel])
+
+    useImperativeHandle(ref, () => ({
+        triggerUpload: () => fileInputRef.current?.click(),
+        // Lets a parent-level file drop (DocumentsPanel's own drag-and-drop
+        // zone, shared across its Documents/Drawings/Models tabs) hand an
+        // .ifc file straight to the real upload flow instead of it falling
+        // through to DocumentsPanel's generic Nextcloud document upload —
+        // see uploadIfc above for what this actually does. Depends on
+        // uploadIfc (stable via its own useCallback above, but still changes
+        // if streamId/serverUrl/serverToken change) rather than an empty
+        // array like triggerUpload — those props can change while this
+        // panel stays mounted (switching project/server without closing
+        // Documents), and an empty-deps handle would freeze uploadFile on
+        // the FIRST render's stream/server, silently uploading to the wrong
+        // project after a switch. Placed after uploadIfc's own definition
+        // (not up near the other state/refs) since uploadIfc is a `const`
+        // now, not a hoisted function declaration — referencing it here
+        // before its own line executes would throw a TDZ ReferenceError.
+        uploadFile: (file) => uploadIfc(file),
+    }), [uploadIfc])
 
     const handleUploadFile = (e) => {
         const file = e.target.files?.[0]

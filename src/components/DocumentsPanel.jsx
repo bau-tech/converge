@@ -768,7 +768,30 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         e.preventDefault()
         dragCounterRef.current = 0
         setIsDraggingFile(false)
-        uploadFiles(Array.from(e.dataTransfer.files || []), uploadOptsForActiveTab())
+        const files = Array.from(e.dataTransfer.files || [])
+
+        // The Models tab's own upload flow (SpeckleModelsList.uploadIfc, via
+        // this ref) sends a file to Speckle's file-import endpoint to create
+        // a new model — completely different from uploadFiles below, which
+        // sends it into Nextcloud as a plain WIP document. Dropping an .ifc
+        // file while on this tab used to silently fall through to the
+        // Nextcloud path (uploadOptsForActiveTab() has no 'models' case) —
+        // it "succeeded" with no error, just never became a model, which is
+        // why it looked like drag-and-drop simply didn't work here.
+        if (activeTab === 'models') {
+            const ifcFiles = files.filter(f => f.name.toLowerCase().endsWith('.ifc'))
+            if (ifcFiles.length === 0) {
+                setError(files.length ? 'Only .ifc files can be uploaded here — drop a file onto Documents or Drawings instead.' : null)
+                return
+            }
+            // uploadIfc handles one file at a time (matches the Upload button,
+            // which only ever sends e.target.files[0]) — extra dropped files
+            // are ignored rather than queued.
+            modelsListRef.current?.uploadFile(ifcFiles[0])
+            return
+        }
+
+        uploadFiles(files, uploadOptsForActiveTab())
     }
 
     const moveDocument = async (docId, status) => {
