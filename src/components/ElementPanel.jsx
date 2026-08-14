@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    X, ChevronDown, ChevronRight, Copy, Check, Filter, Eye, MoreHorizontal, Loader2,
+    X, ChevronDown, ChevronRight, Copy, Check, Filter, Eye, Loader2,
     Paperclip, Link2, Unlink2, Plus, Search, FileText, Waypoints,
 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
@@ -341,15 +341,27 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
     )
 }
 
-export default function ElementPanel({ element, onClose, onFilter, darkMode = true, normalizerUrl, streamId, onDocumentLinksChanged, documentLinksVersion, hideDocuments = false, onOpenConnectivity }) {
+export default function ElementPanel({ element, onClose, onFilter, darkMode = true, normalizerUrl, streamId, onDocumentLinksChanged, documentLinksVersion, hideDocuments = false, onOpenConnectivity, onIsolate }) {
     const [width, setWidth] = useState(400)
     const [isAutoWidth, setIsAutoWidth] = useState(false)
     const [isResizing, setIsResizing] = useState(false)
     const [copied, setCopied] = useState(false)
     // Track the currently-active property filter so the user can see what's applied
     const [activeFilter, setActiveFilter] = useState(null)   // { path, value }
+    const [isolated, setIsolated] = useState(false)
+
+    // Selecting a different element (without closing the panel — e.g. clicking
+    // another object in the viewer) should show that element as not-yet-isolated
+    // rather than keep showing the previous element's isolate state.
+    useEffect(() => { setIsolated(false) }, [element?.id])
 
     if (!element) return null
+
+    const toggleIsolate = () => {
+        const next = !isolated
+        setIsolated(next)
+        onIsolate?.(next ? element : null)
+    }
 
     const handleCopy = (text) => {
         navigator.clipboard.writeText(text)
@@ -456,14 +468,14 @@ export default function ElementPanel({ element, onClose, onFilter, darkMode = tr
             <div className={`flex items-center justify-between px-4 py-3 border-b ${darkMode ? 'border-[#333] bg-[#252526]' : 'border-gray-200 bg-gray-50'}`}>
                 <h2 className={`font-semibold text-sm ${darkMode ? 'text-white' : 'text-gray-900'}`}>Selected</h2>
                 <div className="flex items-center gap-3">
-                    <button className="text-zinc-400 hover:text-white transition-colors" title="Isolate" aria-label="Isolate element in viewer">
+                    <button
+                        onClick={toggleIsolate}
+                        className={`transition-colors ${isolated ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-400 hover:text-white'}`}
+                        title={isolated ? 'Show all elements' : 'Isolate'}
+                        aria-label={isolated ? 'Show all elements in viewer' : 'Isolate element in viewer'}
+                        aria-pressed={isolated}
+                    >
                         <Eye className="w-4 h-4" />
-                    </button>
-                    <button className="text-zinc-400 hover:text-white transition-colors" title="Filter Selection" aria-label="Filter by selection">
-                        <Filter className="w-4 h-4" />
-                    </button>
-                    <button className="text-zinc-400 hover:text-white transition-colors" title="More" aria-label="More options" aria-haspopup="true">
-                        <MoreHorizontal className="w-4 h-4" />
                     </button>
                     <button
                         onClick={() => onOpenConnectivity?.(element)}
