@@ -2028,7 +2028,22 @@ def speckle_suggest_classification(model_id: str, element_id: str, candidates: i
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _ifc_qty_by_element(m: "ifcopenshell.file") -> "dict[int, tuple[float, float]]":
-    """Return {element_id: (volume_m3, area_m2)} from IfcElementQuantity sets."""
+    """
+    Return {element_id: (volume_m3, area_m2)} from IfcElementQuantity sets.
+
+    A single Qto_*BaseQuantities set commonly carries BOTH a Net and a Gross
+    variant of the same quantity (NetVolume + GrossVolume, NetSideArea +
+    GrossSideArea) as separate IfcQuantityVolume/IfcQuantityArea entries —
+    summing every entry of a given type within one qset (as this previously
+    did) silently added Net+Gross together instead of picking one, inflating
+    totals whenever both were present. Prefer the Net-labeled quantity (the
+    standard takeoff basis, matching the Net-preference already used for
+    bim_parameters — see db/query.py's _VOL_AREA_FALLBACK_CTE), falling back
+    to the first Gross/unlabeled quantity of that type only if no Net variant
+    exists in this qset. Quantities are still accumulated ACROSS separate
+    qsets on the same element — that's a real distinct-quantities case, not
+    the Net/Gross duplication this fixes.
+    """
     el_qty: dict[int, tuple[float, float]] = {}
     for rel in m.by_type("IfcRelDefinesByProperties"):
         try:
@@ -2037,15 +2052,27 @@ def _ifc_qty_by_element(m: "ifcopenshell.file") -> "dict[int, tuple[float, float
             continue
         if not qset.is_a("IfcElementQuantity"):
             continue
-        vol, area = 0.0, 0.0
+        vol = area = None
+        vol_fallback = area_fallback = None
         for qty in (qset.Quantities or []):
             try:
+                name = (qty.Name or "").lower()
                 if qty.is_a("IfcQuantityVolume"):
-                    vol += float(qty.VolumeValue or 0)
+                    v = float(qty.VolumeValue or 0)
+                    if "net" in name:
+                        vol = v
+                    elif vol_fallback is None:
+                        vol_fallback = v
                 elif qty.is_a("IfcQuantityArea"):
-                    area += float(qty.AreaValue or 0)
+                    a = float(qty.AreaValue or 0)
+                    if "net" in name:
+                        area = a
+                    elif area_fallback is None:
+                        area_fallback = a
             except Exception:
                 pass
+        vol = vol if vol is not None else (vol_fallback or 0.0)
+        area = area if area is not None else (area_fallback or 0.0)
         for el in (rel.RelatedObjects or []):
             if not el.is_a("IfcElement"):
                 continue

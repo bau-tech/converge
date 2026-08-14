@@ -7,7 +7,7 @@ from psycopg2.extras import execute_values
 from specklepy.objects import Base
 
 from ifc.classify import classify_material_category, extract_profile_from_name
-from ifc.schema import LENGTH_TO_M, MASS_TO_KG, sanitize_float, sanitize_floats
+from ifc.schema import AREA_TO_M2, LENGTH_TO_M, MASS_TO_KG, VOLUME_TO_M3, sanitize_float, sanitize_floats
 
 logger = logging.getLogger(__name__)
 
@@ -510,9 +510,21 @@ def _si_factor(canonical: str | None, unit: str | None) -> tuple[float | None, s
         f = LENGTH_TO_M.get(u)
         return (f, "m") if f else (None, None)
     if canonical in _AREA_CANONICALS:
+        # Connectors usually give an Area parameter its OWN unit (e.g. Revit's
+        # "Quadratmeter", Tekla's "Square millimeters") rather than the bare
+        # length unit LENGTH_TO_M expects — check the compound-word table
+        # first (see its definition for why), then fall back to treating
+        # `unit` as a length unit to square, for sources/plain scalars that
+        # really do only carry a length unit here.
+        f2 = AREA_TO_M2.get(u)
+        if f2 is not None:
+            return f2, "m2"
         f = LENGTH_TO_M.get(u)
         return (f * f, "m2") if f else (None, None)
     if canonical in _VOLUME_CANONICALS:
+        f3 = VOLUME_TO_M3.get(u)
+        if f3 is not None:
+            return f3, "m3"
         f = LENGTH_TO_M.get(u)
         return (f ** 3, "m3") if f else (None, None)
     return None, None
@@ -524,9 +536,28 @@ def _normalize_numeric(canonical: str | None, value_numeric: float | None,
     if value_numeric is None:
         return None, None
     factor, unit_si = _si_factor(canonical, unit)
-    if factor is None:
-        return None, None
-    return value_numeric * factor, unit_si
+    if factor is not None:
+        return value_numeric * factor, unit_si
+    # No unit info at all, OR a unit string that's present but not one
+    # LENGTH_TO_M/AREA_TO_M2/VOLUME_TO_M3 recognizes (observed live on a
+    # plain "File upload: *.ifc" commit with no Speckle-side unit metadata
+    # whatsoever, values already in plausible m3). Same last-resort
+    # magnitude heuristic already used and documented for geometry-derived
+    # volume — see pipeline/normalize.py's _vol_factor/_area_factor, which
+    # apply it in this same "unit missing OR unrecognized" condition — kept
+    # consistent here so parameter-derived volume/area isn't silently
+    # dropped in a case the sibling code path already handles; real Speckle
+    # objects normally carry recognizable unit info so this should rarely
+    # trigger.
+    if canonical in _VOLUME_CANONICALS:
+        if unit:
+            logger.warning("_normalize_numeric: unrecognized volume unit %r, using magnitude heuristic", unit)
+        return value_numeric * (1e-9 if value_numeric > 1e6 else 1.0), "m3"
+    if canonical in _AREA_CANONICALS:
+        if unit:
+            logger.warning("_normalize_numeric: unrecognized area unit %r, using magnitude heuristic", unit)
+        return value_numeric * (1e-6 if value_numeric > 1e6 else 1.0), "m2"
+    return None, None
 
 
 def _flatten_top_level_attrs(obj: Any) -> list[dict]:
@@ -626,7 +657,7 @@ def upsert_parameters_batch(conn, rows: list[tuple[str, list[dict]]]) -> None:
             """, flat, page_size=len(flat))
 
 
-def extract_parameters(obj, speckle_id: str | None = None) -> list[dict]:
+def extract_parameters(obj, speckle_id: str | None = None, root_units: str | None = None) -> list[dict]:
     """
     Extract all parameters/properties from a Speckle Base object into the
     flat row-dict shape upsert_parameters/upsert_parameters_batch expect.
@@ -645,6 +676,14 @@ def extract_parameters(obj, speckle_id: str | None = None) -> list[dict]:
     Also derives a 'material_category' canonical row (steel/concrete/timber/
     aluminum/masonry/glass/other) from whichever material/grade value was
     found, so charts can filter by material category without re-deriving it.
+
+    `root_units` is the commit's top-level object's declared unit — some
+    connectors (observed: ArchiCAD's Generic/DataObject export) only set
+    `.units` on the root commit object, leaving every individual leaf
+    element's own `.units` unset. Without this fallback, such elements'
+    plain-scalar Volume/Area parameters (no per-parameter "units" field
+    either) had no unit to convert against at all and value_si was silently
+    left null for every one of them.
     """
     all_rows: list[dict] = []
 
@@ -654,7 +693,7 @@ def extract_parameters(obj, speckle_id: str | None = None) -> list[dict]:
     # own per-parameter "units" and override this.
     default_unit = getattr(obj, "units", None)
     if not isinstance(default_unit, str):
-        default_unit = None
+        default_unit = root_units if isinstance(root_units, str) else None
 
     # ── Top-level material/grade/profile attributes (Tekla DataObjects) ────
     all_rows.extend(_flatten_top_level_attrs(obj))

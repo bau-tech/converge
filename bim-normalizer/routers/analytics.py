@@ -50,6 +50,28 @@ def get_model_summary(model_id: str):
         release_conn(conn)
 
 
+@router.get("/models/{model_id}/location")
+def get_model_location(model_id: str):
+    """
+    Geographic location (lat/lon/elevation) derived from the model's IfcSite
+    element, for the dashboard's map widget. lat/lon are None when the model
+    has no IfcSite geo-reference (e.g. ingested directly from a live Revit
+    connector rather than an uploaded IFC file) — not a 404, since "no
+    location data" is an expected, valid state for the widget to render.
+    """
+    from db.connection import get_conn, release_conn
+    from db.query import get_model_location as _location
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Model not found")
+        return _location(conn, model_id)
+    finally:
+        release_conn(conn)
+
+
 @router.get("/models/{model_id}/qa")
 def get_model_qa(model_id: str):
     """

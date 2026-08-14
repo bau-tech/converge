@@ -416,7 +416,7 @@ def ingest_commit(
             # ── Stage 3: parameters — pure CPU; upsert also deferred. ────────
             # Independent of stage 2's outcome.
             try:
-                pending_params[speckle_id] = extract_parameters(obj, speckle_id)
+                pending_params[speckle_id] = extract_parameters(obj, speckle_id, root_units=getattr(root, "units", None))
             except Exception as exc:
                 logger.warning("Element %s: parameter extraction failed (%s): %s",
                                 speckle_id, type(exc).__name__, exc)

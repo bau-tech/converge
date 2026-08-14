@@ -3,6 +3,7 @@ Read-side queries for chart and table endpoints.
 All functions take an open psycopg2 connection and return plain dicts/lists.
 """
 
+import json
 import logging
 
 from ifc.classify import classify_material_category, classify_section_family, normalize_profile_label
@@ -294,23 +295,37 @@ def get_model_summary(conn, model_id: str) -> dict:
         # Both rely on canonical_key='material_category' derived at ingest time.
         # Joined via LEFT JOIN so elements without material_category are excluded
         # rather than duplicated.
+        #
+        # weight is deduped the same way pv/pa dedup volume/area: a source can
+        # legitimately carry more than one raw key resolving to canonical_key=
+        # 'weight' for the same element (e.g. Tekla exposing both WEIGHT and
+        # NET_WEIGHT — see config/mapping_canonical.json's 'weight' entry).
+        # Joining bim_parameters directly (as this used to) fans the base row
+        # out once per matching weight row, double-*summing* that element's
+        # weight (and, since it's the same joined row set, would also skew any
+        # other aggregate sharing this query) whenever both are present.
         cur.execute(f"""
-            WITH {_VOL_ONLY_FALLBACK_CTE}
+            WITH {_VOL_ONLY_FALLBACK_CTE},
+            pw AS (
+                SELECT DISTINCT ON (p.element_id) p.element_id, p.value_si
+                FROM bim_parameters p
+                JOIN bim_elements   e ON e.element_id = p.element_id AND e.model_id = %s
+                WHERE p.canonical_key = 'weight' AND p.value_si IS NOT NULL
+                ORDER BY p.element_id, p.key ASC
+            )
             SELECT
                 COALESCE(SUM(CASE WHEN mat.value = 'concrete'
                     THEN COALESCE(g.volume_m3, pv.value_si) END), 0),
-                COALESCE(SUM(CASE WHEN mat.value = 'steel' AND w.value_si IS NOT NULL
-                    THEN w.value_si END), 0)
+                COALESCE(SUM(CASE WHEN mat.value = 'steel'
+                    THEN pw.value_si END), 0)
             FROM bim_elements e
             LEFT JOIN bim_geometry   g   ON g.element_id   = e.element_id
             LEFT JOIN pv                 ON pv.element_id  = e.element_id
+            LEFT JOIN pw                 ON pw.element_id  = e.element_id
             LEFT JOIN bim_parameters mat ON mat.element_id = e.element_id
                 AND mat.canonical_key = 'material_category'
-            LEFT JOIN bim_parameters w   ON w.element_id   = e.element_id
-                AND w.canonical_key = 'weight'
-                AND w.value_si IS NOT NULL
             WHERE e.model_id = %s
-        """, (model_id, model_id))
+        """, (model_id, model_id, model_id))
         _mat_row = cur.fetchone()
         concrete_volume_m3 = round(float(_mat_row[0] or 0), 3)
         steel_weight_kg    = round(float(_mat_row[1] or 0), 1)
@@ -708,15 +723,22 @@ def _element_material_map(cur, model_id: str) -> dict[str, str]:
 def get_quantity_takeoff(conn, model_id: str, group_by: str = "ifc_class") -> dict:
     """
     Return structured quantity takeoff grouped by ifc_class, category,
-    storey, or material. Reads volume_m3 and area_m2 from bim_geometry.
+    storey, or material. Reads volume_m3/area_m2 from bim_geometry (mesh),
+    falling back to bim_parameters' SI-normalized Qto values (same
+    _VOL_AREA_FALLBACK_CTE used by get_model_summary/_qty_by_field above) for
+    elements with no mesh — otherwise an element with only a reported
+    Volume/Area parameter (no tessellated geometry, e.g. many IFC exports)
+    silently contributed 0 here while still counting correctly in the
+    dashboard's own summary endpoint, making BOQ/cost-estimate tools
+    (speckle_quantities, speckle_cost_estimate) under-report vs. that.
 
     'material' isn't a bim_elements column (it lives in bim_parameters, one
     row per element via canonical_key/raw-key fallback like everywhere else
     in this file) so it takes a separate path: map each element to its
     material via _element_material_map, then aggregate in Python against
-    each element's own geometry row — same end result as the SQL GROUP BY
-    the other three fields use, just computed client-side since the group
-    key isn't a column to GROUP BY on directly.
+    each element's own geometry (or parameter-fallback) volume — same end
+    result as the SQL GROUP BY the other three fields use, just computed
+    client-side since the group key isn't a column to GROUP BY on directly.
     """
     allowed = {"ifc_class", "category", "storey", "material"}
     field = group_by if group_by in allowed else "ifc_class"
@@ -724,21 +746,24 @@ def get_quantity_takeoff(conn, model_id: str, group_by: str = "ifc_class") -> di
     with conn.cursor() as cur:
         if field == "material":
             mat_map = _element_material_map(cur, model_id)
-            cur.execute("""
-                SELECT e.element_id::text, g.volume_m3, g.area_m2
+            cur.execute(f"""
+                WITH {_VOL_AREA_FALLBACK_CTE}
+                SELECT e.element_id::text, COALESCE(g.volume_m3, pv.value_si), COALESCE(g.area_m2, pa.value_si), g.element_id
                 FROM bim_elements e
                 LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                LEFT JOIN pv             ON pv.element_id = e.element_id
+                LEFT JOIN pa             ON pa.element_id = e.element_id
                 WHERE e.model_id = %s
-            """, (model_id,))
+            """, (model_id, model_id, model_id))
             agg: dict[str, dict] = {}
-            for eid, vol, area in cur.fetchall():
+            for eid, vol, area, geom_id in cur.fetchall():
                 bucket = agg.setdefault(mat_map.get(eid, "Unknown"), {"count": 0, "vol": 0.0, "area": 0.0, "with_geom": 0})
                 bucket["count"] += 1
                 if vol is not None:
                     bucket["vol"] += float(vol)
                 if area is not None:
                     bucket["area"] += float(area)
-                if vol is not None or area is not None:
+                if geom_id is not None:
                     bucket["with_geom"] += 1
             rows = sorted(
                 ((grp, v["count"], v["vol"], v["area"], v["with_geom"]) for grp, v in agg.items()),
@@ -746,26 +771,34 @@ def get_quantity_takeoff(conn, model_id: str, group_by: str = "ifc_class") -> di
             )
         else:
             cur.execute(f"""
+                WITH {_VOL_AREA_FALLBACK_CTE}
                 SELECT
                     COALESCE(e.{field}, 'Unknown') AS grp,
                     COUNT(*)                        AS element_count,
-                    COALESCE(SUM(g.volume_m3), 0)  AS volume_m3,
-                    COALESCE(SUM(g.area_m2), 0)    AS area_m2,
+                    COALESCE(SUM(COALESCE(g.volume_m3, pv.value_si)), 0) AS volume_m3,
+                    COALESCE(SUM(COALESCE(g.area_m2,   pa.value_si)), 0) AS area_m2,
                     COUNT(g.element_id)             AS elements_with_geometry
                 FROM bim_elements e
                 LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+                LEFT JOIN pv             ON pv.element_id = e.element_id
+                LEFT JOIN pa             ON pa.element_id = e.element_id
                 WHERE e.model_id = %s
                 GROUP BY grp
-                ORDER BY SUM(g.volume_m3) DESC NULLS LAST, COUNT(*) DESC
-            """, (model_id,))
+                ORDER BY SUM(COALESCE(g.volume_m3, pv.value_si)) DESC NULLS LAST, COUNT(*) DESC
+            """, (model_id, model_id, model_id))
             rows = cur.fetchall()
 
-        cur.execute("""
-            SELECT COUNT(*), COALESCE(SUM(g.volume_m3), 0), COALESCE(SUM(g.area_m2), 0)
+        cur.execute(f"""
+            WITH {_VOL_AREA_FALLBACK_CTE}
+            SELECT COUNT(*),
+                COALESCE(SUM(COALESCE(g.volume_m3, pv.value_si)), 0),
+                COALESCE(SUM(COALESCE(g.area_m2,   pa.value_si)), 0)
             FROM bim_elements e
             LEFT JOIN bim_geometry g ON g.element_id = e.element_id
+            LEFT JOIN pv             ON pv.element_id = e.element_id
+            LEFT JOIN pa             ON pa.element_id = e.element_id
             WHERE e.model_id = %s
-        """, (model_id,))
+        """, (model_id, model_id, model_id))
         total_row = cur.fetchone()
 
     return {
@@ -1504,3 +1537,71 @@ def semantic_search_elements(conn, model_id: str, query: str, limit: int = 10) -
             continue
         results.append({"element_id": element_id, "score": round(score, 4), **info})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Model geo-location — IfcSite.RefLatitude/RefLongitude
+# ---------------------------------------------------------------------------
+
+def _compound_angle_to_decimal(raw_value) -> float | None:
+    """
+    Convert an IFC IfcCompoundPlaneAngleMeasure — [degrees, minutes, seconds,
+    (optional) millionths-of-a-second] — to decimal degrees.
+
+    Per the IFC spec only the first (degrees) component carries the sign of
+    the whole angle; the rest are magnitudes. Live ingested data (Speckle's
+    own IFC importer, confirmed against 4 real sample files spanning Revit/
+    ArchiCAD/Autodesk sources) instead puts the sign on every component
+    (e.g. longitude -71°15'29.5" stored as [-71,-15,-29,-58837], not
+    [-71,15,29,58837]) — summing absolute values and re-applying the sign of
+    the first non-zero component handles both conventions correctly.
+    """
+    try:
+        parts = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+        if not isinstance(parts, list) or len(parts) < 3:
+            return None
+        deg, minute, sec = float(parts[0]), float(parts[1]), float(parts[2])
+        micro = float(parts[3]) if len(parts) > 3 else 0.0
+        first_nonzero = next((v for v in (deg, minute, sec, micro) if v != 0), 0.0)
+        sign = -1.0 if first_nonzero < 0 else 1.0
+        return sign * (abs(deg) + abs(minute) / 60 + abs(sec) / 3600 + abs(micro) / 3_600_000_000)
+    except (ValueError, TypeError, json.JSONDecodeError, IndexError):
+        return None
+
+
+def get_model_location(conn, model_id: str) -> dict:
+    """
+    Geographic location of a model, derived from its IfcSite element's
+    RefLatitude/RefLongitude/RefElevation — standard IFC site geo-reference,
+    captured today as ordinary bim_parameters rows via the generic property
+    scan (no dedicated extraction needed). Only present for models sourced
+    from an actual IFC file; models pushed directly from a live Revit/other
+    connector (no IfcSite in Speckle's own object model) return all-None,
+    which callers should render as "no location data" rather than an error.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT p.key, p.value
+            FROM bim_elements e
+            JOIN bim_parameters p ON p.element_id = e.element_id
+            WHERE e.model_id = %s AND e.ifc_class = 'IfcSite'
+              AND p.key IN ('RefLatitude', 'RefLongitude', 'RefElevation', 'Name')
+        """, (model_id,))
+        by_key = dict(cur.fetchall())
+
+    if "RefLatitude" not in by_key or "RefLongitude" not in by_key:
+        return {"lat": None, "lon": None, "elevation": None, "site_name": None}
+
+    elevation = None
+    if by_key.get("RefElevation") is not None:
+        try:
+            elevation = float(by_key["RefElevation"])
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "lat":       _compound_angle_to_decimal(by_key["RefLatitude"]),
+        "lon":       _compound_angle_to_decimal(by_key["RefLongitude"]),
+        "elevation": elevation,
+        "site_name": by_key.get("Name"),
+    }

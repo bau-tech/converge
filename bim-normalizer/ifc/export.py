@@ -334,7 +334,9 @@ def export_model(
         vol  = elem.get("volume_m3")
         area = elem.get("area_m2")
         if vol is not None or area is not None:
-            _attach_quantities(f, owner_history, ifc_elem, vol, area)
+            volume_name = _quantity_label(elem_params, "volume", "NetVolume", "GrossVolume")
+            area_name   = _quantity_label(elem_params, "area", "NetSideArea", "GrossSideArea")
+            _attach_quantities(f, owner_history, ifc_elem, vol, area, volume_name, area_name)
 
         material_name = _extract_material_name(elem_params)
         if material_name:
@@ -1017,20 +1019,58 @@ def _attach_psets(f, owner_history, element, params: list[dict]) -> None:
         )
 
 
-def _attach_quantities(f, owner_history, element, volume_m3, area_m2) -> None:
+def _quantity_label(elem_params: list[dict], canonical: str, net_name: str, gross_name: str) -> str:
+    """
+    Pick the IfcQuantityVolume/Area `Name` this element's own source data
+    actually supports, instead of unconditionally labeling every exported
+    quantity "Net*" regardless of where the number came from.
+
+    bim_geometry.volume_m3/area_m2 (what the caller passes as volume_m3/
+    area_m2) conflates Net/Gross into one float with no stored provenance,
+    so if the element's own bim_parameters has a Net- or Gross-labeled row
+    for this canonical_key, trust that label (pipeline/normalize.py's
+    property-scan fallback already prefers Net when writing bim_geometry —
+    see _VOL_KEYS/_AREA_KEYS — so a Gross-only source parameter reliably
+    means the resulting number is the Gross one). Falls back to the Net
+    label when no matching parameter row exists at all (value came from raw
+    mesh/bbox geometry, which has no net/gross semantics) — the same default
+    convention real authoring tools (e.g. Revit) use for a plain computed
+    volume, so this isn't a behavior change for that common case.
+
+    Checks ALL matching rows for a "net" hit before considering "gross" —
+    real Qto psets (Qto_WallBaseQuantities etc.) routinely carry both
+    NetVolume and GrossVolume side by side, and elem_params arrives sorted
+    alphabetically by key (routers/ifc_export.py's `ORDER BY ..., key`),
+    which puts "GrossVolume" before "NetVolume" (G < N). A first-match scan
+    would then label a Net-preferring value (see above) as "GrossVolume"
+    whenever both are present — this must mirror the same Net-over-Gross
+    precedence pipeline/normalize.py used to compute the value in the first
+    place, not the incidental DB sort order.
+    """
+    matches = [p for p in elem_params if p.get("canonical_key") == canonical]
+    keys = [(p.get("key") or "").lower() for p in matches]
+    if any("net" in k for k in keys):
+        return net_name
+    if any("gross" in k for k in keys):
+        return gross_name
+    return net_name
+
+
+def _attach_quantities(f, owner_history, element, volume_m3, area_m2,
+                        volume_name="NetVolume", area_name="NetSideArea") -> None:
     """Attach IfcElementQuantity with area and/or volume."""
     quantities = []
     if area_m2 is not None:
         try:
             quantities.append(
-                f.create_entity("IfcQuantityArea", Name="NetSideArea", AreaValue=float(area_m2))
+                f.create_entity("IfcQuantityArea", Name=area_name, AreaValue=float(area_m2))
             )
         except Exception as exc:
             logger.debug("IfcQuantityArea failed: %s", exc)
     if volume_m3 is not None:
         try:
             quantities.append(
-                f.create_entity("IfcQuantityVolume", Name="NetVolume", VolumeValue=float(volume_m3))
+                f.create_entity("IfcQuantityVolume", Name=volume_name, VolumeValue=float(volume_m3))
             )
         except Exception as exc:
             logger.debug("IfcQuantityVolume failed: %s", exc)
