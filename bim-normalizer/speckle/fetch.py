@@ -365,6 +365,7 @@ def flatten_elements(
     _depth: int = 0,
     _max_depth: int = 50,
     _parent_name: str = "",
+    _seen_ids: set | None = None,
 ) -> list[tuple]:
     """
     Recursively traverse the Speckle object tree and return all leaf BIM elements.
@@ -377,7 +378,22 @@ def flatten_elements(
     Revit v3 organises elements inside Collections whose `name` IS the Revit category.
     Type/family names ("Basic Wall: Generic 200mm") are NOT promoted — only names
     present in _REVIT_CATEGORY_MAP propagate downward.
+
+    Speckle's object graph is a DAG, not strictly a tree — the same object.id
+    can legitimately be referenced from more than one parent's `elements`
+    (confirmed live: a Tekla bolted-connection "Fitting" shared between the
+    two connected members' own element lists). `_seen_ids` is threaded
+    through the recursion (same set object passed to every call, only
+    created fresh at the top-level call) so a shared object is emitted at
+    most once — without it, such an object is silently duplicated in the
+    returned list, which both inflates element_count and, since the DB
+    upsert keys on (model_id, speckle_id), makes two rows in the same
+    INSERT batch target the same row — Postgres rejects
+    "ON CONFLICT DO UPDATE" affecting one row twice in a single statement.
     """
+    if _seen_ids is None:
+        _seen_ids = set()
+
     if _depth > _max_depth:
         logger.warning(
             "flatten_elements: max depth %d exceeded at id=%s type=%s — subtree truncated",
@@ -396,6 +412,12 @@ def flatten_elements(
 
         if _should_skip(st):
             continue
+
+        child_id = getattr(child, "id", None)
+        if child_id is not None:
+            if child_id in _seen_ids:
+                continue
+            _seen_ids.add(child_id)
 
         # Log Tekla element types at info level on first encounter (depth 0 or 1) to aid diagnosis
         if _depth <= 1 and "Tekla" in st:
@@ -419,7 +441,7 @@ def flatten_elements(
             next_parent = child_name if child_name in _REVIT_CATEGORY_MAP else _parent_name
             if _depth == 0:
                 logger.debug("flatten: collection name=%r  next_hint=%r", child_name, next_parent)
-            results.extend(flatten_elements(child, _depth + 1, _max_depth, next_parent))
+            results.extend(flatten_elements(child, _depth + 1, _max_depth, next_parent, _seen_ids))
         else:
             results.append((child, _parent_name))
             # Do NOT recurse into TeklaObject children.
@@ -436,7 +458,7 @@ def flatten_elements(
             # speckle_type instead of short-circuiting to "Floors" via
             # classify_element()'s category_hint-first Revit branch.
             if _child_elements(child) and st != "Objects.Data.TeklaObject":
-                results.extend(flatten_elements(child, _depth + 1, _max_depth, ""))
+                results.extend(flatten_elements(child, _depth + 1, _max_depth, "", _seen_ids))
 
     return results
 
