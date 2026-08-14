@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Activity, Table, Layout, ShieldCheck, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video, Filter } from 'lucide-react'
+import { Plus, Activity, Table, Layout, ShieldCheck, Boxes, FileText, BarChart3, PieChart, Eye, EyeOff, Video, Filter, MapPin } from 'lucide-react'
 import { BcfLogoIcon } from './BcfLogoIcon'
 
 // Same neutral icon/hover treatment as every other panel's list items
@@ -16,6 +16,7 @@ const WIDGET_TYPES = [
     { type: 'text',       icon: FileText,      label: 'Notes' },
     { type: 'video',      icon: Video,         label: 'PeerTube Video' },
     { type: 'bcf_stats',  icon: BcfLogoIcon,   label: 'BCF Issue Stats' },
+    { type: 'geo_map',    icon: MapPin,        label: 'Location Map' },
 ]
 
 export function WidgetFAB({
