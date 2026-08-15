@@ -16,7 +16,7 @@ class ChatRequest(BaseModel):
     message: str
     model_id: str | None = None   # normalizer model UUID (bim_models.model_id)
     history: list = []
-    ai_provider: str = "openai"
+    ai_provider: str = "mistral"
     openai_config: dict | None = None
     ollama_config: dict | None = None
     lmstudio_config: dict | None = None

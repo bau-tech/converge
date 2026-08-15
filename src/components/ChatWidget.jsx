@@ -107,7 +107,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     }, [modelId])
 
     // LLM Configuration
-    const [provider, setProvider] = useState(() => localStorage.getItem('chat_ai_provider') || 'openai')
+    const [provider, setProvider] = useState(() => localStorage.getItem('chat_ai_provider') || 'mistral')
     const [ollamaConfig, setOllamaConfig] = useState(() => ({
         baseUrl: localStorage.getItem('chat_ollama_url') || RUNTIME_CONFIG.OLLAMA_BASE_URL,
         model: localStorage.getItem('chat_ollama_model') || RUNTIME_CONFIG.OLLAMA_MODEL
