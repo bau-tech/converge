@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X, Search } from 'lucide-react'
 import EChart from './EChart'
 import { baseOption } from '../lib/echartsTheme'
-import { discoverProperties, discoverNumericProperties } from '../utils/propertyScanner'
+import { discoverProperties, discoverNumericProperties, aggregateProperty } from '../utils/propertyScanner'
 
 const DEFAULT_RULES = [{ id: 1, property: 'category', operator: 'is_defined', value: '' }]
 
@@ -103,9 +103,167 @@ function PropertySelect({ options, value, onChange }) {
 }
 
 
-export default function ValidationWidget({ widgetId, fullData, title = "New Validation", onUpdateTitle, onFilterElements, onHighlightElements, darkMode = true }) {
+// Value input for equals/not_equals/contains — still a free-typed input
+// (some properties have more unique values than are worth listing, and a
+// typo-tolerant "contains" search benefits from typing anyway) but backed by
+// a dropdown of every value actually present in the model for the currently
+// selected property, so the common case is "pick from a list" instead of
+// guessing spelling/casing blind. Sourced from aggregateProperty, which scans
+// every element (unlike discoverProperties' 500-element sample), so rare
+// values used by only a handful of elements still show up.
+function ValueCombobox({ options, value, onChange, placeholder }) {
+    const [open, setOpen] = useState(false)
+    const containerRef = useRef(null)
+
+    const filtered = useMemo(() => {
+        if (!value) return options
+        const needle = value.toLowerCase()
+        return options.filter(o => o.label.toLowerCase().includes(needle))
+    }, [options, value])
+
+    useEffect(() => {
+        if (!open) return
+        const handleOutside = (e) => {
+            if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false)
+        }
+        document.addEventListener('mousedown', handleOutside)
+        return () => document.removeEventListener('mousedown', handleOutside)
+    }, [open])
+
+    const commit = (opt) => {
+        onChange(opt.value)
+        setOpen(false)
+    }
+
+    return (
+        <div className="relative flex-1" ref={containerRef}>
+            <input
+                type="text"
+                value={value}
+                onChange={(e) => { onChange(e.target.value); setOpen(true) }}
+                onFocus={() => setOpen(true)}
+                placeholder={placeholder}
+                className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 focus:border-cyan-500 focus:outline-none"
+            />
+            {open && options.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto custom-scrollbar rounded-lg border border-white/10 bg-zinc-900 shadow-xl">
+                    {filtered.length === 0 ? (
+                        <div className="px-2 py-2 text-[11px] text-zinc-500 text-center truncate">No matches — using "{value}"</div>
+                    ) : (
+                        filtered.map(opt => (
+                            <div
+                                key={opt.value}
+                                onMouseDown={(e) => { e.preventDefault(); commit(opt) }}
+                                className={`px-2 py-1.5 text-xs cursor-pointer truncate flex items-center justify-between gap-2 ${
+                                    opt.value === value ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-300 hover:bg-white/5'
+                                }`}
+                            >
+                                <span className="truncate">{opt.label}</span>
+                                <span className="text-[10px] text-zinc-500 shrink-0">{opt.count}</span>
+                            </div>
+                        ))
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
+// One rule's editor row — its own component (rather than inlined in the
+// rules.map() below) so its value-options useMemo can key off just this
+// rule's property/operator without violating hooks-must-run-unconditionally
+// when the rules array itself changes length.
+function RuleRow({ rule, idx, fullData, propertyOptions, operatorOptions, noValueOperators, canRemove, onUpdate, onRemove }) {
+    // Only worth computing/showing for the operators that compare against a
+    // discrete value — gt/lt already use a plain number input, and is_defined/
+    // is_not_defined have no value field at all.
+    const valueOptions = useMemo(() => {
+        if (!['equals', 'not_equals', 'contains'].includes(rule.operator)) return []
+        const counts = aggregateProperty(fullData, rule.property)
+        return Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 200)
+            .map(([val, count]) => ({ label: val, value: val, count }))
+    }, [fullData, rule.property, rule.operator])
+
+    return (
+        <div className="glass-card p-3 rounded-lg border border-white/5 space-y-2 relative group">
+            <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                    onClick={onRemove}
+                    className="p-1 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded transition-colors"
+                    disabled={!canRemove}
+                >
+                    <Trash2 className="w-3 h-3" />
+                </button>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-zinc-500 mb-1">
+                <span className="font-mono bg-white/5 px-1.5 py-0.5 rounded">Rule #{idx + 1}</span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2">
+                <PropertySelect
+                    options={propertyOptions}
+                    value={rule.property}
+                    onChange={(val) => onUpdate('property', val)}
+                />
+
+                <div className="flex gap-2">
+                    <select
+                        value={rule.operator}
+                        onChange={(e) => onUpdate('operator', e.target.value)}
+                        className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300"
+                    >
+                        {operatorOptions.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                    </select>
+
+                    {!noValueOperators.has(rule.operator) && (
+                        valueOptions.length > 0 ? (
+                            <ValueCombobox
+                                options={valueOptions}
+                                value={rule.value}
+                                onChange={(val) => onUpdate('value', val)}
+                                placeholder="Value..."
+                            />
+                        ) : (
+                            <input
+                                type={['gt', 'lt'].includes(rule.operator) ? 'number' : 'text'}
+                                value={rule.value}
+                                onChange={(e) => onUpdate('value', e.target.value)}
+                                placeholder="Value..."
+                                className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 focus:border-cyan-500 focus:outline-none"
+                            />
+                        )
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+// Edit-rules / view-results toggle — rendered by the caller (App.jsx) inside
+// the panel's own title bar via GridPanel's headerActions, alongside the
+// panel's close button, instead of ValidationWidget drawing a second header
+// row just to hold this one button. isEditing/onToggleEditing are lifted to
+// the caller (see App.jsx's resultsViewWidgets) so this can be rendered
+// outside ValidationWidget's own component tree while still controlling it.
+export function ValidationModeToggle({ isEditing, onToggleEditing }) {
+    return (
+        <button
+            onClick={onToggleEditing}
+            className={`p-1.5 rounded transition-colors ${isEditing ? 'bg-cyan-500/20 text-cyan-400' : 'hover:bg-white/5 text-zinc-400'}`}
+            title={isEditing ? "View Results" : "Edit Rules"}
+        >
+            {isEditing ? <Play className="w-3.5 h-3.5" fill="currentColor" /> : <Settings className="w-3.5 h-3.5" />}
+        </button>
+    )
+}
+
+export default function ValidationWidget({ widgetId, fullData, title = "New Validation", onUpdateTitle, isEditing, onToggleEditing, onFilterElements, onHighlightElements, darkMode = true }) {
     const [name, setName] = useState(title)
-    const [isEditing, setIsEditing] = useState(true)
     const [rules, setRules] = useState(() => {
         try {
             const saved = localStorage.getItem(rulesKey(widgetId))
@@ -325,81 +483,40 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
 
     return (
         <div className="flex flex-col h-full overflow-hidden relative">
-            {/* Header / Mode Toggle */}
-            <div className="flex items-center justify-between p-3 border-b border-white/5 bg-zinc-900/30 shrink-0">
-                <div className="flex items-center gap-2 flex-1">
+            {/* Header — rename field, editing mode only. Results view already shows
+                the name in the panel's own outer title bar (see GridPanel/App.jsx),
+                so this second copy is dropped there entirely to give the summary
+                cards and chart the extra row of space instead. */}
+            {isEditing && (
+                <div className="flex items-center gap-2 p-3 border-b border-white/5 bg-zinc-900/30 shrink-0">
                     <div className={`w-2 h-2 rounded-full ${results.passPct === 100 ? 'bg-[var(--speckle-success)] shadow-[0_0_8px_var(--speckle-success)]' : results.passPct > 80 ? 'bg-amber-500' : 'bg-[var(--speckle-danger)]'}`} />
-                    {isEditing ? (
-                        <input
-                            type="text"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            className="bg-transparent border-b border-white/10 text-sm font-medium focus:outline-none focus:border-cyan-500 w-full max-w-[150px]"
-                            placeholder="Validation Name"
-                        />
-                    ) : (
-                        <h3 className="text-sm font-medium text-zinc-200 truncate" title={name}>{name}</h3>
-                    )}
+                    <input
+                        type="text"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        className="bg-transparent border-b border-white/10 text-sm font-medium focus:outline-none focus:border-cyan-500 w-full max-w-[150px]"
+                        placeholder="Validation Name"
+                    />
                 </div>
-                <button
-                    onClick={() => setIsEditing(!isEditing)}
-                    className={`p-1.5 rounded transition-colors ${isEditing ? 'bg-cyan-500/20 text-cyan-400' : 'hover:bg-white/5 text-zinc-400'}`}
-                    title={isEditing ? "View Results" : "Edit Rules"}
-                >
-                    {isEditing ? <Play className="w-3.5 h-3.5" fill="currentColor" /> : <Settings className="w-3.5 h-3.5" />}
-                </button>
-            </div>
+            )}
 
             {/* Content */}
             <div className="flex-1 overflow-auto p-4 custom-scrollbar">
                 {isEditing ? (
                     <div className="space-y-3">
                         {rules.map((rule, idx) => (
-                            <div key={rule.id} className="glass-card p-3 rounded-lg border border-white/5 space-y-2 relative group">
-                                <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button
-                                        onClick={() => removeRule(rule.id)}
-                                        className="p-1 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded transition-colors"
-                                        disabled={rules.length === 1}
-                                    >
-                                        <Trash2 className="w-3 h-3" />
-                                    </button>
-                                </div>
-
-                                <div className="flex items-center gap-2 text-xs text-zinc-500 mb-1">
-                                    <span className="font-mono bg-white/5 px-1.5 py-0.5 rounded">Rule #{idx + 1}</span>
-                                </div>
-
-                                <div className="grid grid-cols-1 gap-2">
-                                    <PropertySelect
-                                        options={propertyOptions}
-                                        value={rule.property}
-                                        onChange={(val) => updateRule(rule.id, 'property', val)}
-                                    />
-
-                                    <div className="flex gap-2">
-                                        <select
-                                            value={rule.operator}
-                                            onChange={(e) => updateRule(rule.id, 'operator', e.target.value)}
-                                            className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300"
-                                        >
-                                            {operatorOptions.map(opt => (
-                                                <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                            ))}
-                                        </select>
-
-                                        {!noValueOperators.has(rule.operator) && (
-                                            <input
-                                                type={['gt', 'lt'].includes(rule.operator) ? 'number' : 'text'}
-                                                value={rule.value}
-                                                onChange={(e) => updateRule(rule.id, 'value', e.target.value)}
-                                                placeholder="Value..."
-                                                className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 focus:border-cyan-500 focus:outline-none"
-                                            />
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
+                            <RuleRow
+                                key={rule.id}
+                                rule={rule}
+                                idx={idx}
+                                fullData={fullData}
+                                propertyOptions={propertyOptions}
+                                operatorOptions={operatorOptions}
+                                noValueOperators={noValueOperators}
+                                canRemove={rules.length > 1}
+                                onUpdate={(field, val) => updateRule(rule.id, field, val)}
+                                onRemove={() => removeRule(rule.id)}
+                            />
                         ))}
 
                         <button
@@ -432,15 +549,24 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                     </div>
                 ) : (
                     <div className="h-full flex flex-col" style={{ containerType: 'size' }}>
-                        {/* Summary Cards — ~20% of the available space, numbers scale with widget size */}
+                        {/* Summary Cards — ~20% of the available space. Each card is its own
+                            container-query context (rather than querying the whole widget, as
+                            before) so the number scales off the space it actually has — at the
+                            default single-slot widget size this row is only ~36px tall, and
+                            querying the full widget's cqh there sized the number (and the fixed
+                            16px .glass-card padding) well past what the row could hold, spilling
+                            the "Passed"/"Failed" caption below the card into the pie chart's own
+                            label underneath it. Padding is a small fixed value instead of the
+                            shared .glass-card 16px for the same reason — at this row height 16px
+                            of padding alone consumes nearly the whole box. */}
                         <div className="grid grid-cols-2 gap-3 mb-3" style={{ flex: '1 1 0%', minHeight: 0 }}>
-                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden">
-                                <span className="font-bold text-green-500 leading-none" style={{ fontSize: 'clamp(0.875rem, min(9cqw, 14cqh), 2.5rem)' }}>{results.passed}</span>
-                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Passed</span>
+                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden" style={{ padding: '6px', containerType: 'size' }}>
+                                <span className="font-bold text-green-500 leading-none" style={{ fontSize: 'clamp(0.6875rem, min(11cqw, 42cqh), 2rem)' }}>{results.passed}</span>
+                                <span className="text-zinc-500 uppercase tracking-wider leading-none mt-0.5" style={{ fontSize: 'clamp(0.5rem, 16cqh, 0.625rem)' }}>Passed</span>
                             </div>
-                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden">
-                                <span className={`font-bold leading-none ${results.failed > 0 ? 'text-red-500' : 'text-zinc-500'}`} style={{ fontSize: 'clamp(0.875rem, min(9cqw, 14cqh), 2.5rem)' }}>{results.failed}</span>
-                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Failed</span>
+                            <div className="glass-card flex flex-col items-center justify-center text-center overflow-hidden" style={{ padding: '6px', containerType: 'size' }}>
+                                <span className={`font-bold leading-none ${results.failed > 0 ? 'text-red-500' : 'text-zinc-500'}`} style={{ fontSize: 'clamp(0.6875rem, min(11cqw, 42cqh), 2rem)' }}>{results.failed}</span>
+                                <span className="text-zinc-500 uppercase tracking-wider leading-none mt-0.5" style={{ fontSize: 'clamp(0.5rem, 16cqh, 0.625rem)' }}>Failed</span>
                             </div>
                         </div>
 

@@ -38,7 +38,7 @@ import { MarkdownWidget } from './components/MarkdownWidget'
 import { GridDashboard, GridPanel } from './components/DashboardGrid'
 import { ChatWidget } from './components/ChatWidget'
 import PivotTableWidget from './components/PivotTableWidget'
-import ValidationWidget from './components/ValidationWidget'
+import ValidationWidget, { ValidationModeToggle } from './components/ValidationWidget'
 import FilterWidget from './components/FilterWidget'
 import QuantityWidget from './components/QuantityWidget'
 import GeoMapWidget from './components/GeoMapWidget'
@@ -1913,6 +1913,21 @@ function Dashboard({ readOnly = false }) {
     // undefined entry (or COMBINED_MODEL_KEY) means "use the merged set".
     const [chartModelFilters, setChartModelFilters] = useState({})
 
+    // Validation widgets' edit-rules/view-results mode, keyed by widget id —
+    // lifted up here (rather than local state inside ValidationWidget) so the
+    // toggle button can be rendered in the panel's own title bar via
+    // GridPanel's headerActions instead of a second header row inside the
+    // widget. A widget id absent from the set means "editing" (the original
+    // default), matching ValidationWidget's old useState(true) default.
+    const [validationResultsView, setValidationResultsView] = useState(() => new Set())
+    const handleToggleValidationView = useCallback((widgetId) => {
+        setValidationResultsView(prev => {
+            const next = new Set(prev)
+            next.has(widgetId) ? next.delete(widgetId) : next.add(widgetId)
+            return next
+        })
+    }, [])
+
     // Pre-check the already-loaded (primary) model in CombineModelsPicker,
     // reflecting reality — it's already in the viewer — and signaling to the
     // user that picking 1-2 more is what "combine" actually means, rather
@@ -2299,7 +2314,7 @@ function Dashboard({ readOnly = false }) {
             if (w.type === 'text') return <MarkdownWidget content={w.content} onUpdate={c => handleUpdateWidget(w.id, { content: c })} />
             if (w.type === 'table') return <ElementTable fullData={fullData} onElementClick={handleElementClick} viewerSelectedIds={viewerSelectedIds} onFilteredIdsChange={handleTableFilteredIds} chartFilters={chartFilters} filteredIds={viewerFilteredIds} />
             if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
-            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
+            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} isEditing={!validationResultsView.has(w.id)} onToggleEditing={() => handleToggleValidationView(w.id)} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
             if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
             if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
@@ -2309,7 +2324,13 @@ function Dashboard({ readOnly = false }) {
         })()
 
         return (
-            <GridPanel title={w.title || 'Panel'} icon={w.type === 'bcf_stats' ? <BcfLogoIcon className="w-4 h-4" /> : w.type === 'geo_map' ? <MapPin className="w-4 h-4" /> : undefined}>
+            <GridPanel
+                title={w.title || 'Panel'}
+                icon={w.type === 'bcf_stats' ? <BcfLogoIcon className="w-4 h-4" /> : w.type === 'geo_map' ? <MapPin className="w-4 h-4" /> : undefined}
+                headerActions={w.type === 'validation' ? (
+                    <ValidationModeToggle isEditing={!validationResultsView.has(w.id)} onToggleEditing={() => handleToggleValidationView(w.id)} />
+                ) : undefined}
+            >
                 {content}
             </GridPanel>
         )
@@ -2320,7 +2341,8 @@ function Dashboard({ readOnly = false }) {
         data, searchFilteredIds, viewerSelectedIds, chartFilters, paramKeys,
         visibleChartPanels, handleToggleChartPanel, darkMode, bcfTopics, effectiveFilterIds,
         colorSourceKey, handleToggleColorSource,
-        combineMode, federatedModelsArray, chartModelFilters, handleChangeChartModelFilter])
+        combineMode, federatedModelsArray, chartModelFilters, handleChangeChartModelFilter,
+        validationResultsView, handleToggleValidationView])
 
     const [layoutCopied, setLayoutCopied] = useState(false)  // false | true | 'error'
 

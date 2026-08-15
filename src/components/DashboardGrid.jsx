@@ -1057,10 +1057,13 @@ export function GridPanel({ title, icon, children, headerActions, className = ''
             </div>
             {/* Actions rendered as absolute overlay at z-index 200 — above ALL resize
                 handles (z-index 100) and the panel-header (z-index 110) so clicks always
-                land on the buttons and never on an underlying resize handle. */}
+                land on the buttons and never on an underlying resize handle. right: 28,
+                not 4 — DashboardGrid's own close button occupies a 20px-wide slot at
+                right: 4 on top of this at zIndex 9999, so headerActions content needs
+                to start left of that or the two would overlap. */}
             {headerActions && (
                 <div
-                    style={{ position: 'absolute', top: 0, right: 4, height: 30, zIndex: 200 }}
+                    style={{ position: 'absolute', top: 0, right: 28, height: 30, zIndex: 200 }}
                     className="flex items-center gap-1"
                 >
                     {headerActions}
