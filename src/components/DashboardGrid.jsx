@@ -111,7 +111,12 @@ const MOBILE_CHART_HEIGHT = 240
 // existing saved layouts would render wildly oversized under the new scale —
 // hence the version bump. VIEWER_W/VIEWER_H/SLOT_W/SLOT_H/TABLE_H below are
 // re-tuned for this new scale (see their own comments).
-const LAYOUT_KEY = 'dashboard-panel-layout-v16'
+//
+// v16 -> v17: VIEWER_H corrected 68 -> 76 (see its own comment) to close the
+// gap between the viewer's bottom edge and the default two-row widget grid —
+// bumped so everyone's already-saved (and already gap-having) viewer height
+// picks up the fix instead of keeping the stale saved 68.
+const LAYOUT_KEY = 'dashboard-panel-layout-v17'
 const CHART_SETTINGS_KEY = 'dashboard-chart-settings'
 const PINNED_VIEWER_KEY = 'dashboard-viewer-pinned'
 const PINNED_CHARTS_KEY = 'dashboard-pinned-chart-panels'
@@ -149,19 +154,24 @@ function loadSavedLayout() {
     } catch { return [] }
 }
 
-// VIEWER_W/H: captured from a live resize (viewer widened until its internal
+// VIEWER_W: captured from a live resize (viewer widened until its internal
 // diff-menu toolbar fit on a single row, at a 1912px container width) rather
 // than derived from the grid math — same "tune by hand, capture the result"
 // approach as before. The measured width was 76, bumped 2 units to 78 so
 // (COLS - VIEWER_W) divides evenly by 3 (see SLOT_W below) instead of leaving
 // a sliver at the right edge — widening only gives the diff toolbar more
-// room, so it can't reintroduce the wrap this was tuned to avoid. VIEWER_H is
-// the *old* fixed-rowHeight measurement (170 units @ 3px = 679px tall)
-// converted to the new dynamic-rowHeight scale (h * (colWidth + margin) -
-// margin = target px) so the viewer keeps the same on-screen height it had
-// when it was tuned, instead of ballooning ~2.5x under the new pixels-per-unit.
+// room, so it can't reintroduce the wrap this was tuned to avoid.
 const VIEWER_W = 78
-const VIEWER_H = 68
+// VIEWER_H: set to exactly two stacked SLOT_H rows (2 * 38) so the viewer's
+// bottom edge lines up flush with the bottom of the default two-row widget
+// grid, instead of the previous 68 — a leftover from an old fixed-rowHeight
+// measurement that undershot the current two-row default by 8 units and left
+// a permanent gap of empty canvas below the viewer's own content/toolbar.
+// react-grid-layout's pixel-height formula (h*rowHeightPx + (h-1)*marginPx)
+// is linear in h, so two stacked h=38 panels convert exactly to one h=76
+// panel (the margin between them folds in exactly once) — no separate px
+// conversion needed, unlike VIEWER_W's derivation above.
+const VIEWER_H = 76
 // SLOT_W: (COLS - VIEWER_W) split into 3 equal columns so three chart panels
 // tile flush alongside the viewer at one row each, right up to the canvas's
 // far edge — 192 - 78 = 114 = 38 * 3 exactly, no leftover sliver.
