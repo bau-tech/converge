@@ -314,6 +314,74 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         }
     }
 
+    // Ghost/hide everything except `ids`, without going through
+    // FilteringExtension.isolateObjects — confirmed via a direct A/B test
+    // (small 2-model combine vs. Snowdon's ~4000-element structural+hvac
+    // combine) that isolateObjects's own hide-the-rest traversal silently
+    // no-ops once a federated/combined scene gets large, leaving the whole
+    // model visible instead of just the 2 clashing elements. hideObjects/
+    // showObjects use a separate, simpler traversal already proven reliable
+    // at scale (handleHideSelected's "Hide Selected", below), so isolating
+    // by explicitly hiding the complement sidesteps the bug
+    // instead of depending on it being fixed upstream in @speckle/viewer.
+    const isolateByHiding = (viewer, ids, key) => {
+        const filterExt = viewer.getExtension(FilteringExtension)
+        if (!filterExt) return
+        // Clear the selection highlight BEFORE hiding, not after — same
+        // reasoning as handleHideSelected below: SelectionExtension restores
+        // a *cached pre-hide* material snapshot when a previously-selected
+        // node's selection is later cleared/replaced, so leaving a stale
+        // selection in place here means the next selectObjects(ids) call
+        // (made by every caller right after this one) silently un-hides
+        // whatever was selected before — e.g. clicking clash A then clash B
+        // would leave A visible again instead of hidden.
+        try { viewer.getExtension(SelectionExtension)?.clearSelection() } catch {}
+        const idSet = new Set(ids)
+        const complementIds = speckleIdsRef.current.filter((id) => !idSet.has(id))
+        // Show the targets first, hide the complement last — never the other
+        // way around. FilteringExtension keeps "ghost" as a single shared
+        // flag that every setVisibilityState call overwrites, and
+        // showObjects() has no ghost param (it always resets the flag to
+        // false). If showObjects ran last, it would silently turn our
+        // ghost=true hide back into a hard hide right before the renderer
+        // applies it — which is why the complement was disappearing instead
+        // of ghosting. The id-set math itself doesn't depend on this
+        // ordering: hideObjects always re-adds the full complement (which
+        // covers whatever showObjects just removed), so calling it last is
+        // safe as well as necessary.
+        filterExt.showObjects(ids, key, true)
+        if (complementIds.length) filterExt.hideObjects(complementIds, key, true, true)
+        // In combined-models mode, re-tint just the isolated ids — see
+        // federatedColorGroupsRef above for why this has to happen (and why
+        // it has to happen last, after the hide/show calls above, since
+        // setUserObjectColors's own setFilters() call is what actually
+        // needs to see the ghosted complement already in place). Restricting
+        // the groups to `ids` (instead of reapplying the full per-model
+        // groups) is what keeps the ghosted complement ghosted — only the
+        // rvs actually passed to setUserObjectColors get repainted.
+        const fullGroups = federatedColorGroupsRef.current
+        if (fullGroups?.length) {
+            const restricted = fullGroups
+                .map((g) => ({ ...g, objectIds: g.objectIds.filter((id) => idSet.has(id)) }))
+                .filter((g) => g.objectIds.length)
+            if (restricted.length) filterExt.setUserObjectColors(restricted)
+        }
+    }
+
+    // Reapplies the full per-model tint colors saved in federatedColorGroupsRef.
+    // Needed after any resetFilters() call made while in combined-models mode —
+    // resetFilters() wipes UserspaceColorState along with everything else, and
+    // nothing else in the load/unload effect re-triggers to restore it (that
+    // effect only runs again on federatedModels/federatedMode/isViewerReady
+    // changes), so without this the model would silently lose its per-model
+    // coloring the next time any filter/isolation is cleared.
+    const restoreFederatedTint = (filterExt) => {
+        const fullGroups = federatedColorGroupsRef.current
+        if (fullGroups?.length) {
+            try { filterExt.setUserObjectColors(fullGroups) } catch {}
+        }
+    }
+
     // Imperative API — lets App.jsx call setFilter(ids) directly, bypassing the
     // React prop/memo chain which can be unreliable for real-time filter updates.
     useImperativeHandle(ref, () => ({
@@ -322,11 +390,15 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 const filterExt = viewerRef.current?.getExtension(FilteringExtension)
                 if (!filterExt) return
                 if (ids?.length) filterExt.isolateObjects(ids, 'search', true, true)
-                else filterExt.resetFilters()
+                else { filterExt.resetFilters(); restoreFederatedTint(filterExt) }
             } catch (e) { console.warn('[SpeckleViewer] setFilter error:', e) }
         },
         resetFilter() {
-            try { viewerRef.current?.getExtension(FilteringExtension)?.resetFilters() }
+            try {
+                const filterExt = viewerRef.current?.getExtension(FilteringExtension)
+                filterExt?.resetFilters()
+                if (filterExt) restoreFederatedTint(filterExt)
+            }
             catch (e) { console.warn('[SpeckleViewer] resetFilter error:', e) }
         },
         // Select a single element by ID and fly the camera to it.
@@ -396,7 +468,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
                     .filter(Boolean)
                 if (!ids.length) return
-                viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'clash', true, true)
+                isolateByHiding(viewer, ids, 'clash')
                 viewer.getExtension(SelectionExtension)?.selectObjects(ids)
                 viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
                 // Keep "Hide Selected" in sync — see selectObject() above.
@@ -422,7 +494,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
                     .filter(Boolean)
                 if (ids.length) {
-                    viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'clash', true, true)
+                    isolateByHiding(viewer, ids, 'clash')
                     viewer.getExtension(SelectionExtension)?.selectObjects(ids)
                     viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
                     // setCameraView's transition has no completion callback/promise —
@@ -454,7 +526,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     .map((s) => s.speckle_id ?? elementByAppIdRef.current.get(s.ifc_guid)?.speckle_id)
                     .filter(Boolean)
                 if (ids.length) {
-                    viewer.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
+                    isolateByHiding(viewer, ids, 'bcf')
                     viewer.getExtension(SelectionExtension)?.selectObjects(ids)
                     // Keep "Hide Selected" in sync — see selectObject() above.
                     lastSelectedSceneIdRef.current = ids[ids.length - 1]
@@ -618,6 +690,17 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // which would otherwise capture a stale snapshot.
     const federatedFullDataRef = useRef(federatedFullData)
     useEffect(() => { federatedFullDataRef.current = federatedFullData }, [federatedFullData])
+    // Last-applied per-model tint colorGroups ({objectIds, color}[]), set
+    // whenever the federated load effect below calls setUserObjectColors().
+    // isolateByHiding needs this to avoid a FilteringExtension quirk: tint
+    // colors (UserspaceColorState) are a persistent field that gets
+    // unconditionally reapplied — full-opacity, ignoring hidden/ghost
+    // state — on every single setFilters() call, which hideObjects/
+    // showObjects/isolateObjects all trigger. Left alone, isolating a clash
+    // in combined view re-paints the "hidden" complement with its normal
+    // tint color instead of ghosting it, undoing the isolate entirely. See
+    // isolateByHiding and restoreFederatedTint below.
+    const federatedColorGroupsRef = useRef(null)
     // Same reasoning: read at the end of the federated async load loop below
     // so newly-loaded geometry picks up whatever filter is currently active,
     // instead of only the filtering effect's own (unrelated) dependency change.
@@ -907,7 +990,9 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 // zoomed into that pin's viewpoint with no way back.
                 if (selectedBcfTopicGuidRef.current) {
                     try {
-                        viewer.getExtension(FilteringExtension)?.resetFilters()
+                        const filterExt = viewer.getExtension(FilteringExtension)
+                        filterExt?.resetFilters()
+                        if (filterExt) restoreFederatedTint(filterExt)
                         viewer.getExtension(HybridCameraController)?.setCameraView([], true)
                     } catch {}
                     selectedBcfTopicGuidRef.current = null
@@ -1121,6 +1206,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 }
                 loaded.clear()
                 try { viewer.getExtension(FilteringExtension)?.removeUserObjectColors() } catch {}
+                federatedColorGroupsRef.current = null
                 try { viewer.getExtension(HybridCameraController)?.setCameraView([], true) } catch {}
                 viewer.requestRender()
             }
@@ -1166,6 +1252,21 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     const oid = await resolveObjectId(m.versionId, controller.signal)
                     if (!oid || controller.signal.aborted) continue
                     const url = `${configRef.current.speckleServer}/streams/${projectIdRef.current}/objects/${oid}`
+                    // The currently-viewed model auto-seeds itself into the combined
+                    // set (see toggleCombinedModel/primaryAutoSeedKeyRef in App.jsx),
+                    // so its URL can be identical to primaryUrl — same case the unload
+                    // loop above guards against. Unlike that loop, this one must not
+                    // just skip bookkeeping: it must not call loadObject() at all, since
+                    // that geometry is already in the WorldTree via the primary
+                    // objectId path. Loading it again here creates a second, fully
+                    // overlapping copy of the same objects, and hide/show/isolate-by-id
+                    // afterward only reliably reaches one of the two coincident copies —
+                    // which is what made this model look like it never ghosted or
+                    // selected during clash isolation while other combined models did.
+                    if (url === primaryUrl) {
+                        loaded.set(m.branchName, url)
+                        continue
+                    }
                     try {
                         const loader = new SpeckleLoader(viewer.getWorldTree(), url, configRef.current.speckleToken)
                         await viewer.loadObject(loader, false)  // false = don't re-zoom per model, one zoom-to-fit below instead
@@ -1209,7 +1310,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                             const colorGroups = federatedModels
                                 .filter((m) => byModel.has(m.branchName))
                                 .map((m) => ({ objectIds: byModel.get(m.branchName), color: m.color }))
-                            if (colorGroups.length) filterExt.setUserObjectColors(colorGroups)
+                            if (colorGroups.length) {
+                                filterExt.setUserObjectColors(colorGroups)
+                                federatedColorGroupsRef.current = colorGroups
+                            }
                         }
                     } catch (e) { console.warn('[SpeckleViewer] federated tint colors error:', e) }
                     // Same reasoning as tint colors above: if a chart/legend filter is
