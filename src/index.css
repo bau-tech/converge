@@ -20,6 +20,11 @@
   --speckle-foreground-3:        #7E7F82;
   --speckle-foreground-disabled: #434559;
   --speckle-foreground-on-primary: #ffffff;
+  /* Same #fff as --speckle-foreground in dark mode (already max contrast) —
+     defined separately so the light-mode override below (true #000, darker
+     than --speckle-foreground's #1A1A1A) has a same-named dark counterpart
+     for callers that want the extra-emphasis tier in both themes. */
+  --speckle-foreground-strong:   #ffffff;
 
   --speckle-outline-1:           #276FE5;
   --speckle-outline-2:           #2E313F;
@@ -56,6 +61,7 @@
   --speckle-foreground-3:        #7C7C7D;
   --speckle-foreground-disabled: #C4C4C4;
   --speckle-foreground-on-primary: #ffffff;
+  --speckle-foreground-strong:   #000000;
 
   --speckle-outline-1:           #276FE5;
   --speckle-outline-2:           #DFDFDF;

@@ -40,7 +40,7 @@ function Segment({ id, icon: Icon, category, label, sublabel, description, activ
                     ${vertical ? 'w-full py-2.5 bg-white/5' : ''}
                     ${open ? 'bg-white/10' : vertical ? '' : 'hover:bg-white/5'}
                     ${disabled ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'}
-                    ${active && !disabled ? 'text-[var(--speckle-foreground)]' : 'text-[var(--speckle-foreground-3)]'}
+                    ${active && !disabled ? 'text-[var(--speckle-foreground-strong)]' : 'text-[var(--speckle-foreground-3)]'}
                 `}
             >
                 {category && (
@@ -51,7 +51,7 @@ function Segment({ id, icon: Icon, category, label, sublabel, description, activ
                         ? <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500 shrink-0" />
                         : <Icon className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
                     }
-                    <span className={`truncate font-medium ${vertical ? 'max-w-[260px]' : 'max-w-[160px]'}`}>{label}</span>
+                    <span className={`truncate ${active && !disabled ? 'font-bold' : 'font-medium'} ${vertical ? 'max-w-[260px]' : 'max-w-[160px]'}`}>{label}</span>
                     {sublabel && (
                         <span className={`text-zinc-600 text-[11px] truncate max-w-[80px] ${vertical ? 'inline' : 'hidden xl:inline'}`}>{sublabel}</span>
                     )}

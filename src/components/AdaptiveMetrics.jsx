@@ -211,6 +211,14 @@ export const AdaptiveMetrics = memo(function AdaptiveMetrics({ data, horizontal 
                     const metricConfig = metricsConfig[metric.key] || {}
                     const displayName  = metricConfig.displayName || meta?.displayName || metric.key.replace(/_/g, ' ')
                     const unit = meta?.unit || null
+                    // Plain-integer counts (Elements, Categories, Levels, IFC Types) read
+                    // fine at the standard weight — their glyphs are solid single/double
+                    // digits. Decimals (comma/period + fraction digits) and text values
+                    // have thinner, lower-ink-coverage glyphs that read as lower-contrast
+                    // at the same color even though the hex value is identical, so those
+                    // get the heavier/darker tier instead.
+                    const isText = typeof metric.value !== 'number'
+                    const emphasize = isText || (meta?.decimals ?? 0) > 0
                     let formattedValue
                     if (typeof metric.value === 'number') {
                         const displayValue = meta?.multiplier ? metric.value * meta.multiplier : metric.value
@@ -222,7 +230,7 @@ export const AdaptiveMetrics = memo(function AdaptiveMetrics({ data, horizontal 
                         <div key={metric.key} className="flex flex-col leading-none">
                             <span className="text-[9px] text-[var(--speckle-foreground-2)] uppercase tracking-wide whitespace-nowrap">{displayName}</span>
                             <div className="flex items-baseline gap-0.5 mt-0.5">
-                                <span className="text-lg font-bold text-[var(--speckle-foreground)] leading-none">{formattedValue}</span>
+                                <span className={`text-lg leading-none ${emphasize ? 'font-black text-[var(--speckle-foreground-strong)]' : 'font-bold text-[var(--speckle-foreground)]'}`}>{formattedValue}</span>
                                 {unit && <span className="text-[10px] text-[var(--speckle-foreground-3)]">{unit}</span>}
                             </div>
                         </div>
