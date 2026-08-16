@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 import uuid
 
 from fastapi import APIRouter, HTTPException
@@ -17,6 +18,39 @@ logger = logging.getLogger(__name__)
 
 _EXPORT_TMP_PREFIX = "bim_export_"
 _EXPORT_TMP_PREFIX_IFCX = "bim_export_ifcx_"
+
+# resolve_model_ifc_bytes does a Speckle network fetch or a full DB load +
+# CPU-bound synthetic IFC export — expensive either way, and clash/IDS checks
+# call it fresh on every run even when re-checking the exact same ingested
+# version seconds apart (e.g. a user iterating on clash rules, or a
+# same-model clash check followed by a cross-model one that reuses it).
+# Keyed on (model_id, commit_id, coord_unit, lookup_server_url): commit_id
+# changes whenever the model is re-ingested, so a stale cache entry can't
+# outlive the version it was built from. Bounded + TTL'd (not just keyed)
+# because entries hold full IFC byte blobs in this process's memory, not a
+# worker's — an unbounded cache here is the same kind of memory risk
+# process_pool.py sizes workers around for exports.
+_IFC_BYTES_CACHE: dict[tuple, tuple[float, bytes, str]] = {}
+_IFC_BYTES_CACHE_TTL_S = 300
+_IFC_BYTES_CACHE_MAX_ENTRIES = 8
+
+
+def _ifc_bytes_cache_get(key: tuple) -> tuple[bytes, str] | None:
+    entry = _IFC_BYTES_CACHE.get(key)
+    if not entry:
+        return None
+    ts, ifc_bytes, ifc_source = entry
+    if time.monotonic() - ts > _IFC_BYTES_CACHE_TTL_S:
+        del _IFC_BYTES_CACHE[key]
+        return None
+    return ifc_bytes, ifc_source
+
+
+def _ifc_bytes_cache_put(key: tuple, ifc_bytes: bytes, ifc_source: str) -> None:
+    if key not in _IFC_BYTES_CACHE and len(_IFC_BYTES_CACHE) >= _IFC_BYTES_CACHE_MAX_ENTRIES:
+        oldest_key = min(_IFC_BYTES_CACHE, key=lambda k: _IFC_BYTES_CACHE[k][0])
+        del _IFC_BYTES_CACHE[oldest_key]
+    _IFC_BYTES_CACHE[key] = (time.monotonic(), ifc_bytes, ifc_source)
 
 
 def _export_temp_path(job_id: str) -> str:
@@ -197,6 +231,12 @@ async def resolve_model_ifc_bytes(
     # GraphQL lookup silently hits the wrong server and 404s as "Stream not
     # found".
     lookup_server_url = server_url or model_server_url
+
+    cache_key = (model_id, commit_id, coord_unit, lookup_server_url)
+    cached = _ifc_bytes_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     ifc_bytes = None
     ifc_source = "synthetic_export"
     if stream_id:
@@ -223,6 +263,7 @@ async def resolve_model_ifc_bytes(
             export_model, model_row, elements, params, coord_unit, None, None, relationships
         )
 
+    _ifc_bytes_cache_put(cache_key, ifc_bytes, ifc_source)
     return ifc_bytes, ifc_source
 
 

@@ -67,6 +67,36 @@ def _with_geometry_count(check_file, selector: str) -> int:
     )
 
 
+def resolve_selector_global_ids(ifc_bytes: bytes, selector: str) -> list[str]:
+    """
+    Run in the process pool: opens ifc_bytes and returns the GlobalIds of
+    every element `selector` matches with real geometry (Representation set)
+    — same filter as _with_geometry_count, but returning the ids themselves.
+
+    No BVH/tree work happens here, just attribute filtering, so this stays
+    safe to call even when it's the geometry-heavy clash computation itself
+    that's crashing. Used by routers/clash_check.py's batched-retry fallback
+    to split a rule's element groups into smaller GlobalId-based selectors
+    after a worker segfault, without needing to guess which element is bad.
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as f:
+            f.write(ifc_bytes)
+            tmp_path = f.name
+        check_file = ifcopenshell.open(tmp_path)
+        return [
+            e.GlobalId for e in ifcopenshell.util.selector.filter_elements(check_file, selector)
+            if getattr(e, "Representation", None)
+        ]
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def _resolve_id(check_file, global_id: str, resolve_application_ids: bool, guid_map: dict | None = None) -> str:
     """
     When checking against bim-normalizer's own synthetic IFC export
