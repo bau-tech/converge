@@ -3197,8 +3197,11 @@ function Dashboard({ readOnly = false }) {
                             projectId={data?.normalizer_model_id}
                             viewerRef={speckleViewerRef}
                             topics={bcfTopics}
+                            streamId={data?.project_id}
                             onTopicsChange={setBcfTopics}
                             onClose={() => setShowBcfBoard(false)}
+                            serverUrl={activeServer.url}
+                            serverToken={activeServer.token}
                         />
                     )}
                 </AnimatePresence>

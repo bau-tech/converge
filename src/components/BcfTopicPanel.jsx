@@ -60,6 +60,14 @@ export const BcfTopicPanel = memo(function BcfTopicPanel({
 
     const [creating, setCreating] = useState(false)
     const [pendingViewpoint, setPendingViewpoint] = useState(null)
+    // Gates the "Create Topic" button while startCreating's auto-capture is
+    // still in flight — otherwise a fast submit races it, creating (and
+    // immediately pushing to Speckle) a topic with no viewpoint at all. That
+    // first push is a one-shot: Speckle's API only accepts a screenshot on a
+    // brand-new comment thread, never on a later edit/reply, so a viewpoint
+    // added after that point can never reach Speckle even though it saves
+    // fine locally (see pushToSpeckle in bcfSync.js).
+    const [capturingViewpoint, setCapturingViewpoint] = useState(false)
     const [newTitle, setNewTitle] = useState('')
     const [newDescription, setNewDescription] = useState('')
     const [newType, setNewType] = useState('Issue')
@@ -165,16 +173,19 @@ export const BcfTopicPanel = memo(function BcfTopicPanel({
         setNewAssignedTo('')
         setNewDueDate('')
         setPendingViewpoint(null)
+        setCapturingViewpoint(true)
         try {
             const vp = await viewerRef.current?.captureViewpoint()
             setPendingViewpoint(vp || null)
         } catch {
             setPendingViewpoint(null)
+        } finally {
+            setCapturingViewpoint(false)
         }
     }
 
     const submitNewTopic = async () => {
-        if (!newTitle.trim() || !projectId) return
+        if (!newTitle.trim() || !projectId || capturingViewpoint) return
         const authorName = user?.name || 'Dashboard User'
         try {
             const topic = await createTopic(projectId, {
@@ -259,6 +270,20 @@ export const BcfTopicPanel = memo(function BcfTopicPanel({
                 const enriched = { ...selectedTopic, viewpoint }
                 setSelectedTopic(enriched)
                 onTopicsChange?.(topics.map((t) => (t.guid === selectedTopic.guid ? enriched : t)))
+                // Same reasoning as submitNewTopic/submitComment: relay this
+                // right away rather than waiting for the next model load.
+                // Only actually reaches Speckle if this topic has never been
+                // pushed/pulled before (pushToSpeckle then creates its first
+                // thread using this viewpoint's screenshot) — for a topic
+                // that's already synced, this is a no-op on the Speckle side:
+                // pushToSpeckle only relays new *comments* onto an existing
+                // thread, never viewpoints, and Speckle's API has no way to
+                // attach/update a screenshot on anything but a brand-new
+                // thread (confirmed via schema introspection — screenshot
+                // only exists on CreateCommentInput, not on edit or reply).
+                // So a viewpoint added/changed after the initial push still
+                // won't show an image on Speckle, silently.
+                onRequestSync?.()
             } catch (e) {
                 console.warn('Could not add viewpoint:', e)
                 setError('Could not add viewpoint')
@@ -470,10 +495,10 @@ export const BcfTopicPanel = memo(function BcfTopicPanel({
                                     </div>
                                     <button
                                         onClick={submitNewTopic}
-                                        disabled={!newTitle.trim()}
+                                        disabled={!newTitle.trim() || capturingViewpoint}
                                         className="w-full py-1 text-xs rounded bg-amber-500 text-black font-medium disabled:opacity-40"
                                     >
-                                        Create Topic
+                                        {capturingViewpoint ? 'Capturing view…' : 'Create Topic'}
                                     </button>
                                 </div>
                             ) : selectedTopic ? (

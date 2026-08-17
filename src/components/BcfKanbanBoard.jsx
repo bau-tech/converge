@@ -10,6 +10,7 @@ import {
     COLUMNS, topicToColumn, columnToUpdates,
     PRIORITIES, PRIORITY_COLOR, PRIORITY_BORDER, priorityRank, isOverdue,
 } from '../utils/bcfWorkflow'
+import { archiveLinkedSpeckleComment } from '../utils/bcfSync'
 import { BcfLogoIcon } from './BcfLogoIcon'
 import { ViewpointMarkupEditor } from './ViewpointMarkupEditor'
 import { useAuth } from '../contexts/AuthContext'
@@ -104,7 +105,7 @@ function Card({ topic, snapshotUrl, onOpen, onDelete }) {
 // Full-screen Kanban admin view over the BCF topics already loaded by
 // BcfTopicPanel (same `topics`/`onTopicsChange` — single source of truth,
 // no separate fetch). Reachable as a web overlay, not a separate app.
-export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChange, onClose }) {
+export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = null, onTopicsChange, onClose, serverUrl, serverToken }) {
     const { user } = useAuth()
     const [snapshots, setSnapshots] = useState({})
     const [viewpoints, setViewpoints] = useState({})
@@ -286,6 +287,17 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], onTopicsChan
     }
 
     const removeTopic = async (topic) => {
+        // Best-effort: archive the linked Speckle comment first — see
+        // BcfTopicPanel.jsx's removeTopic for why (Speckle has no real
+        // comment delete, only archive, and a failure here must not block
+        // the actual BCF-side deletion).
+        if (streamId) {
+            try {
+                await archiveLinkedSpeckleComment(projectId, topic.guid, streamId, { serverUrl, token: serverToken })
+            } catch (err) {
+                console.warn('Could not archive linked Speckle comment:', err)
+            }
+        }
         try {
             await deleteTopic(projectId, topic.guid)
             onTopicsChange(topics.filter(t => t.guid !== topic.guid))
