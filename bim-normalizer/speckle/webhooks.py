@@ -32,28 +32,44 @@ def _graphql(server_url: str, token: str, query: str, variables: dict) -> dict:
     return body["data"]
 
 
-def list_streams(server_url: str, token: str) -> list[str]:
-    """Return every stream id visible to this token, paginating past the
-    100-item page size used elsewhere in this app (App.jsx's loadProjects)."""
+def list_streams(server_url: str, token: str) -> dict[str, str]:
+    """Return {stream_id: name} for every stream visible to this token,
+    paginating past the 100-item page size used elsewhere in this app
+    (App.jsx's loadProjects). Callers that only need ids can still just
+    iterate/len() this like a list — dict iteration defaults to keys."""
     query = """
         query($limit: Int!, $cursor: String) {
             streams(limit: $limit, cursor: $cursor) {
                 totalCount
                 cursor
-                items { id }
+                items { id name }
             }
         }
     """
-    ids: list[str] = []
+    names: dict[str, str] = {}
     cursor = None
     while True:
         data = _graphql(server_url, token, query, {"limit": 100, "cursor": cursor})
         page = data["streams"]
-        ids.extend(item["id"] for item in page["items"])
+        for item in page["items"]:
+            names[item["id"]] = item.get("name") or item["id"]
         cursor = page.get("cursor")
-        if not cursor or len(page["items"]) == 0 or len(ids) >= page.get("totalCount", len(ids)):
+        if not cursor or len(page["items"]) == 0 or len(names) >= page.get("totalCount", len(names)):
             break
-    return ids
+    return names
+
+
+def get_stream_name(server_url: str, token: str, stream_id: str) -> str | None:
+    """Return the current name of stream_id, or None if it no longer exists
+    (e.g. deleted between a stream_update webhook firing and this lookup)."""
+    query = """
+        query($id: String!) {
+            stream(id: $id) { name }
+        }
+    """
+    data = _graphql(server_url, token, query, {"id": stream_id})
+    stream = data.get("stream")
+    return stream.get("name") if stream else None
 
 
 def get_latest_commit_id(server_url: str, token: str, stream_id: str) -> str | None:
@@ -104,15 +120,18 @@ def list_commit_ids(server_url: str, token: str, stream_id: str) -> set[str]:
 
 
 # Speckle is the single source of truth: new versions/models sync in
-# (commit_create, branch_create), and every deletion variant Speckle exposes
+# (commit_create, branch_create), every deletion variant Speckle exposes
 # is watched too so a deletion there is reflected here instantly instead of
 # leaving stale data behind (handled in main.py's receive_speckle_webhook —
-# see db.purge.purge_speckle_models). Trigger names are exactly the activity-event
+# see db.purge.purge_speckle_models), and stream_update catches a project
+# rename (routers/sync.py refreshes bim_models.stream_name from it — see
+# get_stream_name above). Trigger names are exactly the activity-event
 # strings Speckle's webhook dispatcher string-matches against (see
 # @speckle/shared's WebhookTriggers / packages/server's StreamActionTypes —
 # there's no GraphQL enum for these, the API takes plain strings).
 WEBHOOK_TRIGGERS = [
     "commit_create", "branch_create", "stream_delete", "commit_delete", "branch_delete",
+    "stream_update",
 ]
 
 
@@ -179,7 +198,8 @@ def scan_server(server_url: str, token: str) -> int:
         logger.warning("PUBLIC_BASE_URL is not configured — skipping webhook scan for %s", server_url)
         return 0
 
-    stream_ids = list_streams(server_url, token)
+    stream_names = list_streams(server_url, token)
+    stream_ids = stream_names  # dict iterates as its keys; kept as one name below for the rest of this function
     stream_id_set = set(stream_ids)
     registered = 0
     removed = 0
@@ -190,6 +210,21 @@ def scan_server(server_url: str, token: str) -> int:
 
     conn = get_conn()
     try:
+        # Speckle has no per-row rename event granular enough to trust
+        # blindly (stream_update's payload shape isn't guaranteed across
+        # server versions — see routers/sync.py's handler, which re-fetches
+        # rather than trusting the webhook body), so this scan is also the
+        # catch-all for renames: cheap to re-assert every pass, same
+        # reasoning as update_webhook_triggers below.
+        with conn.cursor() as cur:
+            for stream_id, name in stream_names.items():
+                cur.execute(
+                    "UPDATE bim_models SET stream_name = %s "
+                    "WHERE stream_id = %s AND stream_name IS DISTINCT FROM %s",
+                    (name, stream_id, name),
+                )
+        conn.commit()
+
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT stream_id, speckle_webhook_id FROM stream_webhooks WHERE server_url = %s",

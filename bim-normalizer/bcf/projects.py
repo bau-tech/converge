@@ -59,19 +59,42 @@ def get_current_user(user: dict = Depends(get_current_bcf_user)):
     return user
 
 
+def _project_name(r) -> str:
+    # stream_name (the live Speckle project title, kept fresh by
+    # speckle/webhooks.py) takes priority over branch_name, which is just a
+    # per-ingest snapshot of the model/branch name and goes stale on a
+    # Speckle-side rename until that branch is re-ingested. branch_name is
+    # still appended when present so the multiple BCF "projects" a single
+    # multi-model Speckle project expands into (one per model — see
+    # list_projects) are distinguishable in a BCF client's project list.
+    base = r["stream_name"] or r["stream_id"]
+    return f"{base} / {r['branch_name']}" if r["branch_name"] else base
+
+
 @router.get("/projects")
 def list_projects():
+    # One BCF "project" per ingested *model* (stream_id + branch_name), not
+    # per Speckle stream/project — bcf_topics.model_id is a hard FK to one
+    # specific model, so collapsing every model under a stream into a single
+    # exposed project_id (the old DISTINCT ON (stream_id) behavior) made
+    # every model except whichever was most recently (re-)ingested
+    # permanently unreachable: any topics tied to an older model's model_id
+    # stayed in the DB but a BCF client could never discover that model_id
+    # again once a sibling model on the same stream got re-ingested. Still
+    # collapses re-ingestion history *within* the same branch (DISTINCT ON
+    # picks only the newest model_id per stream_id+branch_name) — this is
+    # about exposing each distinct model, not each historical commit.
     rows = fetch_all(
         """
-        SELECT DISTINCT ON (stream_id) model_id, stream_id, branch_name
+        SELECT DISTINCT ON (stream_id, branch_name) model_id, stream_id, branch_name, stream_name
         FROM bim_models
-        ORDER BY stream_id, ingested_at DESC
+        ORDER BY stream_id, branch_name, ingested_at DESC
         """
     )
     return [
         {
             "project_id": str(r["model_id"]),
-            "name": r["branch_name"] or r["stream_id"],
+            "name": _project_name(r),
             "authorization": _AUTHORIZATION,
         }
         for r in rows
@@ -81,14 +104,14 @@ def list_projects():
 @router.get("/projects/{project_id}")
 def get_project(project_id: str):
     row = fetch_one(
-        "SELECT model_id, stream_id, branch_name FROM bim_models WHERE model_id = %s",
+        "SELECT model_id, stream_id, branch_name, stream_name FROM bim_models WHERE model_id = %s",
         (project_id,),
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return {
         "project_id": str(row["model_id"]),
-        "name": row["branch_name"] or row["stream_id"],
+        "name": _project_name(row),
         "authorization": _AUTHORIZATION,
     }
 

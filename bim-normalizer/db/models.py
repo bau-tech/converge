@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS bim_models (
 -- env-configured one.
 ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS server_url TEXT;
 
+-- The Speckle *project's* current display name (as opposed to branch_name,
+-- which is the model/branch name frozen in at ingest time). Speckle has no
+-- rename webhook trigger for this at the row level, so it's kept fresh by
+-- speckle/webhooks.py's scan_server() on every periodic/on-demand scan, plus
+-- immediately on a stream_update webhook (routers/sync.py) — see bcf/projects.py
+-- for where this takes priority over branch_name as the BCF-visible name.
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS stream_name TEXT;
+
 -- 'in_progress' | 'complete'. pipeline/normalize.py's ingest_commit() commits
 -- per BATCH_SIZE-element batch rather than in one big transaction (keeps
 -- Postgres's shared lock table bounded on large models — see its own

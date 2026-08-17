@@ -196,8 +196,16 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
         logger.error("Webhook %s: body is not valid JSON", webhook_row_id)
         raise HTTPException(status_code=400, detail="Invalid payload")
 
-    event = payload.get("event") or {}
-    event_name = event.get("event_name") or payload.get("event_name") or ""
+    # Speckle 2.31.14 wraps the entire notification in an outer {"payload": {...}}
+    # envelope — confirmed live 2026-08-16 by capturing a real stream_update
+    # delivery. Every field this handler reads (event, event_name, event.data,
+    # stream) lives one level deeper than payload itself, so unwrap it here
+    # rather than in every field access below. Falls back to the unwrapped
+    # body if some other Speckle version ever sends it flat.
+    body = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+
+    event = body.get("event") or {}
+    event_name = event.get("event_name") or body.get("event_name") or ""
     event_data = event.get("data") or {}
     commit_id = event_data.get("id")
 
@@ -237,6 +245,41 @@ async def receive_speckle_webhook(webhook_row_id: str, request: Request):
             "documents_deleted": len(deleted_doc_ids),
             "group_folder_deleted": group_folder_deleted,
         }
+
+    if event_name == "stream_update":
+        # A project rename (or other stream metadata edit). Re-fetch the
+        # name rather than trusting the webhook payload's shape — unlike
+        # commit_delete/branch_delete, stream_update's data field isn't
+        # documented and Speckle server versions have been inconsistent
+        # about what it contains, so a plain GraphQL read-back is the
+        # reliable path. speckle/webhooks.py's periodic scan_server() is
+        # the catch-up fallback if this delivery is ever missed.
+        from speckle.webhooks import get_stream_name
+
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT token FROM auto_sync_servers WHERE server_url = %s", (server_url,))
+                token_row = cur.fetchone()
+        finally:
+            release_conn(conn)
+        if not token_row:
+            logger.error("Webhook %s: no auto_sync_servers token for %s", webhook_row_id, server_url)
+            raise HTTPException(status_code=500, detail="Server credentials not found")
+
+        new_name = get_stream_name(server_url, token_row[0], stream_id)
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE bim_models SET stream_name = %s WHERE stream_id = %s", (new_name, stream_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_conn(conn)
+        logger.info("Webhook %s: stream %s renamed to %r", webhook_row_id, stream_id, new_name)
+        return {"status": "renamed", "name": new_name}
 
     if event_name == "commit_delete":
         deleted_commit_id = event_data.get("id") or (event_data.get("commit") or {}).get("id")
