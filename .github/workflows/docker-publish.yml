@@ -14,6 +14,11 @@ name: Publish Docker images
 # (bim-normalizer/Dockerfile.converge-mcp — same reasoning, its own slim
 # image with just mcp[cli]/requests/ifcopenshell/ifc5d/uvicorn, no fastapi/
 # psycopg2/specklepy/fastembed/ezdxf/cairosvg/python-docx/openpyxl/reportlab).
+#
+# The dockerhub-description job (below the publish matrix) keeps each Docker
+# Hub repo's short description + README (docker/dockerhub/*.md) in sync on
+# every run, so the four images are actually discoverable on hub.docker.com
+# instead of sitting there with no description.
 on:
   push:
     branches: [master]
@@ -111,3 +116,54 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  # Keeps each Docker Hub repo's short description + full README in sync so
+  # the four images are actually discoverable/legible on hub.docker.com
+  # instead of showing up with no description and an empty overview tab.
+  # Runs once per workflow (not matrixed with `publish`) since it's just
+  # metadata, not an image build. Same DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
+  # gate as the Docker Hub push above — no-ops entirely if Docker Hub isn't
+  # configured.
+  dockerhub-description:
+    needs: publish
+    if: ${{ vars.DOCKERHUB_USERNAME != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync converge-dashboard description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-dashboard
+          short-description: "React frontend for BIM coordination, clash detection, BCF, ISO 19650 docs, and AI copilot."
+          readme-filepath: ./docker/dockerhub/dashboard.md
+
+      - name: Sync converge-normalizer description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-normalizer
+          short-description: "Core BIM API: Speckle ingestion, IFC export, clash/IDS checks, documents. Converge stack."
+          readme-filepath: ./docker/dockerhub/normalizer.md
+
+      - name: Sync converge-bcf-server description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-bcf-server
+          short-description: "BCF 2.1/3.0 issue-tracking API for Converge, with a BIMcollab OAuth shim."
+          readme-filepath: ./docker/dockerhub/bcf-server.md
+
+      - name: Sync converge-mcp description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-mcp
+          short-description: "MCP server exposing Converge BIM data to Claude: 85 tools over IFC/Speckle."
+          readme-filepath: ./docker/dockerhub/mcp.md
