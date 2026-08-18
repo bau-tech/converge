@@ -48,6 +48,7 @@ Needs PostgreSQL and Nextcloud reachable, and a Speckle server (self-hosted or a
 
 | Image | Role |
 |---|---|
+| [`euch/converge`](https://hub.docker.com/r/euch/converge) | Stack overview — start here |
 | [`euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) | React frontend (Nginx) |
 | **`euch/converge-normalizer`** (this image) | Core API — ingestion, IFC export, clash/IDS checks, documents |
 | [`euch/converge-bcf-server`](https://hub.docker.com/r/euch/converge-bcf-server) | BCF 2.1/3.0 issue-tracking API |

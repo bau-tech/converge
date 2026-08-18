@@ -45,6 +45,10 @@ export function ChartBuilder({
     const [customTitle, setCustomTitle] = useState('')
     const [orientation, setOrientation] = useState('h')
     const [searchTerm, setSearchTerm] = useState('')
+    // Defaults to true (show everything) so adding this filter doesn't hide
+    // fields this picker already showed — unlike Pivot's Group By, which
+    // hid low-coverage params by default before this same filter existed here.
+    const [showAllParams, setShowAllParams] = useState(true)
 
     // Initialize state when opening or config changes
     // Initialize state when opening or config changes
@@ -75,24 +79,45 @@ export function ChartBuilder({
         return { summaryFields, discoveredFields, numericFields }
     }, [availableFields])
 
+    // discoveredFields/numericFields carry a `coverage` (% of elements with
+    // that property) from propertyScanner — filter those to high-coverage
+    // only unless the user opts to see everything (same convention as the
+    // Pivot/Validation/Filter Builder pickers). Summary fields have no
+    // coverage concept and always stay visible.
+    const coverageFilteredFields = useMemo(() => {
+        if (showAllParams) return groupedFields
+        const highCoverage = f => typeof f.coverage !== 'number' || f.coverage >= 10
+        return {
+            summaryFields: groupedFields.summaryFields,
+            discoveredFields: groupedFields.discoveredFields.filter(highCoverage),
+            numericFields: groupedFields.numericFields.filter(highCoverage),
+        }
+    }, [groupedFields, showAllParams])
+
     // Filter fields based on search
     const filteredFields = useMemo(() => {
-        if (!searchTerm) return groupedFields
+        if (!searchTerm) return coverageFilteredFields
         const term = searchTerm.toLowerCase()
         return {
-            summaryFields: groupedFields.summaryFields.filter(f =>
+            summaryFields: coverageFilteredFields.summaryFields.filter(f =>
                 f.config.title.toLowerCase().includes(term)
             ),
-            discoveredFields: groupedFields.discoveredFields.filter(f =>
+            discoveredFields: coverageFilteredFields.discoveredFields.filter(f =>
                 f.config.title.toLowerCase().includes(term) ||
                 (f.path && f.path.toLowerCase().includes(term))
             ),
-            numericFields: groupedFields.numericFields.filter(f =>
+            numericFields: coverageFilteredFields.numericFields.filter(f =>
                 f.config.title.toLowerCase().includes(term) ||
                 (f.path && f.path.toLowerCase().includes(term))
             )
         }
-    }, [groupedFields, searchTerm])
+    }, [coverageFilteredFields, searchTerm])
+
+    // Total discovered/numeric fields that carry coverage data, vs. how many
+    // survive the current filter — only worth showing the toggle when there's
+    // actually something it could hide.
+    const parametrizedTotal = groupedFields.discoveredFields.length + groupedFields.numericFields.length
+    const parametrizedShown = coverageFilteredFields.discoveredFields.length + coverageFilteredFields.numericFields.length
 
     const handleCreate = () => {
         if (!selectedField) return
@@ -178,6 +203,20 @@ export function ChartBuilder({
                                     placeholder="Search properties..."
                                     className={`${settingInputCls} pl-6`}
                                 />
+                            </div>
+                        )}
+
+                        {/* Coverage toggle (only worth showing if some param would actually be hidden) */}
+                        {parametrizedTotal > 0 && (
+                            <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--speckle-foreground-3)]">
+                                <span>{parametrizedShown} of {parametrizedTotal} parameters shown</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowAllParams(v => !v)}
+                                    className="text-[var(--speckle-outline-1)] hover:opacity-80 underline shrink-0"
+                                >
+                                    {showAllParams ? 'Show high-coverage only (≥10%)' : 'Show all parameters'}
+                                </button>
                             </div>
                         )}
 

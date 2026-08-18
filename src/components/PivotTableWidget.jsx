@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Table, Settings } from 'lucide-react'
+import PropertySelect from './PropertySelect'
 
 // Fixed structural fields always available from the normalizer
 const FIXED_GROUP_OPTIONS = [
@@ -34,18 +35,27 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
     const [rowField, setRowField]       = useState('category')
     const [valueField, setValueField]   = useState('count')
     const [showControls, setShowControls] = useState(false)
-    const [showAllParams, setShowAllParams] = useState(false)
+    // The Controls panel needs overflow-hidden while framer-motion animates
+    // its height (0 -> auto), otherwise content flashes outside its bounds
+    // mid-animation. But left on permanently, it also clips the Group By
+    // PropertySelect's own dropdown, which must render below the panel's
+    // fixed height once expanded — no dropdown ever became visible. Switch
+    // to visible only once the expand animation has actually finished, and
+    // back to hidden immediately on collapse so the collapse animation still
+    // looks clean.
+    const [controlsExpanded, setControlsExpanded] = useState(false)
+    useEffect(() => {
+        if (!showControls) setControlsExpanded(false)
+    }, [showControls])
 
-    // Dynamic param options derived from backend key discovery.
-    // Show high-coverage params by default; toggle to show all.
-    const paramOptions = useMemo(() => {
-        const list = paramKeys.map(p => ({
-            label: `${p.key} (${p.coverage_pct}%)`,
-            value: `param:${p.key}`,
-            coverage: p.coverage_pct,
-        }))
-        return showAllParams ? list : list.filter(p => p.coverage >= 10)
-    }, [paramKeys, showAllParams])
+    // Dynamic param options derived from backend key discovery. The
+    // high-coverage/show-all filter and search live inside PropertySelect
+    // itself now, so this is just the full list, unfiltered.
+    const paramOptions = useMemo(() => paramKeys.map(p => ({
+        label: p.key,
+        value: `param:${p.key}`,
+        coverage: p.coverage_pct,
+    })), [paramKeys])
 
     // Memoized so useEffect below can use it as a stable dep
     const groupOptions = useMemo(
@@ -53,9 +63,8 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
         [paramOptions]
     )
 
-    // Reset rowField to a safe default if the selected option is no longer
-    // in the list (e.g. user was grouping by a low-coverage param, then
-    // toggled "show high-coverage only" which hid that param).
+    // Reset rowField to a safe default if the selected option no longer
+    // exists at all (e.g. a different model was loaded).
     useEffect(() => {
         if (!groupOptions.some(o => o.value === rowField)) {
             setRowField('category')
@@ -141,30 +150,20 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
-                        className="border-b border-white/5 bg-zinc-800/50 overflow-hidden"
+                        onAnimationComplete={() => { if (showControls) setControlsExpanded(true) }}
+                        className="border-b border-white/5 bg-zinc-800/50"
+                        style={{ overflow: controlsExpanded ? 'visible' : 'hidden' }}
                     >
                         <div className="p-3 space-y-3">
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1 block">Group By</label>
-                                    <select
+                                    <PropertySelect
+                                        options={groupOptions}
                                         value={rowField}
-                                        onChange={e => setRowField(e.target.value)}
-                                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
-                                    >
-                                        <optgroup label="Structural fields">
-                                            {FIXED_GROUP_OPTIONS.map(o => (
-                                                <option key={o.value} value={o.value}>{o.label}</option>
-                                            ))}
-                                        </optgroup>
-                                        {paramOptions.length > 0 && (
-                                            <optgroup label="BIM parameters">
-                                                {paramOptions.map(o => (
-                                                    <option key={o.value} value={o.value}>{o.label}</option>
-                                                ))}
-                                            </optgroup>
-                                        )}
-                                    </select>
+                                        onChange={setRowField}
+                                        defaultShowAll={false}
+                                    />
                                 </div>
                                 <div>
                                     <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1 block">Value</label>
@@ -179,22 +178,6 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
                                     </select>
                                 </div>
                             </div>
-
-                            {paramKeys.length > 0 && (
-                                <div className="flex items-center gap-2">
-                                    <span className="text-[10px] text-zinc-500">
-                                        {paramOptions.length} of {paramKeys.length} parameters shown
-                                    </span>
-                                    <button
-                                        onClick={() => setShowAllParams(v => !v)}
-                                        aria-expanded={showAllParams}
-                                        aria-label={showAllParams ? 'Show only high-coverage parameters' : 'Show all parameters including low-coverage'}
-                                        className="text-[10px] text-emerald-400 hover:text-emerald-300 underline"
-                                    >
-                                        {showAllParams ? 'Show high-coverage only (≥10%)' : 'Show all parameters'}
-                                    </button>
-                                </div>
-                            )}
                         </div>
                     </motion.div>
                 )}

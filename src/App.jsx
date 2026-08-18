@@ -2291,6 +2291,7 @@ function Dashboard({ readOnly = false }) {
                     onUpdateWidget={updates => handleUpdateWidget(w.id, updates)}
                     chartSummary={panelData.summary}
                     fullData={fullData}
+                    paramKeys={paramKeys}
                     contextElements={panelData.elements}
                     displayOptions={displayOptions}
                     fullDataReady={!!fullData}
@@ -2314,8 +2315,8 @@ function Dashboard({ readOnly = false }) {
             if (w.type === 'text') return <MarkdownWidget content={w.content} onUpdate={c => handleUpdateWidget(w.id, { content: c })} />
             if (w.type === 'table') return <ElementTable fullData={fullData} onElementClick={handleElementClick} viewerSelectedIds={viewerSelectedIds} onFilteredIdsChange={handleTableFilteredIds} chartFilters={chartFilters} filteredIds={viewerFilteredIds} />
             if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
-            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} isEditing={!validationResultsView.has(w.id)} onToggleEditing={() => handleToggleValidationView(w.id)} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
-            if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
+            if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} paramKeys={paramKeys} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} isEditing={!validationResultsView.has(w.id)} onToggleEditing={() => handleToggleValidationView(w.id)} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
+            if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} paramKeys={paramKeys} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
             if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
             if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />

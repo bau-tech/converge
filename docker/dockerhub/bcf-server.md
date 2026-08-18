@@ -39,6 +39,7 @@ Needs the same PostgreSQL instance as `converge-normalizer`, and typically runs 
 
 | Image | Role |
 |---|---|
+| [`euch/converge`](https://hub.docker.com/r/euch/converge) | Stack overview — start here |
 | [`euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) | React frontend (Nginx) |
 | [`euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer) | Core API — ingestion, IFC export, clash/IDS checks, documents |
 | **`euch/converge-bcf-server`** (this image) | BCF 2.1/3.0 issue-tracking API |

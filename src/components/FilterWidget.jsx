@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { Plus, Trash2, X, ChevronDown } from 'lucide-react'
 import { discoverProperties, discoverNumericProperties, aggregateProperty, getNestedValue } from '../utils/propertyScanner'
+import PropertySelect from './PropertySelect'
 import {
     OPERATOR_OPTIONS,
     NO_VALUE_OPERATORS,
@@ -89,15 +90,13 @@ function ConditionRow({ condition, propertyOptions, getValueOptions, matchCount,
 
     return (
         <div className="flex items-center gap-1.5">
-            <select
-                value={condition.property}
-                onChange={e => onUpdate({ property: e.target.value })}
-                className="flex-1 min-w-[110px] bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300"
-            >
-                {propertyOptions.map(opt => (
-                    <option key={opt.value || opt.label} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
-                ))}
-            </select>
+            <div className="flex-1 min-w-[110px]">
+                <PropertySelect
+                    options={propertyOptions}
+                    value={condition.property}
+                    onChange={val => onUpdate({ property: val })}
+                />
+            </div>
 
             <select
                 value={condition.operator}
@@ -160,7 +159,7 @@ function ConditionRow({ condition, propertyOptions, getValueOptions, matchCount,
     )
 }
 
-export default function FilterWidget({ widgetId, fullData, title = 'Filter Builder', onUpdateTitle, onFilterElements }) {
+export default function FilterWidget({ widgetId, fullData, paramKeys = [], title = 'Filter Builder', onUpdateTitle, onFilterElements }) {
     const [name, setName] = useState(title)
     const [groups, setGroups] = useState(() => {
         try {
@@ -204,17 +203,25 @@ export default function FilterWidget({ widgetId, fullData, title = 'Filter Build
             { label: 'Speckle Type', value: 'speckle_type' },
 
             { label: '--- Dimensions ---', value: '', disabled: true },
-            ...numericProps.map(p => ({ label: p.name, value: p.path })),
+            ...numericProps.map(p => ({ label: p.name, value: p.path, coverage: p.coverage })),
 
             { label: '--- Attributes ---', value: '', disabled: true },
-            ...stringProps.map(p => ({ label: p.name, value: p.path })),
+            ...stringProps.map(p => ({ label: p.name, value: p.path, coverage: p.coverage })),
+
+            // Divider — backend-derived parameters, see ValidationWidget's
+            // matching comment: discoverProperties/discoverNumericProperties
+            // only sample the first 500 elements and can miss a real but
+            // rare/unevenly-distributed parameter entirely; paramKeys comes
+            // from the backend, which aggregates over every element.
+            { label: '--- BIM Parameters ---', value: '', disabled: true },
+            ...paramKeys.map(p => ({ label: p.key, value: `params.${p.key}`, coverage: p.coverage_pct })),
         ]
 
         return options.filter((opt, index, self) =>
             opt.disabled ||
             (opt.value && index === self.findIndex(t => t.value === opt.value))
         )
-    }, [fullData])
+    }, [fullData, paramKeys])
 
     // Cache distinct values per property (for "Is Any Of" / autocomplete)
     const valueOptionsCache = useRef(new Map())

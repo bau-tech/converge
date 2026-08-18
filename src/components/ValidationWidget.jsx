@@ -1,9 +1,10 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, ChevronDown, Check, X, Search } from 'lucide-react'
+import { CheckCircle, AlertCircle, Plus, Trash2, Settings, Play, Check, X } from 'lucide-react'
 import EChart from './EChart'
 import { baseOption } from '../lib/echartsTheme'
 import { discoverProperties, discoverNumericProperties, aggregateProperty } from '../utils/propertyScanner'
+import PropertySelect from './PropertySelect'
 
 const DEFAULT_RULES = [{ id: 1, property: 'category', operator: 'is_defined', value: '' }]
 
@@ -15,91 +16,14 @@ function logicKey(widgetId) {
     return `validation-logic-${widgetId || 'default'}`
 }
 
-// Select constrained to one of `options` (unlike SearchableCombobox, which
-// allows free-typed values) with a search box to filter a long, dynamically
-// discovered property list — propertyOptions below can run into the dozens
-// once numeric/string properties from the actual model are included, and a
-// plain <select> gives no way to find one by typing.
-function PropertySelect({ options, value, onChange }) {
-    const [open, setOpen] = useState(false)
-    const [query, setQuery] = useState('')
-    const containerRef = useRef(null)
+// Scope defaults to empty (validate every element) so existing saved
+// widgets see no behavior change until a user deliberately narrows scope.
+function scopeKey(widgetId) {
+    return `validation-scope-${widgetId || 'default'}`
+}
 
-    // Divider rows (disabled, used to group the plain <select> this replaces)
-    // don't make sense as clickable search results — drop them here.
-    const selectableOptions = useMemo(() => options.filter(o => !o.disabled), [options])
-    const selected = selectableOptions.find(o => o.value === value)
-
-    const filtered = useMemo(() => {
-        if (!query.trim()) return selectableOptions
-        const needle = query.toLowerCase()
-        return selectableOptions.filter(o =>
-            o.label.toLowerCase().includes(needle) || o.value.toLowerCase().includes(needle)
-        )
-    }, [selectableOptions, query])
-
-    useEffect(() => {
-        if (!open) return
-        const handleOutside = (e) => {
-            if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false)
-        }
-        document.addEventListener('mousedown', handleOutside)
-        return () => document.removeEventListener('mousedown', handleOutside)
-    }, [open])
-
-    const commit = (opt) => {
-        onChange(opt.value)
-        setOpen(false)
-        setQuery('')
-    }
-
-    return (
-        <div className="relative" ref={containerRef}>
-            <button
-                type="button"
-                onClick={() => setOpen(o => !o)}
-                className="w-full flex items-center justify-between gap-2 bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-300 hover:border-white/20 transition-colors"
-            >
-                <span className="truncate">{selected?.label || 'Select property...'}</span>
-                <ChevronDown className={`w-3 h-3 text-zinc-500 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-            </button>
-            {open && (
-                <div className="absolute z-20 mt-1 w-full rounded-lg border border-white/10 bg-zinc-900 shadow-xl overflow-hidden">
-                    <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-white/5">
-                        <Search className="w-3 h-3 text-zinc-500 shrink-0" />
-                        <input
-                            autoFocus
-                            value={query}
-                            onChange={(e) => setQuery(e.target.value)}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Escape') setOpen(false)
-                                if (e.key === 'Enter' && filtered[0]) commit(filtered[0])
-                            }}
-                            placeholder="Search properties..."
-                            className="w-full bg-transparent text-xs text-zinc-300 placeholder:text-zinc-600 focus:outline-none"
-                        />
-                    </div>
-                    <div className="max-h-48 overflow-y-auto custom-scrollbar">
-                        {filtered.length === 0 ? (
-                            <div className="px-2 py-2 text-[11px] text-zinc-500 text-center">No matches</div>
-                        ) : (
-                            filtered.map(opt => (
-                                <div
-                                    key={opt.value}
-                                    onMouseDown={(e) => { e.preventDefault(); commit(opt) }}
-                                    className={`px-2 py-1.5 text-xs cursor-pointer truncate ${
-                                        opt.value === value ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-300 hover:bg-white/5'
-                                    }`}
-                                >
-                                    {opt.label}
-                                </div>
-                            ))
-                        )}
-                    </div>
-                </div>
-            )}
-        </div>
-    )
+function scopeLogicKey(widgetId) {
+    return `validation-scope-logic-${widgetId || 'default'}`
 }
 
 
@@ -173,7 +97,7 @@ function ValueCombobox({ options, value, onChange, placeholder }) {
 // rules.map() below) so its value-options useMemo can key off just this
 // rule's property/operator without violating hooks-must-run-unconditionally
 // when the rules array itself changes length.
-function RuleRow({ rule, idx, fullData, propertyOptions, operatorOptions, noValueOperators, canRemove, onUpdate, onRemove }) {
+function RuleRow({ rule, idx, fullData, propertyOptions, operatorOptions, noValueOperators, canRemove, onUpdate, onRemove, labelPrefix = 'Rule' }) {
     // Only worth computing/showing for the operators that compare against a
     // discrete value — gt/lt already use a plain number input, and is_defined/
     // is_not_defined have no value field at all.
@@ -199,7 +123,7 @@ function RuleRow({ rule, idx, fullData, propertyOptions, operatorOptions, noValu
             </div>
 
             <div className="flex items-center gap-2 text-xs text-zinc-500 mb-1">
-                <span className="font-mono bg-white/5 px-1.5 py-0.5 rounded">Rule #{idx + 1}</span>
+                <span className="font-mono bg-white/5 px-1.5 py-0.5 rounded">{labelPrefix} #{idx + 1}</span>
             </div>
 
             <div className="grid grid-cols-1 gap-2">
@@ -262,7 +186,7 @@ export function ValidationModeToggle({ isEditing, onToggleEditing }) {
     )
 }
 
-export default function ValidationWidget({ widgetId, fullData, title = "New Validation", onUpdateTitle, isEditing, onToggleEditing, onFilterElements, onHighlightElements, darkMode = true }) {
+export default function ValidationWidget({ widgetId, fullData, paramKeys = [], title = "New Validation", onUpdateTitle, isEditing, onToggleEditing, onFilterElements, onHighlightElements, darkMode = true }) {
     const [name, setName] = useState(title)
     const [rules, setRules] = useState(() => {
         try {
@@ -273,6 +197,27 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
     const [logicMode, setLogicMode] = useState(() => {
         try {
             return localStorage.getItem(logicKey(widgetId)) === 'OR' ? 'OR' : 'AND'
+        } catch { return 'AND' }
+    })
+    // Scope: which elements get validated at all (e.g. Category = Walls).
+    // Separate from Rules (what must be true for them) so the pass/fail
+    // denominator reflects the scoped population, not the whole model —
+    // "Category = Walls AND FireRating Is Defined" as a single flat rule
+    // list would validate all 1279 elements and report 47/1279 instead of
+    // the intended 47/58, since a non-Wall element simply fails the
+    // Category check same as a Wall failing the FireRating check. Mirrors
+    // IDS's applicability/requirements split. Defaults to empty (validate
+    // everything) so existing saved widgets are unaffected until a user
+    // deliberately adds a scope condition.
+    const [scopeRules, setScopeRules] = useState(() => {
+        try {
+            const saved = localStorage.getItem(scopeKey(widgetId))
+            return saved ? JSON.parse(saved) : []
+        } catch { return [] }
+    })
+    const [scopeLogicMode, setScopeLogicMode] = useState(() => {
+        try {
+            return localStorage.getItem(scopeLogicKey(widgetId)) === 'OR' ? 'OR' : 'AND'
         } catch { return 'AND' }
     })
     const [activeSlice, setActiveSlice] = useState(null)
@@ -286,6 +231,14 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
     useEffect(() => {
         try { localStorage.setItem(logicKey(widgetId), logicMode) } catch {}
     }, [logicMode, widgetId])
+
+    useEffect(() => {
+        try { localStorage.setItem(scopeKey(widgetId), JSON.stringify(scopeRules)) } catch {}
+    }, [scopeRules, widgetId])
+
+    useEffect(() => {
+        try { localStorage.setItem(scopeLogicKey(widgetId), scopeLogicMode) } catch {}
+    }, [scopeLogicMode, widgetId])
 
     // Update parent title when local name changes
     useEffect(() => {
@@ -323,7 +276,8 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             // Numeric Properties
             ...numericProps.map(p => ({
                 label: p.name,
-                value: p.path
+                value: p.path,
+                coverage: p.coverage
             })),
 
             // Divider
@@ -332,7 +286,25 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             // String Properties
             ...stringProps.map(p => ({
                 label: p.name,
-                value: p.path
+                value: p.path,
+                coverage: p.coverage
+            })),
+
+            // Divider — backend-derived parameters (see paramKeys comment below)
+            { label: '--- BIM Parameters ---', value: '', disabled: true },
+
+            // discoverProperties/discoverNumericProperties only sample the
+            // first 500 elements and require the property on >=1% of that
+            // sample — a real but rare/unevenly-distributed parameter (e.g.
+            // a fire rating class present on only ~4% of elements, sorted
+            // outside the sample) can be entirely missing above even though
+            // it genuinely exists. paramKeys comes from the backend's
+            // parameter-keys endpoint, which aggregates over every element in
+            // the model, not a sample, so it never misses one this way.
+            ...paramKeys.map(p => ({
+                label: p.key,
+                value: `params.${p.key}`,
+                coverage: p.coverage_pct
             }))
         ]
 
@@ -341,7 +313,7 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             opt.disabled ||
             (opt.value && index === self.findIndex(t => t.value === opt.value))
         )
-    }, [fullData])
+    }, [fullData, paramKeys])
 
 
     const operatorOptions = [
@@ -391,6 +363,20 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
         }
     }
 
+    // Elements the Rules actually get evaluated against. Empty scopeRules
+    // means "everyone" (unchanged legacy behavior); otherwise only elements
+    // matching the scope condition(s) are in the population at all — a
+    // non-matching element never counts as "failed", it's simply out of
+    // scope, same as how Filter Builder's own conditions work.
+    const scopedElements = useMemo(() => {
+        if (!fullData?.elements) return []
+        if (scopeRules.length === 0) return fullData.elements
+        return fullData.elements.filter(el => {
+            const scopeResults = scopeRules.map(rule => checkRule(getNested(el, rule.property), rule))
+            return scopeLogicMode === 'OR' ? scopeResults.some(Boolean) : scopeResults.every(Boolean)
+        })
+    }, [fullData, scopeRules, scopeLogicMode])
+
     const results = useMemo(() => {
         if (!fullData?.elements) return { passed: 0, failed: 0, total: 0, passPct: 0, passedIds: [], failedIds: [] }
 
@@ -399,7 +385,7 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
         const passedIds = []
         const failedIds = []
 
-        fullData.elements.forEach(el => {
+        scopedElements.forEach(el => {
             const ruleResults = rules.map(rule => checkRule(getNested(el, rule.property), rule))
             // AND: must pass every rule. OR: must pass at least one rule.
             const elementPassed = logicMode === 'OR' ? ruleResults.some(Boolean) : ruleResults.every(Boolean)
@@ -423,7 +409,7 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             passedIds,
             failedIds,
         }
-    }, [fullData, rules, logicMode])
+    }, [fullData, scopedElements, rules, logicMode])
 
     // Rules changed — if a slice filter was active, its element IDs are now stale, clear it.
     // Skip on initial mount so this widget doesn't clobber another widget's active filter.
@@ -434,7 +420,7 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             setActiveSlice(null)
             onFilterElements?.(null)
         }
-    }, [fullData, rules, logicMode])
+    }, [fullData, scopeRules, scopeLogicMode, rules, logicMode])
 
     const handlePieClick = (params) => {
         const name = params?.name
@@ -473,6 +459,18 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
         setRules(rules.filter(r => r.id !== id))
     }
 
+    const addScopeRule = () => {
+        setScopeRules([...scopeRules, { id: Date.now(), property: 'category', operator: 'equals', value: '' }])
+    }
+
+    const updateScopeRule = (id, field, val) => {
+        setScopeRules(scopeRules.map(r => r.id === id ? { ...r, [field]: val } : r))
+    }
+
+    const removeScopeRule = (id) => {
+        setScopeRules(scopeRules.filter(r => r.id !== id))
+    }
+
     if (!fullData) {
         return (
             <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
@@ -504,6 +502,70 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
             <div className="flex-1 overflow-auto p-4 custom-scrollbar">
                 {isEditing ? (
                     <div className="space-y-3">
+                        {/* Scope — which elements get validated at all. Optional and
+                            starts empty (= everyone); Rules below only ever run against
+                            whatever matches here, so a scope condition like Category =
+                            Walls narrows the pass/fail denominator instead of just being
+                            one more thing every element in the model gets checked against. */}
+                        <div>
+                            <div className="flex items-center justify-between mb-1.5">
+                                <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Scope (optional)</span>
+                                <span className="text-[10px] text-zinc-600">{scopedElements.length} of {fullData.elements?.length ?? 0} elements</span>
+                            </div>
+                            {scopeRules.length === 0 ? (
+                                <div className="text-[11px] text-zinc-600 italic px-1 mb-2">No scope set — Rules below validate every element.</div>
+                            ) : (
+                                <div className="space-y-2 mb-2">
+                                    {scopeRules.map((rule, idx) => (
+                                        <RuleRow
+                                            key={rule.id}
+                                            rule={rule}
+                                            idx={idx}
+                                            fullData={fullData}
+                                            propertyOptions={propertyOptions}
+                                            operatorOptions={operatorOptions}
+                                            noValueOperators={noValueOperators}
+                                            canRemove
+                                            labelPrefix="Scope"
+                                            onUpdate={(field, val) => updateScopeRule(rule.id, field, val)}
+                                            onRemove={() => removeScopeRule(rule.id)}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                            <button
+                                onClick={addScopeRule}
+                                className="w-full py-1.5 border border-dashed border-white/10 rounded-lg text-zinc-500 hover:text-zinc-300 hover:border-white/20 hover:bg-white/5 text-xs flex items-center justify-center gap-2 transition-all"
+                            >
+                                <Plus className="w-3 h-3" /> Add Scope Condition
+                            </button>
+
+                            {scopeRules.length > 1 && (
+                                <div className="flex items-center justify-center gap-2 pt-2">
+                                    <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Match</span>
+                                    <div className="flex rounded-md border border-white/10 overflow-hidden text-xs">
+                                        <button
+                                            onClick={() => setScopeLogicMode('AND')}
+                                            className={`px-3 py-1 transition-colors ${scopeLogicMode === 'AND' ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-500 hover:bg-white/5'}`}
+                                        >
+                                            ALL (AND)
+                                        </button>
+                                        <button
+                                            onClick={() => setScopeLogicMode('OR')}
+                                            className={`px-3 py-1 transition-colors ${scopeLogicMode === 'OR' ? 'bg-cyan-500/20 text-cyan-400' : 'text-zinc-500 hover:bg-white/5'}`}
+                                        >
+                                            ANY (OR)
+                                        </button>
+                                    </div>
+                                    <span className="text-[10px] text-zinc-500 uppercase tracking-wider">conditions</span>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="border-t border-white/5 pt-3">
+                            <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold block mb-1.5">Rules</span>
+                        </div>
+
                         {rules.map((rule, idx) => (
                             <RuleRow
                                 key={rule.id}
@@ -624,6 +686,36 @@ export default function ValidationWidget({ widgetId, fullData, title = "New Vali
                                 >
                                     <X className="w-3 h-3" />
                                 </button>
+                            </div>
+                        )}
+
+                        {/* Scope Summary List — only shown when a scope is actually set,
+                            so widgets nobody scoped keep the original "Active Rules" view. */}
+                        {scopeRules.length > 0 && (
+                            <div className="mt-4 pt-3 border-t border-white/5 shrink-0">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Scope · {scopedElements.length} of {fullData.elements?.length ?? 0} elements</span>
+                                    {scopeRules.length > 1 && (
+                                        <span className="text-[10px] text-purple-400 font-mono bg-white/5 px-1.5 py-0.5 rounded">
+                                            Match {scopeLogicMode === 'OR' ? 'ANY' : 'ALL'}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="space-y-1">
+                                    {scopeRules.map((r, i) => {
+                                        const opLabel = operatorOptions.find(o => o.value === r.operator)?.label ?? r.operator
+                                        return (
+                                            <div key={i} className="flex items-center gap-2 text-xs text-zinc-400">
+                                                <Check className="w-3 h-3 text-purple-400" />
+                                                <span className="font-mono text-zinc-300">{r.property}</span>
+                                                <span className="text-zinc-600">{opLabel}</span>
+                                                {!noValueOperators.has(r.operator) && r.value && (
+                                                    <span className="text-zinc-300 font-mono bg-white/5 px-1 rounded">{r.value}</span>
+                                                )}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
                             </div>
                         )}
 

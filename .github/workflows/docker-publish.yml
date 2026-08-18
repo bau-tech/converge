@@ -18,7 +18,10 @@ name: Publish Docker images
 # The dockerhub-description job (below the publish matrix) keeps each Docker
 # Hub repo's short description + README (docker/dockerhub/*.md) in sync on
 # every run, so the four images are actually discoverable on hub.docker.com
-# instead of sitting there with no description.
+# instead of sitting there with no description. It also syncs a fifth,
+# overview-only repo (euch/converge — not a built image, create it once
+# manually on Docker Hub) that describes the stack as a whole and links to
+# the four real images, since Docker Hub has no org-level README.
 on:
   push:
     branches: [master]
@@ -167,3 +170,15 @@ jobs:
           repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-mcp
           short-description: "MCP server exposing Converge BIM data to Claude: 85 tools over IFC/Speckle."
           readme-filepath: ./docker/dockerhub/mcp.md
+
+      # Not a built image — an overview-only repo (create it once manually on
+      # Docker Hub) that points at the four real images below, since Docker
+      # Hub has no org-level README of its own.
+      - name: Sync converge stack overview
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/converge
+          short-description: "BIM coordination platform on Speckle: viewer, clash/IDS, BCF, ISO 19650 docs, AI copilot. Start here."
+          readme-filepath: ./docker/dockerhub/stack.md

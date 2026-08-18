@@ -9,6 +9,7 @@ export function StandaloneChartWidget({
     onUpdateWidget,
     chartSummary,
     fullData,
+    paramKeys = [],
     contextElements,
     displayOptions,
     fullDataReady,
@@ -61,8 +62,30 @@ export function StandaloneChartWidget({
             source: prop.isDimensional ? 'Dimensions' : 'Numeric Properties',
         }))
 
-        return [...summaryFields, ...discoveredFields, ...numericFields]
-    }, [chartSummary, fullData])
+        // discoverProperties/discoverNumericProperties only sample the first
+        // 500 elements and require >=1% coverage *of that sample* — a real
+        // but rare/unevenly-distributed parameter (e.g. a fire rating class
+        // present on only ~4% of elements, sorted outside the sample) can be
+        // entirely absent from discoveredFields even though it genuinely
+        // exists. paramKeys comes from the backend's parameter-keys endpoint,
+        // which aggregates over every element in the model, not a sample —
+        // merge in whatever it found that the client-side scan missed, so a
+        // real BIM parameter is never silently unfindable here.
+        const clientPaths = new Set([...discoveredFields, ...numericFields].map(f => f.path))
+        const backendFields = paramKeys
+            .filter(p => !clientPaths.has(`params.${p.key}`))
+            .map(p => ({
+                key: `discovered_params.${p.key}`,
+                config: { type: 'bar', title: p.key, orientation: 'h', clickable: true, field: `params.${p.key}`, isDiscovered: true },
+                entryCount: p.count,
+                coverage: p.coverage_pct,
+                path: `params.${p.key}`,
+                isDiscovered: true,
+                source: 'BIM Parameters',
+            }))
+
+        return [...summaryFields, ...discoveredFields, ...numericFields, ...backendFields]
+    }, [chartSummary, fullData, paramKeys])
 
     const chartData = useMemo(() => {
         if (!widget.chartConfig?.config) return {}
