@@ -70,6 +70,8 @@ import { useAuth } from './contexts/AuthContext'
 import { LoginScreen } from './components/LoginScreen'
 import { ResetPasswordScreen } from './components/ResetPasswordScreen'
 import { LandingPage } from './components/LandingPage'
+import { ImpressumPage } from './components/ImpressumPage'
+import { DatenschutzPage } from './components/DatenschutzPage'
 import { RUNTIME_CONFIG } from './runtimeConfig'
 
 // Lazy-loaded: each is a substantial, rarely-opened panel gated behind its
@@ -109,6 +111,16 @@ const CONFIG = {
 const _shareId = (() => {
     const pathMatch = window.location.pathname.match(/^\/(share[A-Za-z0-9_-]+)$/)
     return pathMatch ? pathMatch[1] : new URLSearchParams(window.location.search).get('share')
+})()
+
+// German law (§5 DDG, DSGVO Art. 13) requires the legal notice and privacy
+// policy to be reachable without logging in — checked in App() before the
+// resetToken/authLoading/authUser branches so these routes never wait on
+// auth state or a network round-trip.
+const _legalPage = (() => {
+    if (window.location.pathname === '/impressum') return 'impressum'
+    if (window.location.pathname === '/datenschutz') return 'datenschutz'
+    return null
 })()
 
 // Parse share-link URL param once at module load so useState initialisers can read it
@@ -3487,6 +3499,9 @@ function Dashboard({ readOnly = false }) {
 function App() {
     const { user: authUser, loading: authLoading } = useAuth()
     const [resetToken, setResetToken] = useState(_resetTokenSeed)
+
+    if (_legalPage === 'impressum') return <ImpressumPage />
+    if (_legalPage === 'datenschutz') return <DatenschutzPage />
 
     if (resetToken) {
         return (

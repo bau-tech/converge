@@ -102,6 +102,11 @@ export function LandingPage() {
               )
             })}
           </section>
+
+          <footer className="flex flex-wrap gap-4 pt-2 text-xs text-slate-500">
+            <a href="/impressum" className="hover:text-slate-300 transition-colors">Impressum</a>
+            <a href="/datenschutz" className="hover:text-slate-300 transition-colors">Datenschutz</a>
+          </footer>
         </div>
       </div>
     </div>
