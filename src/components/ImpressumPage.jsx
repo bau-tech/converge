@@ -1,14 +1,16 @@
-import { LegalPageLayout, LegalPlaceholder } from './LegalPageLayout'
+import { LegalPageLayout } from './LegalPageLayout'
 
-// Mandatory legal notice for a commercially/business-operated telemedia
-// service reachable from Germany (§5 DDG — Digitale-Dienste-Gesetz, which
-// replaced §5 TMG in May 2024). Every field marked with LegalPlaceholder is
-// a legal requirement the OPERATOR must fill in with real, accurate
-// information before this deployment goes live — a live Impressum with
-// placeholder text is not compliant and is a common target for Abmahnungen
-// (cease-and-desist warnings) in Germany. This file is not legal advice;
-// have it reviewed by a lawyer, especially the register/VAT fields, which
-// depend on your actual legal form (Einzelunternehmen, GbR, UG, GmbH, ...).
+// Legal notice for a privately/non-commercially operated telemedia service
+// reachable from Germany (§5 DDG — Digitale-Dienste-Gesetz, which replaced
+// §5 TMG in May 2024), filled in for the natural-person operator of this
+// instance — no Handelsregister entry, no VAT (private, non-commercial), and
+// no §18 MStV editorial-responsible-person section (only applies to
+// journalistic/editorial content like a blog, which this dashboard doesn't
+// have). This file is not legal advice; a non-commercial private offering
+// may not need an Impressum at all under §5 DDG's "geschäftsmäßig" test —
+// this one is kept anyway as low-cost insurance since the instance is
+// reachable by other logged-in users, not just the operator alone. Have it
+// reviewed by a lawyer if that changes.
 export function ImpressumPage() {
   return (
     <LegalPageLayout title="Impressum">
@@ -16,54 +18,23 @@ export function ImpressumPage() {
 
       <h2>Diensteanbieter</h2>
       <p>
-        <LegalPlaceholder>[Vollständiger Name / Firma]</LegalPlaceholder><br />
-        <LegalPlaceholder>[Straße und Hausnummer]</LegalPlaceholder><br />
-        <LegalPlaceholder>[PLZ Ort]</LegalPlaceholder><br />
-        <LegalPlaceholder>[Land]</LegalPlaceholder>
-      </p>
-      <p>
-        Bei einer juristischen Person (z. B. GmbH, UG) zusätzlich: Rechtsform und
-        vertretungsberechtigte Person(en) angeben (<LegalPlaceholder>[z. B. „vertreten durch Geschäftsführer:in ...&rdquo;]</LegalPlaceholder>).
+        Eugen Chladny<br />
+        Teckstr. 12<br />
+        73240 Wendlingen<br />
+        Deutschland
       </p>
 
       <h2>Kontakt</h2>
       <p>
-        Telefon: <LegalPlaceholder>[Telefonnummer]</LegalPlaceholder><br />
-        E-Mail: <LegalPlaceholder>[E-Mail-Adresse]</LegalPlaceholder>
-      </p>
-      <p>
-        Nach der Rechtsprechung des EuGH und BGH reicht eine reine E-Mail-Adresse
-        allein unter Umständen nicht aus — es muss ein Weg zur schnellen
-        elektronischen Kontaktaufnahme bestehen (z. B. Telefon oder
-        Kontaktformular zusätzlich zur E-Mail).
+        Telefon: +49 176 97343242<br />
+        E-Mail: echladny@msn.com
       </p>
 
-      <h2>Registereintrag</h2>
+      <h2>Umsatzsteuer</h2>
       <p>
-        Falls im Handelsregister, Vereinsregister, Partnerschaftsregister oder
-        Genossenschaftsregister eingetragen:
-      </p>
-      <p>
-        Registergericht: <LegalPlaceholder>[Registergericht]</LegalPlaceholder><br />
-        Registernummer: <LegalPlaceholder>[Registernummer]</LegalPlaceholder>
-      </p>
-      <p>
-        Falls kein Registereintrag besteht (z. B. Kleingewerbe/Freiberufler),
-        diesen Abschnitt entfernen.
-      </p>
-
-      <h2>Umsatzsteuer-ID</h2>
-      <p>
-        Umsatzsteuer-Identifikationsnummer gemäß § 27a UStG:{' '}
-        <LegalPlaceholder>[USt-IdNr. oder „Kein Ausweis gem. § 19 UStG (Kleinunternehmerregelung)&rdquo;]</LegalPlaceholder>
-      </p>
-
-      <h2>Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</h2>
-      <p>
-        <LegalPlaceholder>[Name, Anschrift wie oben]</LegalPlaceholder> — nur
-        erforderlich, falls redaktionelle/journalistisch-redaktionelle Inhalte
-        (z. B. ein Blog) angeboten werden; für ein reines SaaS-Dashboard ohne
-        Blog kann dieser Abschnitt in der Regel entfallen.
+        Dieses Angebot wird privat und nicht gewerblich betrieben. Es erfolgt
+        keine Umsatzsteuererhebung; eine Umsatzsteuer-Identifikationsnummer
+        gemäß § 27a UStG besteht nicht.
       </p>
 
       <h2>EU-Streitschlichtung</h2>
@@ -76,11 +47,10 @@ export function ImpressumPage() {
         . Unsere E-Mail-Adresse finden Sie oben.
       </p>
 
-      <h2>Verbraucherstreitbeilegung / Universalschlichtungsstelle</h2>
+      <h2>Verbraucherstreitbeilegung</h2>
       <p>
-        Wir sind <LegalPlaceholder>[nicht bereit / bereit]</LegalPlaceholder>, an
-        Streitbeilegungsverfahren vor einer Verbraucherschlichtungsstelle
-        teilzunehmen (§ 36 VSBG).
+        Wir sind nicht bereit und nicht verpflichtet, an Streitbeilegungsverfahren
+        vor einer Verbraucherschlichtungsstelle teilzunehmen (§ 36 VSBG).
       </p>
 
       <h2>Haftung für Inhalte und Links</h2>

@@ -19,17 +19,17 @@ export function DatenschutzPage() {
         Verantwortlicher im Sinne der Datenschutz-Grundverordnung (DSGVO) ist:
       </p>
       <p>
-        <LegalPlaceholder>[Vollständiger Name / Firma]</LegalPlaceholder><br />
-        <LegalPlaceholder>[Straße, PLZ Ort, Land]</LegalPlaceholder><br />
-        E-Mail: <LegalPlaceholder>[E-Mail-Adresse]</LegalPlaceholder>
+        Eugen Chladny<br />
+        Teckstr. 12, 73240 Wendlingen, Deutschland<br />
+        E-Mail: echladny@msn.com
       </p>
       <p>
         (Details siehe <a href="/impressum">Impressum</a>.) Ein:e
-        Datenschutzbeauftragte:r ist{' '}
-        <LegalPlaceholder>[nicht bestellt / erreichbar unter ...]</LegalPlaceholder>{' '}
-        — nach Art. 37 DSGVO / § 38 BDSG erst ab bestimmten Schwellenwerten
-        verpflichtend (i. d. R. ab 20 Personen, die ständig mit der
-        automatisierten Verarbeitung personenbezogener Daten befasst sind).
+        Datenschutzbeauftragte:r ist nicht bestellt — nach Art. 37 DSGVO / § 38
+        BDSG erst ab bestimmten Schwellenwerten verpflichtend (i. d. R. ab 20
+        Personen, die ständig mit der automatisierten Verarbeitung
+        personenbezogener Daten befasst sind), was auf einen
+        Einzelunternehmer-Betrieb nicht zutrifft.
       </p>
 
       <h2>2. Server-Logfiles</h2>
@@ -149,7 +149,9 @@ export function DatenschutzPage() {
         <li>Beschwerde bei einer Datenschutzaufsichtsbehörde (Art. 77 DSGVO)</li>
       </ul>
       <p>
-        Zuständige Aufsichtsbehörde: <LegalPlaceholder>[zuständige Landesdatenschutzbehörde je nach Bundesland des Verantwortlichen]</LegalPlaceholder>.
+        Zuständige Aufsichtsbehörde: Der Landesbeauftragte für den Datenschutz
+        und die Informationsfreiheit Baden-Württemberg (LfDI
+        Baden-Württemberg), Königstraße 10a, 70173 Stuttgart.
       </p>
 
       <h2>11. Keine automatisierte Entscheidungsfindung</h2>
