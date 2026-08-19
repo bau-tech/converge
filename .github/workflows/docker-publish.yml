@@ -180,5 +180,5 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ vars.DOCKERHUB_USERNAME }}/converge
-          short-description: "BIM coordination platform on Speckle: viewer, clash/IDS, BCF, ISO 19650 docs, AI copilot. Start here."
+          short-description: "BIM coordination platform on Speckle: viewer, clash/IDS, BCF, ISO 19650 docs, AI copilot."
           readme-filepath: ./docker/dockerhub/stack.md
