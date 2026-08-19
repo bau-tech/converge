@@ -117,6 +117,23 @@ def _ocs_request(method: str, path: str, auth: tuple[str, str], base: str = "ocs
     return body.get("ocs", {}).get("data", {})
 
 
+def open_direct_editing(path: str) -> dict:
+    """Mints a short-lived, single-use editor URL for exactly this file via
+    Nextcloud's OCS Direct Editing API — the browser navigates there
+    directly (window.open), this module never proxies the editor session
+    itself. Requires Nextcloud's richdocuments app to be installed and wired
+    to a Collabora server first (see
+    nextcloud-hooks/post-installation/install-richdocuments.sh) or this
+    raises NextcloudError with no editable provider found for the file's
+    mimetype. `path` is the same nc_path convention _dav_url() above uses —
+    relative to NEXTCLOUD_USER's own DAV root, exactly what
+    download_bytes()/upload_bytes() already take."""
+    return _ocs_request(
+        "POST", "apps/files/api/v1/directEditing/open", _auth(),
+        data={"path": path},
+    )
+
+
 _PROPFIND_BODY = """<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
   <d:prop>

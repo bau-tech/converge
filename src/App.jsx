@@ -93,6 +93,12 @@ const CONFIG = {
     // otherwise have sent them to the sign-in screen before Dashboard's own
     // share-resolution effect ever got a chance to run.
     shareLinkMode: RUNTIME_CONFIG.SHARE_LINK_MODE,
+    // Optional in-browser Office editing (Collabora) — see .env.example.
+    // Purely a UI-visibility flag for DocumentsPanel's Edit button; the
+    // backend route it calls independently re-checks the same setting
+    // server-side (config/settings.py's COLLABORA_ENABLED), so this can't
+    // be used to fake access to a deployment that doesn't actually have it.
+    collaboraEnabled: RUNTIME_CONFIG.COLLABORA_ENABLED,
 }
 
 // Detected at module load — same timing as _urlSeed below — so App()'s auth
@@ -3280,6 +3286,7 @@ function Dashboard({ readOnly = false }) {
                         <DocumentsPanel
                             streamId={data?.project_id}
                             normalizerUrl={CONFIG.normalizerUrl}
+                            collaboraEnabled={CONFIG.collaboraEnabled}
                             serverUrl={activeServer.url}
                             serverToken={activeServer.token}
                             activeModelId={data?.normalizer_model_id}

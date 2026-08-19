@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { X, FileText, Download } from 'lucide-react'
+import { X, FileText, Download, Pencil } from 'lucide-react'
 import { IfcCanvas } from './document-preview/IfcCanvas'
 import { DxfCanvas } from './document-preview/DxfCanvas'
 import { DocxCanvas } from './document-preview/DocxCanvas'
@@ -16,7 +16,7 @@ function extOf(filename) {
 // cross-panel trigger ever let both parents be open at once — today
 // showBcfBoard/showDocuments are independent flags with no code path that
 // opens both, but nothing enforces that, so the tie was a latent bug.
-export function DocumentPreview({ doc, downloadUrl, dwgPreviewUrl, onClose }) {
+export function DocumentPreview({ doc, downloadUrl, dwgPreviewUrl, onEdit, onClose }) {
     const ext = extOf(doc?.filename)
     const isPdf = ext === 'pdf' || doc?.mime_type === 'application/pdf'
     const isIfc = ext === 'ifc'
@@ -42,6 +42,14 @@ export function DocumentPreview({ doc, downloadUrl, dwgPreviewUrl, onClose }) {
                     <h2 className="font-semibold text-sm text-[var(--speckle-foreground)] truncate">{doc?.filename}</h2>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                    {onEdit && (
+                        <button
+                            onClick={onEdit}
+                            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)] transition-colors"
+                        >
+                            <Pencil className="w-3.5 h-3.5" /> Edit
+                        </button>
+                    )}
                     <a
                         href={downloadUrl}
                         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] text-[var(--speckle-foreground-3)] hover:bg-[var(--speckle-outline-3)] hover:text-[var(--speckle-foreground)] transition-colors"

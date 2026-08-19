@@ -1,0 +1,82 @@
+# Optional add-on for Office in-place editing (Collabora Online / WOPI).
+# Not part of the default stack — compose this on top of docker-compose.yml
+# (or docker-compose.release.yml) explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.collabora.yml up -d
+#
+# Also requires COLLABORA_ENABLED=true in .env (gates the Nextcloud app
+# install, the bim-normalizer edit-session route, and the dashboard's Edit
+# button — see .env.example) and, on an already-running Nextcloud instance,
+# the one-time `occ` commands documented in
+# nextcloud-hooks/post-installation/install-richdocuments.sh (that hook only
+# fires on a brand-new install, per the official image's own
+# docker-entrypoint-hooks.d/post-installation mechanism).
+services:
+
+  # ── Collabora Online (CODE) — WOPI editor engine ────────────────────────
+  # Nextcloud's own "richdocuments" app (installed by
+  # nextcloud-hooks/post-installation/install-richdocuments.sh when
+  # COLLABORA_ENABLED=true) is the WOPI HOST — it already owns file storage/
+  # versioning/locking. This container is the WOPI CLIENT only: it renders
+  # LibreOffice-based docx/xlsx/pptx/odt/ods/odp editing and talks back to
+  # Nextcloud over WOPI, server-to-server on the internal network. CODE is
+  # the free/open-source single-server edition — no enterprise clustering,
+  # no license, the lightest of the three real in-browser office-editing
+  # engines (vs. ONLYOFFICE Document Server's heavier footprint + community
+  # connection cap, or Microsoft 365/WOPI's Azure AD + licensing requirement).
+  collabora:
+    image: collabora/code:latest
+    container_name: collabora
+    # LibreOffice forks a "kit" process per concurrently open document
+    # (~200-350MB each) on top of a ~300-500MB idle baseline — this is a
+    # safety ceiling, not expected steady-state usage for a small team.
+    # Revisit via `docker stats` once real concurrent-edit counts are known.
+    mem_limit: 3g
+    cap_add:
+      - MAC_ADMIN   # required by coolwsd's chroot/jail sandboxing, per Collabora's own docker docs
+      - SYS_ADMIN   # required for coolmount's bind-mount jail setup AND the convert-to/preview-generation
+                     # pipeline (confirmed via coolwsd's own error log: "Failed to exec coolmount... needs
+                     # CAP_SYS_ADMIN"). This is a broad capability grant — often called "almost root" for
+                     # containers — weigh it against how much you need fast jail setup + real Office
+                     # thumbnails vs. tighter isolation for a process that renders untrusted documents.
+    ports:
+      # Admin/debug convenience only, same convention as nextcloud's own
+      # exposed :8005 — the real access path for end users is whatever
+      # reverse-proxy hostname(s) this deployment decides on separately
+      # (see the plan's "exposure is narrowed, not avoided" note — that
+      # decision is intentionally not made here).
+      - "${COLLABORA_PORT:-9980}:9980"
+    environment:
+      TZ: ${TZ:-Europe/Berlin}
+      # Regex-escaped hostname(s) allowed to embed this server's iframe/WOPI
+      # session, enforced against the browser's actual Referer/Origin — must
+      # match whatever public hostname ends up serving Nextcloud's
+      # direct-editing page, not the internal "nextcloud" Docker service name.
+      domain: ${COLLABORA_ALLOWED_DOMAIN:?set COLLABORA_ALLOWED_DOMAIN, e.g. converge\.chladny\.de — see .env.example}
+      # TLS terminated at whatever sits in front of this container (same
+      # place converge.chladny.de's own TLS is terminated) — Collabora
+      # itself speaks plain HTTP behind it. For a plain-HTTP LOCAL trial with
+      # no reverse proxy at all (e.g. testing directly against a published
+      # :9980 with no TLS anywhere), set ssl.termination=false instead, or
+      # Collabora's self-reported discovery URLs keep the https:// scheme
+      # and the browser's iframe bootstrap fails silently against a
+      # plain-HTTP-only port.
+      #
+      # server_name (coolwsd.xml) fixes what host:port Collabora embeds in
+      # its own self-reported URLs (discovery.xml's urlsrc, used to build the
+      # editing iframe's actual src) to this literal value, REGARDLESS of
+      # which URL/Host header was used to reach it — without this, Collabora
+      # just echoes back whatever Host it saw on the request, which breaks
+      # editing the moment Nextcloud's wopi_url points at the internal
+      # Docker hostname (needed for convert-to/thumbnails — see
+      # nextcloud-hooks/post-installation/install-richdocuments.sh and the
+      # plan doc's "Word/Excel thumbnail previews" section for why wopi_url
+      # can't just be the public URL too). Leave unset only if wopi_url
+      # itself is already the public URL end to end.
+      extra_params: >-
+        --o:ssl.enable=false
+        --o:ssl.termination=true
+        ${COLLABORA_SERVER_NAME:+--o:server_name=${COLLABORA_SERVER_NAME}}
+    restart: unless-stopped
+    networks:
+      - speckle-net

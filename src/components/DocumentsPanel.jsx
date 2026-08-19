@@ -48,13 +48,15 @@ function isPreviewable(filename) {
     return m ? PREVIEWABLE_EXT.has(m[1].toLowerCase()) : false
 }
 
-// No real thumbnail exists for .docx/.xlsx (would need a full LibreOffice
-// pipeline — see thumbnail_document's fallback chain in routers/documents.py)
-// — showing the real Word/Excel file-type icon instead of a generic FileText
-// glyph at least tells the two apart at a glance in the grid/list. Sized to
-// fill the same container a real thumbnail would (object-contain, not the
-// small fixed size FileText uses) so it reads with the same visual weight
-// as a PDF/DXF preview instead of looking like an afterthought.
+// Fallback for when the real thumbnail fetch (below) 404s — either no
+// Collabora deployed on this instance (COLLABORA_ENABLED unset, so
+// thumbnail_document's fallback chain in routers/documents.py never gets a
+// working convert-to source for .docx/.xlsx) or a genuinely unsupported
+// format. Showing the real Word/Excel file-type icon instead of a generic
+// FileText glyph at least tells the two apart at a glance in the grid/list.
+// Sized to fill the same container a real thumbnail would (object-contain,
+// not the small fixed size FileText uses) so it reads with the same visual
+// weight as a PDF/DXF preview instead of looking like an afterthought.
 function DocTypeIcon({ filename, className }) {
     const ext = /\.([a-z0-9]+)$/i.exec(filename || '')?.[1]?.toLowerCase()
     if (ext === 'docx' || ext === 'doc') return <WordIcon className="w-full h-full object-contain p-2" />
@@ -281,7 +283,7 @@ function Card({ doc, thumbUrl, downloadUrl, onDelete, canDelete, onGate, pending
 // Full-screen document workflow overlay — mirrors BcfKanbanBoard.jsx's
 // layout (fixed inset-0 + 360px detail drawer), not IdsCheckPanel's
 // right-docked drawer, since this is a multi-column board like the BCF one.
-export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged, activeModelId, onAlignDrawing, viewerRef }) {
+export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = false, serverUrl, serverToken, onClose, onLoadModel, onDocumentsChanged, activeModelId, onAlignDrawing, viewerRef }) {
     const base = (normalizerUrl || '').replace(/\/$/, '')
     const { user } = useAuth()
     const [activeTab, setActiveTab] = useState('documents') // 'documents' | 'drawings' | 'models'
@@ -1130,6 +1132,29 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
         }
     }
 
+    // Formats Collabora actually renders — deliberately excludes IFC/DXF/DWG/
+    // PDF/images (no renderer for those) even though this deployment might
+    // have Collabora enabled for office formats.
+    const isDirectEditable = (filename) => {
+        const ext = (filename || '').split('.').pop()?.toLowerCase()
+        return ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'doc', 'xls', 'ppt'].includes(ext)
+    }
+
+    const handleEdit = async (doc) => {
+        if (!doc) return
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents/${doc.doc_id}/edit-session`, { method: 'POST' })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `Could not open editor (${res.status})`)
+            }
+            const { url } = await res.json()
+            if (url) window.open(url, '_blank', 'noopener')
+        } catch (err) {
+            setError(err.message)
+        }
+    }
+
     // While a saved alignment's overlay is being shown in the 3D viewer AND
     // its drawer (holding the toggle/opacity slider) is open, the rest of
     // this panel (kanban board, tabs, header) is hidden entirely so the live
@@ -1694,6 +1719,14 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                             >
                                 <Download className="w-3.5 h-3.5" /> Download
                             </a>
+                            {collaboraEnabled && canAct && isDirectEditable(selectedDoc.filename) && (
+                                <button
+                                    onClick={() => handleEdit(selectedDoc)}
+                                    className="flex-1 flex items-center justify-center gap-1.5 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
+                                >
+                                    <Pencil className="w-3.5 h-3.5" /> Edit
+                                </button>
+                            )}
                             {canAct && (
                                 <>
                                     <input ref={reviseInputRef} type="file" className="hidden" onChange={handleRevise} />
@@ -1732,6 +1765,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, serverUrl, serverToken
                         doc={previewDoc}
                         downloadUrl={`${base}/projects/${streamId}/documents/${previewDoc.doc_id}/download`}
                         dwgPreviewUrl={`${base}/projects/${streamId}/documents/${previewDoc.doc_id}/preview.dxf`}
+                        onEdit={collaboraEnabled && canAct && isDirectEditable(previewDoc.filename) ? () => handleEdit(previewDoc) : null}
                         onClose={() => setPreviewDoc(null)}
                     />
                 )}

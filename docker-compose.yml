@@ -65,6 +65,20 @@ services:
       NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
       NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:?NEXTCLOUD_ADMIN_PASSWORD is required}
       NEXTCLOUD_TRUSTED_DOMAINS: nextcloud
+      # Read by nextcloud-hooks/post-installation/install-richdocuments.sh —
+      # unset/false means that hook is a no-op and this Nextcloud installs
+      # exactly as it does without the optional Collabora add-on
+      # (docker-compose.collabora.yml). See .env.example.
+      COLLABORA_ENABLED: ${COLLABORA_ENABLED:-}
+      # richdocuments' public_wopi_url — the externally-reachable origin the
+      # BROWSER loads the editor iframe from. Deliberately separate from
+      # wopi_url (always the internal http://collabora:9980, hardcoded below
+      # in the hook): convert-to/get-thumbnail/etc. are server-to-server
+      # calls that work with zero public exposure, but the editing iframe
+      # itself needs a real browser-reachable origin. Unset means the hook
+      # leaves richdocuments on the internal URL for everything, so previews
+      # still work but in-browser editing won't load. See .env.example.
+      COLLABORA_PUBLIC_URL: ${COLLABORA_PUBLIC_URL:-}
     volumes:
       - nextcloud_html:/var/www/html
       - nextcloud_data:/var/www/html/data
@@ -212,6 +226,8 @@ services:
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
       # DEV/TESTING ONLY — see the warning next to this var in .env.example.
       DASHBOARD_AUTH_BYPASS: ${DASHBOARD_AUTH_BYPASS:-}
+      # Gates routers/documents.py's edit-session route — see .env.example.
+      COLLABORA_ENABLED: ${COLLABORA_ENABLED:-}
       # notifications/email.py's send_email(), used by the document-workflow
       # notification feed (routers/documents.py -> notifications/dispatch.py).
       # Was previously unset here even though .env defines it, so send_email()
@@ -396,6 +412,10 @@ services:
       VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
+      # Shows/hides DocumentsPanel's Edit button — purely cosmetic, the
+      # backend route it calls independently re-checks COLLABORA_ENABLED
+      # server-side (config/settings.py) regardless of this.
+      VITE_COLLABORA_ENABLED: ${COLLABORA_ENABLED:-}
     depends_on:
       bim-normalizer:
         condition: service_healthy

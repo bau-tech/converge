@@ -268,6 +268,48 @@ def download_document(stream_id: str, doc_id: str, inline: bool = False, user: C
     )
 
 
+_DIRECT_EDIT_EXTENSIONS = {"docx", "xlsx", "pptx", "odt", "ods", "odp", "doc", "xls", "ppt"}
+
+
+@router.post("/projects/{stream_id}/documents/{doc_id}/edit-session")
+def open_edit_session(stream_id: str, doc_id: str, user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE))):
+    """Mints a Collabora/richdocuments editor URL for this document via
+    Nextcloud's Direct Editing API — see nextcloud/client.py's
+    open_direct_editing(). Optional feature (COLLABORA_ENABLED); the
+    standard read-only preview (DocumentPreview.jsx) works regardless of
+    this route's availability. Same permission gate as revise() — a
+    Collabora edit and Converge's own revise() both end up as a whole-file
+    write to the same location, so they share a permission bar.
+
+    Edit sessions open under the shared NEXTCLOUD_USER service account
+    (same as every other nextcloud/client.py call) — Nextcloud's own version
+    history won't show which Converge user actually made the edit, but this
+    route's own record_event() call below keeps bim_document_events'
+    attribution accurate regardless."""
+    from config import settings
+    if not settings.COLLABORA_ENABLED:
+        raise HTTPException(status_code=503, detail="In-browser editing is not enabled on this deployment")
+
+    from db.connection import get_conn, release_conn
+    from db.documents import record_event
+    from nextcloud.client import NextcloudError, open_direct_editing
+
+    conn = get_conn()
+    try:
+        doc = _require_doc(conn, doc_id, user)
+        ext = doc["filename"].rsplit(".", 1)[-1].lower() if "." in doc["filename"] else ""
+        if ext not in _DIRECT_EDIT_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"'.{ext}' is not editable in-browser")
+        try:
+            result = open_direct_editing(doc["nc_path"])
+        except NextcloudError as exc:
+            raise HTTPException(status_code=502, detail=f"Could not open editor: {exc}")
+        record_event(conn, doc_id, "edit_session_opened", actor=user.name, actor_guid=user.guid)
+        return {"url": result.get("url")}
+    finally:
+        release_conn(conn)
+
+
 @router.get("/projects/{stream_id}/documents/{doc_id}/preview.dxf")
 def preview_dwg_as_dxf(stream_id: str, doc_id: str, user: CurrentUser = Depends(require_login)):
     """On-the-fly .dwg -> .dxf conversion (dwg_convert.py, LibreDWG's

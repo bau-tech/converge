@@ -141,6 +141,16 @@ NEXTCLOUD_ADMIN_PASSWORD: str = os.getenv("NEXTCLOUD_ADMIN_PASSWORD", "")
 # BCF_OIDC_SECRET falling back to BCF_API_KEY above.
 NEXTCLOUD_APP_PASSWORD: str = os.getenv("NEXTCLOUD_APP_PASSWORD") or NEXTCLOUD_ADMIN_PASSWORD
 
+# Optional in-browser Office editing (Collabora Online, via Nextcloud's
+# richdocuments/WOPI integration) — gates routers/documents.py's
+# edit-session route. Off by default: the deployment also needs the optional
+# docker-compose.collabora.yml service actually running and Nextcloud's
+# richdocuments app installed+wired (see
+# nextcloud-hooks/post-installation/install-richdocuments.sh) for this to
+# work end-to-end even when true. Same bool-from-env pattern as
+# DASHBOARD_AUTH_BYPASS above.
+COLLABORA_ENABLED: bool = os.getenv("COLLABORA_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
 # Same-Docker-network base URL Nextcloud's webhook_listeners app calls back
 # into (see nextcloud/webhooks.py) — distinct from PUBLIC_BASE_URL, since
 # Nextcloud reaches bim-normalizer directly by its Compose service name, not
