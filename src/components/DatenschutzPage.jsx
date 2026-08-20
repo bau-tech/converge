@@ -1,16 +1,12 @@
-import { LegalPageLayout, LegalPlaceholder } from './LegalPageLayout'
+import { LegalPageLayout } from './LegalPageLayout'
 
 // GDPR/DSGVO Art. 13-14 privacy notice. The prose below is written to match
-// what this codebase actually does (session-cookie auth, self-hostable
-// Nextcloud/Speckle, optional third-party AI providers configured via env
-// vars — see .env.example) so it doesn't overclaim or underclaim. It still
-// has operator-specific gaps (marked LegalPlaceholder) this file cannot fill
-// in on its own: your contact details, your server's actual physical
-// location/hosting provider, and — most importantly — WHICH of the optional
-// integrations below are actually enabled on THIS deployment. Delete the
-// paragraphs describing integrations you don't run. This is not legal
-// advice; have a lawyer review this before going live, particularly the
-// third-country AI-provider transfer section if you enable OpenAI/Anthropic.
+// what this specific deployment actually runs (self-hosted Nextcloud +
+// Speckle on the operator's own infrastructure, Mistral/OpenAI/Ollama/
+// LM Studio configured for the chat assistant — see .env) rather than being
+// generic boilerplate. If the deployment's infrastructure or configured AI
+// providers change, this file needs a matching update — see sections 4-6.
+// This is not legal advice; have a lawyer review this before relying on it.
 export function DatenschutzPage() {
   return (
     <LegalPageLayout title="Datenschutzerklärung">
@@ -69,22 +65,22 @@ export function DatenschutzPage() {
         Text ersetzt keinen solchen Vertrag.
       </p>
       <p>
-        Dokumente werden in einer Nextcloud-Instanz gespeichert. Diese läuft{' '}
-        <LegalPlaceholder>[selbst gehostet auf eigener/gemieteter Infrastruktur bei ... / durch einen Drittanbieter betrieben]</LegalPlaceholder>.
-        Wird ein Drittanbieter für Hosting genutzt, ist mit diesem ebenfalls ein
-        AVV erforderlich.
+        Dokumente werden in einer Nextcloud-Instanz gespeichert. Diese läuft
+        selbst gehostet auf eigener Infrastruktur des Betreibers — es wird
+        kein Drittanbieter-Hosting für Nextcloud genutzt.
       </p>
 
       <h2>5. Speckle-Server (3D-Modelldaten)</h2>
       <p>
         Modelldaten werden über einen Speckle-Server synchronisiert. Diese
-        Anwendung ist konfiguriert für:{' '}
-        <LegalPlaceholder>[einen selbst gehosteten Speckle-Server / app.speckle.systems (Speckle Systems Inc., USA)]</LegalPlaceholder>.
-        Wird der von Speckle Systems Inc. gehostete Dienst genutzt, handelt es
-        sich um eine Datenübermittlung in ein Drittland (USA) im Sinne von Art.
-        44 ff. DSGVO; Speckle Systems Inc. muss dafür geeignete Garantien
-        bieten (z. B. EU-Standardvertragsklauseln). Details siehe die
-        Datenschutzerklärung von Speckle Systems.
+        Anwendung ist konfiguriert für einen selbst gehosteten Speckle-Server
+        auf eigener Infrastruktur des Betreibers — nicht für den von Speckle
+        Systems Inc. gehosteten Dienst (app.speckle.systems). Es findet daher
+        keine Datenübermittlung an Speckle Systems Inc. statt. Sollte diese
+        Instanz künftig auf app.speckle.systems umgestellt werden, läge darin
+        eine Datenübermittlung in ein Drittland (USA) im Sinne von Art. 44 ff.
+        DSGVO, für die geeignete Garantien (z. B. EU-Standardvertragsklauseln)
+        erforderlich wären.
       </p>
 
       <h2>6. KI-Assistent (optional)</h2>
@@ -98,15 +94,23 @@ export function DatenschutzPage() {
         verlassen die Daten die eigene Infrastruktur überhaupt nicht.
       </p>
       <p>
-        Auf dieser Instanz ist aktuell konfiguriert:{' '}
-        <LegalPlaceholder>[aktiven Anbieter eintragen, z. B. „Mistral AI (EU)&rdquo; oder „lokal via Ollama, keine Datenübermittlung&rdquo;]</LegalPlaceholder>.
-        Bei Nutzung von OpenAI oder Anthropic handelt es sich um eine
-        Datenübermittlung in ein Drittland (USA, Art. 44 ff. DSGVO); prüfen Sie
-        vor Live-Betrieb, ob der jeweilige Anbieter zum Zeitpunkt der Nutzung
-        unter das EU-US Data Privacy Framework fällt oder auf
-        EU-Standardvertragsklauseln gestützt werden muss, und schließen Sie den
-        entsprechenden AVV mit dem Anbieter ab. Rechtsgrundlage der Nutzung ist
-        Art. 6 Abs. 1 lit. b bzw. f DSGVO.
+        Auf dieser Instanz sind aktuell konfiguriert: Mistral AI (Frankreich/EU,
+        voreingestellter Standardanbieter), OpenAI (OpenAI, L.L.C., USA) sowie
+        lokal betriebene Modelle über Ollama und LM Studio (verlassen die
+        eigene Infrastruktur nicht). Anthropic ist auf dieser Instanz nicht
+        konfiguriert. Sie können den Anbieter für Ihre eigene Sitzung in den
+        Chat-Einstellungen selbst wählen — die Voreinstellung ist Mistral AI.
+      </p>
+      <p>
+        Wählen Sie OpenAI, handelt es sich um eine Datenübermittlung in ein
+        Drittland (USA, Art. 44 ff. DSGVO); der Betreiber stützt sich dafür auf
+        die von OpenAI angebotenen Garantien (z. B. EU-Standardvertragsklauseln
+        bzw. EU-US Data Privacy Framework, je nach Stand zum Nutzungszeitpunkt)
+        und hat mit OpenAI einen Auftragsverarbeitungsvertrag (AVV, Art. 28
+        DSGVO) abzuschließen. Bei Mistral AI (EU-Anbieter) sowie bei Ollama/LM
+        Studio (lokal, keine externe Übermittlung) liegt keine
+        Drittlandübermittlung vor. Rechtsgrundlage der Nutzung ist Art. 6 Abs.
+        1 lit. b bzw. f DSGVO.
       </p>
 
       <h2>7. Benachrichtigungen per E-Mail</h2>
@@ -165,8 +169,7 @@ export function DatenschutzPage() {
       <h2>12. Änderungen dieser Datenschutzerklärung</h2>
       <p>
         Wir passen diese Datenschutzerklärung an, sobald sich die
-        eingesetzten Dienste oder die Rechtslage ändern. Stand:{' '}
-        <LegalPlaceholder>[Datum der letzten Änderung]</LegalPlaceholder>.
+        eingesetzten Dienste oder die Rechtslage ändern. Stand: 20. August 2026.
       </p>
     </LegalPageLayout>
   )
