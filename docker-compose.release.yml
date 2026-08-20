@@ -280,6 +280,8 @@ services:
       VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
+      VITE_DEMO_LOGIN_EMAIL: ${VITE_DEMO_LOGIN_EMAIL:-}
+      VITE_DEMO_LOGIN_PASSWORD: ${VITE_DEMO_LOGIN_PASSWORD:-}
       # Shows/hides DocumentsPanel's Edit button — purely cosmetic, the
       # backend route it calls independently re-checks COLLABORA_ENABLED
       # server-side (config/settings.py) regardless of this.
