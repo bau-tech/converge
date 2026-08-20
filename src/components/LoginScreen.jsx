@@ -1,12 +1,17 @@
 import { useState } from 'react'
 import { Loader2, Lock, Mail } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { RUNTIME_CONFIG } from '../runtimeConfig'
 
 export function LoginScreen({ layout = 'fullscreen', className = '' }) {
     const { login, requestPasswordReset } = useAuth()
     const [mode, setMode] = useState('login') // 'login' | 'forgot' | 'sent'
-    const [email, setEmail] = useState('')
-    const [password, setPassword] = useState('')
+    // Optionally prefilled from VITE_DEMO_LOGIN_EMAIL/_PASSWORD (see
+    // .env.example) so a public demo/live-tour account can be signed into
+    // with one click instead of typing credentials. Both default to empty,
+    // giving the normal blank login form, unless the operator opts in.
+    const [email, setEmail] = useState(RUNTIME_CONFIG.DEMO_LOGIN_EMAIL)
+    const [password, setPassword] = useState(RUNTIME_CONFIG.DEMO_LOGIN_PASSWORD)
     const [error, setError] = useState(null)
     const [submitting, setSubmitting] = useState(false)
 
