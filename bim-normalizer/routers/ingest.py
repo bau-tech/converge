@@ -59,7 +59,6 @@ def _prepare_ingest(request: IngestRequest, user: CurrentUser) -> dict:
 
     conn = get_conn()
     try:
-        require_project_role(conn, request.stream_id, user, ANY_PROJECT_ROLE)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT m.model_id::text, COUNT(e.element_id) AS element_count
@@ -96,6 +95,12 @@ def _prepare_ingest(request: IngestRequest, user: CurrentUser) -> dict:
                 "element_count": int(row[1]),
                 "summary": get_model_summary(conn, row[0]),
             }}
+
+        # Anything past this point actually starts or joins an ingest run
+        # (as opposed to the fast-return read above), so it needs a project
+        # role — unlike the fast path, a plain view-only account shouldn't
+        # be able to trigger one.
+        require_project_role(conn, request.stream_id, user, ANY_PROJECT_ROLE)
 
         # Deduplicate: reuse an existing running job for the same commit.
         # find_running_job()-then-create_job() is otherwise a check-then-act
