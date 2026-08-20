@@ -10,6 +10,8 @@ import { LegalPageLayout } from './LegalPageLayout'
 export function DatenschutzPage() {
   return (
     <LegalPageLayout title="Datenschutzerklärung">
+      <p className="italic"><a href="/datenschutz-en">English version</a></p>
+
       <h2>1. Verantwortlicher</h2>
       <p>
         Verantwortlicher im Sinne der Datenschutz-Grundverordnung (DSGVO) ist:

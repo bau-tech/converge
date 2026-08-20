@@ -72,6 +72,8 @@ import { ResetPasswordScreen } from './components/ResetPasswordScreen'
 import { LandingPage } from './components/LandingPage'
 import { ImpressumPage } from './components/ImpressumPage'
 import { DatenschutzPage } from './components/DatenschutzPage'
+import { ImpressumPageEn } from './components/ImpressumPageEn'
+import { DatenschutzPageEn } from './components/DatenschutzPageEn'
 import { RUNTIME_CONFIG } from './runtimeConfig'
 
 // Lazy-loaded: each is a substantial, rarely-opened panel gated behind its
@@ -120,6 +122,8 @@ const _shareId = (() => {
 const _legalPage = (() => {
     if (window.location.pathname === '/impressum') return 'impressum'
     if (window.location.pathname === '/datenschutz') return 'datenschutz'
+    if (window.location.pathname === '/impressum-en') return 'impressum-en'
+    if (window.location.pathname === '/datenschutz-en') return 'datenschutz-en'
     return null
 })()
 
@@ -3502,6 +3506,8 @@ function App() {
 
     if (_legalPage === 'impressum') return <ImpressumPage />
     if (_legalPage === 'datenschutz') return <DatenschutzPage />
+    if (_legalPage === 'impressum-en') return <ImpressumPageEn />
+    if (_legalPage === 'datenschutz-en') return <DatenschutzPageEn />
 
     if (resetToken) {
         return (

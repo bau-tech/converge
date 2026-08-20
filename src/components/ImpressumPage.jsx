@@ -14,6 +14,8 @@ import { LegalPageLayout } from './LegalPageLayout'
 export function ImpressumPage() {
   return (
     <LegalPageLayout title="Impressum">
+      <p className="italic"><a href="/impressum-en">English version</a></p>
+
       <p>Angaben gemäß § 5 DDG (Digitale-Dienste-Gesetz):</p>
 
       <h2>Diensteanbieter</h2>
