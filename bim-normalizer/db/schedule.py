@@ -66,7 +66,15 @@ def _link_elements(conn, db_task_id: str, model_id: str, global_ids: list[str]):
 
 def link_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: list[str]) -> int:
     """Link elements to a manually-created task by Speckle object id (works for
-    any element regardless of source, unlike _link_elements' IFC-GlobalId match)."""
+    any element regardless of source, unlike _link_elements' IFC-GlobalId match).
+
+    Matches against speckle_id OR viewer_object_id: callers passing along
+    whatever id the 3D viewer just reported (e.g. ScheduleGanttView.jsx's
+    "link current viewer selection" action) hand over viewer_object_id for a
+    bundle-format commit's viewer-bridge republish, not the stable
+    speckle_id — see db/models.py's bim_elements.viewer_object_id comment.
+    Matching both means this stays correct either way without the caller
+    needing to know or care which kind of id it has."""
     if not speckle_ids:
         return 0
     try:
@@ -75,9 +83,9 @@ def link_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: 
                 INSERT INTO bim_task_elements (task_id, element_id)
                 SELECT %s, e.element_id
                 FROM bim_elements e
-                WHERE e.model_id = %s AND e.speckle_id = ANY(%s)
+                WHERE e.model_id = %s AND (e.speckle_id = ANY(%s) OR e.viewer_object_id = ANY(%s))
                 ON CONFLICT DO NOTHING
-            """, (task_id, model_id, speckle_ids))
+            """, (task_id, model_id, speckle_ids, speckle_ids))
             linked = cur.rowcount
         conn.commit()
         return linked
@@ -87,6 +95,7 @@ def link_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: 
 
 
 def unlink_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids: list[str]) -> int:
+    """See link_elements_by_speckle_id's docstring re: matching both id columns."""
     if not speckle_ids:
         return 0
     try:
@@ -97,8 +106,8 @@ def unlink_elements_by_speckle_id(conn, task_id: str, model_id: str, speckle_ids
                 WHERE te.element_id = e.element_id
                   AND te.task_id = %s
                   AND e.model_id = %s
-                  AND e.speckle_id = ANY(%s)
-            """, (task_id, model_id, speckle_ids))
+                  AND (e.speckle_id = ANY(%s) OR e.viewer_object_id = ANY(%s))
+            """, (task_id, model_id, speckle_ids, speckle_ids))
             unlinked = cur.rowcount
         conn.commit()
         return unlinked
@@ -869,7 +878,13 @@ def delete_dependency(conn, model_id: str, dependency_id: int) -> bool:
 
 
 def get_schedule(conn, model_id: str) -> dict:
-    """Return the full task tree with element counts and speckle_ids for viewer sync."""
+    """Return the full task tree with element counts and speckle_ids for viewer
+    sync. speckle_ids actually holds viewer_object_id (falling back to
+    speckle_id) — the id @speckle/viewer's FilteringExtension resolves
+    objects against, which differs from speckle_id for a bundle-format
+    commit's viewer-bridge republish (db/models.py's bim_elements column
+    comment) — kept under the same field name/shape so ScheduleGanttView.jsx
+    needs no changes."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT
@@ -889,7 +904,8 @@ def get_schedule(conn, model_id: str) -> dict:
                 t.sort_order,
                 COUNT(te.element_id)                                            AS element_count,
                 COALESCE(
-                    JSON_AGG(e.speckle_id) FILTER (WHERE e.speckle_id IS NOT NULL),
+                    JSON_AGG(COALESCE(e.viewer_object_id, e.speckle_id))
+                    FILTER (WHERE e.speckle_id IS NOT NULL),
                     '[]'::json
                 )                                                               AS speckle_ids
             FROM bim_tasks t

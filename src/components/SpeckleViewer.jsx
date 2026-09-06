@@ -523,7 +523,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             try {
                 selectedBcfTopicGuidRef.current = topicGuid
                 const ids = (viewpoint.selection || [])
-                    .map((s) => s.speckle_id ?? elementByAppIdRef.current.get(s.ifc_guid)?.speckle_id)
+                    .map((s) => {
+                        const e = elementByAppIdRef.current.get(s.ifc_guid)
+                        return s.viewer_object_id ?? e?.id ?? s.speckle_id ?? e?.speckle_id
+                    })
                     .filter(Boolean)
                 if (ids.length) {
                     isolateByHiding(viewer, ids, 'bcf')
@@ -1808,7 +1811,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             if (!topic.viewpoint) return
 
             const ids = (topic.viewpoint.selection || [])
-                .map((s) => s.speckle_id ?? elementByAppIdRef.current.get(s.ifc_guid)?.speckle_id)
+                .map((s) => {
+                    const e = elementByAppIdRef.current.get(s.ifc_guid)
+                    return s.viewer_object_id ?? e?.id ?? s.speckle_id ?? e?.speckle_id
+                })
                 .filter(Boolean)
             if (ids.length) {
                 viewerRef.current.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
@@ -2013,7 +2019,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                         return pos ? (
                             <button
                                 key={pin.speckle_id}
-                                onClick={() => handleDocPinClick(pin.speckle_id)}
+                                onClick={() => handleDocPinClick(pin.viewer_object_id || pin.speckle_id)}
                                 title={`${pin.doc_count} document${pin.doc_count === 1 ? '' : 's'} attached`}
                                 style={{ position: 'absolute', left: pos.x, top: pos.y, transform: 'translate(-50%, -50%)', pointerEvents: 'auto' }}
                                 className="w-6 h-6 rounded-full flex items-center justify-center shadow-lg border-2 bg-zinc-900 border-cyan-500 text-cyan-400 hover:scale-110 transition-transform"

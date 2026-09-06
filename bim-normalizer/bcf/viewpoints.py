@@ -28,10 +28,10 @@ def _components_for(model_id: str, viewpoint_guid: str) -> dict:
     # issue) rather than fanning out extra rows or erroring.
     rows = fetch_all(
         """
-        SELECT vpc.ifc_guid, vpc.component_type, vpc.color, be.speckle_id
+        SELECT vpc.ifc_guid, vpc.component_type, vpc.color, be.speckle_id, be.viewer_object_id
         FROM bcf_viewpoint_components vpc
         LEFT JOIN LATERAL (
-            SELECT speckle_id FROM bim_elements
+            SELECT speckle_id, viewer_object_id FROM bim_elements
             WHERE model_id = %s AND application_id = vpc.ifc_guid
             LIMIT 1
         ) be ON true
@@ -39,19 +39,24 @@ def _components_for(model_id: str, viewpoint_guid: str) -> dict:
         """,
         (model_id, viewpoint_guid),
     )
+    # viewer_object_id is the id @speckle/viewer's FilteringExtension actually
+    # resolves objects against — differs from speckle_id for a bundle-format
+    # commit's viewer-bridge republish (db/models.py's bim_elements.
+    # viewer_object_id comment). Exposed alongside speckle_id (unchanged, kept
+    # for identity/back-compat) so SpeckleViewer.jsx can prefer it.
     return {
         "selection": [
-            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"]}
+            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"], "viewer_object_id": r["viewer_object_id"]}
             for r in rows
             if r["component_type"] == "selection"
         ],
         "visibility_exceptions": [
-            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"]}
+            {"ifc_guid": r["ifc_guid"], "speckle_id": r["speckle_id"], "viewer_object_id": r["viewer_object_id"]}
             for r in rows
             if r["component_type"] == "visibility_exception"
         ],
         "coloring": [
-            {"ifc_guid": r["ifc_guid"], "color": r["color"], "speckle_id": r["speckle_id"]}
+            {"ifc_guid": r["ifc_guid"], "color": r["color"], "speckle_id": r["speckle_id"], "viewer_object_id": r["viewer_object_id"]}
             for r in rows
             if r["component_type"] == "coloring"
         ],

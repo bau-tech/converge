@@ -200,7 +200,7 @@ function ConnectivityGraphInner({ normalizerUrl, elementId, hops, onCenterChange
             position: positions.get(n.element_id) || { x: 0, y: 0 },
             data: {
                 name: n.name, category: n.category, ifcClass: n.ifc_class,
-                speckleId: n.speckle_id, isCenter: n.element_id === centerElementId, hop: n.hop,
+                speckleId: n.viewer_object_id || n.speckle_id, isCenter: n.element_id === centerElementId, hop: n.hop,
             },
         })))
         setEdges(graph.edges.map((e, i) => {

@@ -44,6 +44,7 @@ from db.query import (
     get_element_connectivity,
     get_model_diff,
     get_quantity_takeoff,
+    to_viewer_ids,
 )
 from db.schedule import get_schedule, get_tasks_for_element
 
@@ -2617,7 +2618,11 @@ def run_chat_agent(
 
             tool_result, new_ids = _execute_tool(conn, model_id, fn, args, user)
             if new_ids is not None:
-                element_ids = new_ids
+                # Translate once here rather than in every individual tool's
+                # own query — see to_viewer_ids' docstring for why the ids
+                # _execute_tool resolves (real, stable speckle_ids) aren't
+                # necessarily what @speckle/viewer needs to highlight them.
+                element_ids = to_viewer_ids(conn, model_id, new_ids)
 
             messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_result})
 
@@ -2720,7 +2725,11 @@ def stream_chat_agent(
 
             tool_result, new_ids = _execute_tool(conn, model_id, fn, args, user)
             if new_ids is not None:
-                element_ids = new_ids
+                # Translate once here rather than in every individual tool's
+                # own query — see to_viewer_ids' docstring for why the ids
+                # _execute_tool resolves (real, stable speckle_ids) aren't
+                # necessarily what @speckle/viewer needs to highlight them.
+                element_ids = to_viewer_ids(conn, model_id, new_ids)
 
             count = len(new_ids) if new_ids is not None else None
             yield _sse({"type": "tool_done", "name": fn, "count": count})

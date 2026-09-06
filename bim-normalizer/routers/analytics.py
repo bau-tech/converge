@@ -20,8 +20,15 @@ def diff_models(model_a: str, model_b: str):
             "current_total": d["current_total"],
             "other_total":   d["other_total"],
             "total_delta":   d["current_total"] - d["other_total"],
-            "element_ids":   [r["speckle_id"] for r in d["added"]],    # speckle_ids of added elements
-            "removed_ids":   [r["speckle_id"] for r in d["removed"]],
+            # viewer_object_id (falling back to speckle_id) — the id
+            # @speckle/viewer's FilteringExtension actually resolves objects
+            # against; differs from speckle_id for a bundle-format commit's
+            # viewer-bridge republish (db/models.py's bim_elements column
+            # comment). added/changed(b) are elements in model_b, the
+            # currently-loaded/current version, so these are the ones that
+            # can actually be highlighted in the live viewer.
+            "element_ids":   [r["viewer_object_id"] or r["speckle_id"] for r in d["added"]],
+            "removed_ids":   [r["viewer_object_id"] or r["speckle_id"] for r in d["removed"]],
             "changed_elements": d["changed"],
             "category_changes": d["category_changes"],
         }

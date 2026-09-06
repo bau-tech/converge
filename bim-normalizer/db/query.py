@@ -1121,7 +1121,7 @@ def get_model_diff(conn, model_id_a: str, model_id_b: str) -> dict:
     """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT b.speckle_id, b.ifc_class, b.category, b.name
+            SELECT b.speckle_id, b.viewer_object_id, b.ifc_class, b.category, b.name
             FROM bim_elements b
             WHERE b.model_id = %s
               AND b.application_id IS NOT NULL AND b.application_id <> ''
@@ -1130,10 +1130,10 @@ def get_model_diff(conn, model_id_a: str, model_id_b: str) -> dict:
                   WHERE a.model_id = %s AND a.application_id = b.application_id
               )
         """, (model_id_b, model_id_a))
-        added = [dict(zip(["speckle_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
+        added = [dict(zip(["speckle_id", "viewer_object_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
 
         cur.execute("""
-            SELECT a.speckle_id, a.ifc_class, a.category, a.name
+            SELECT a.speckle_id, a.viewer_object_id, a.ifc_class, a.category, a.name
             FROM bim_elements a
             WHERE a.model_id = %s
               AND a.application_id IS NOT NULL AND a.application_id <> ''
@@ -1142,10 +1142,11 @@ def get_model_diff(conn, model_id_a: str, model_id_b: str) -> dict:
                   WHERE b.model_id = %s AND b.application_id = a.application_id
               )
         """, (model_id_a, model_id_b))
-        removed = [dict(zip(["speckle_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
+        removed = [dict(zip(["speckle_id", "viewer_object_id", "ifc_class", "category", "name"], r)) for r in cur.fetchall()]
 
         cur.execute("""
             SELECT a.speckle_id AS speckle_id_a, b.speckle_id AS speckle_id_b,
+                   a.viewer_object_id AS viewer_object_id_a, b.viewer_object_id AS viewer_object_id_b,
                    a.category, a.name
             FROM bim_elements a
             JOIN bim_elements b ON a.application_id = b.application_id
@@ -1153,7 +1154,7 @@ def get_model_diff(conn, model_id_a: str, model_id_b: str) -> dict:
               AND a.hash IS NOT NULL AND b.hash IS NOT NULL AND a.hash <> b.hash
               AND a.application_id IS NOT NULL AND a.application_id <> ''
         """, (model_id_a, model_id_b))
-        changed = [dict(zip(["speckle_id_a", "speckle_id_b", "category", "name"], r)) for r in cur.fetchall()]
+        changed = [dict(zip(["speckle_id_a", "speckle_id_b", "viewer_object_id_a", "viewer_object_id_b", "category", "name"], r)) for r in cur.fetchall()]
 
         cur.execute("""
             SELECT COALESCE(a.category, b.category) AS category,
@@ -1489,14 +1490,19 @@ def get_element_connectivity(conn, model_id: str, element_id: str, hops: int = 2
             frontier = next_frontier
 
         cur.execute(
-            "SELECT element_id::text, speckle_id, name, category, ifc_class "
+            "SELECT element_id::text, speckle_id, viewer_object_id, name, category, ifc_class "
             "FROM bim_elements WHERE element_id = ANY(%s::uuid[])",
             (list(visited),),
         )
-        info_by_id = {r[0]: {"speckle_id": r[1], "name": r[2], "category": r[3], "ifc_class": r[4]} for r in cur.fetchall()}
+        # viewer_object_id is the id @speckle/viewer's FilteringExtension
+        # actually resolves objects against — see db/models.py's bim_elements
+        # column comment; differs from speckle_id for a bundle-format
+        # commit's viewer-bridge republish.
+        info_by_id = {r[0]: {"speckle_id": r[1], "viewer_object_id": r[2], "name": r[3], "category": r[4], "ifc_class": r[5]} for r in cur.fetchall()}
 
+    empty_info = {"speckle_id": None, "viewer_object_id": None, "name": None, "category": None, "ifc_class": None}
     nodes = [
-        {"element_id": eid, "hop": hop, **info_by_id.get(eid, {"speckle_id": None, "name": None, "category": None, "ifc_class": None})}
+        {"element_id": eid, "hop": hop, **info_by_id.get(eid, empty_info)}
         for eid, hop in visited.items()
     ]
     return {"nodes": nodes, "edges": edges}
@@ -1619,3 +1625,34 @@ def get_model_location(conn, model_id: str) -> dict:
         "elevation": elevation,
         "site_name": by_key.get("Name"),
     }
+
+
+def to_viewer_ids(conn, model_id: str, speckle_ids: list[str]) -> list[str]:
+    """
+    Translate a list of bim_elements.speckle_id values to the id
+    @speckle/viewer's FilteringExtension actually resolves objects against
+    (viewer_object_id, falling back to speckle_id — see db/models.py's
+    bim_elements column comment). Differs from speckle_id only for a
+    bundle-format commit's viewer-bridge republish; a no-op list transform
+    for every other model.
+
+    Single choke point for chat/agent.py's many tool-call results (each
+    already resolved to real speckle_ids internally, e.g. for relationship/
+    parameter/graph queries that need the stable id) — translating once
+    here, right before element_ids reaches the frontend/viewer, is far
+    simpler than threading viewer_object_id through every individual tool
+    query. Order is not preserved relative to duplicates; unmatched/None
+    ids are dropped silently (same failure mode as passing an id the viewer
+    never loaded at all).
+    """
+    ids = [sid for sid in speckle_ids if sid]
+    if not ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT speckle_id, COALESCE(viewer_object_id, speckle_id) "
+            "FROM bim_elements WHERE model_id = %s AND speckle_id = ANY(%s)",
+            (model_id, ids),
+        )
+        by_speckle_id = dict(cur.fetchall())
+    return [by_speckle_id[sid] for sid in ids if sid in by_speckle_id]

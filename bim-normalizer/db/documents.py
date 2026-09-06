@@ -279,18 +279,22 @@ def list_linked_positions(conn, stream_id: str, model_id: str) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT be.speckle_id, bg.centroid, COUNT(*) AS doc_count
+            SELECT be.speckle_id, be.viewer_object_id, bg.centroid, COUNT(*) AS doc_count
             FROM bim_documents d
             JOIN bim_elements be ON be.speckle_id = d.linked_element AND be.model_id = %s
             JOIN bim_geometry bg ON bg.element_id = be.element_id
             WHERE d.stream_id = %s AND d.deleted_at IS NULL
               AND d.linked_element IS NOT NULL AND bg.centroid IS NOT NULL
-            GROUP BY be.speckle_id, bg.centroid
+            GROUP BY be.speckle_id, be.viewer_object_id, bg.centroid
             """,
             (model_id, stream_id),
         )
         rows = cur.fetchall()
-    return [{"speckle_id": r[0], "centroid": r[1], "doc_count": r[2]} for r in rows]
+    # viewer_object_id is the id @speckle/viewer's FilteringExtension actually
+    # resolves objects against — see db/models.py's bim_elements column
+    # comment; differs from speckle_id for a bundle-format commit's viewer-
+    # bridge republish. speckle_id kept too (linking/identity elsewhere).
+    return [{"speckle_id": r[0], "viewer_object_id": r[1], "centroid": r[2], "doc_count": r[3]} for r in rows]
 
 
 def get_document(conn, doc_id: str) -> dict | None:

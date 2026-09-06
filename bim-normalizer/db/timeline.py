@@ -141,12 +141,19 @@ def get_timeline_data(conn, model_id: str, param_key: str) -> dict:
     """
     Return elements grouped by param_key value, sorted chronologically.
     Shape: { steps: [{value, element_ids, cumulative_count}], total_elements }
+
+    The ids returned (still called speckle_ids in the query aliases below)
+    are actually viewer_object_id (falling back to speckle_id) — the id
+    @speckle/viewer's FilteringExtension resolves objects against for Build-
+    up Playback's isolateObjects calls, which differs from speckle_id for a
+    bundle-format commit's viewer-bridge republish (db/models.py's
+    bim_elements column comment).
     """
     if param_key in _TASK_DATE_FIELDS:
         field, _label = _TASK_DATE_FIELDS[param_key]
         with conn.cursor() as cur:
             cur.execute(f"""
-                SELECT t.{field} AS value, array_agg(DISTINCT e.speckle_id) AS speckle_ids
+                SELECT t.{field} AS value, array_agg(DISTINCT COALESCE(e.viewer_object_id, e.speckle_id)) AS speckle_ids
                 FROM bim_tasks t
                 JOIN bim_task_elements te ON te.task_id = t.task_id
                 JOIN bim_elements e ON e.element_id = te.element_id
@@ -159,7 +166,7 @@ def get_timeline_data(conn, model_id: str, param_key: str) -> dict:
     else:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT p.value, array_agg(DISTINCT e.speckle_id) AS speckle_ids
+                SELECT p.value, array_agg(DISTINCT COALESCE(e.viewer_object_id, e.speckle_id)) AS speckle_ids
                 FROM bim_parameters p
                 JOIN bim_elements e ON e.element_id = p.element_id
                 WHERE e.model_id = %s
