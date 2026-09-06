@@ -17,9 +17,10 @@ from db.insert import (
     upsert_element_embeddings_batch,
     build_relationships,
     insert_bundle_relationships,
+    delete_stale_elements,
 )
 from db.query import get_elements_with_params_for_embedding
-from ifc.classify import classify_element, classify_from_ifc_type, compute_element_hash
+from ifc.classify import classify_element, compute_element_hash
 from ifc.geometry import extract_geometry, extract_axis_footprint
 from ifc.schema import length_to_m, LENGTH_TO_M
 from ifc.spatial import get_storey, get_application_id
@@ -190,20 +191,13 @@ def ingest_commit(
     instance_defs.update(obj_map)  # merge so string IDs in InstanceDefinitionProxy.objects can be resolved
     logger.info("Object map built: %d entries total in instance_defs after merge", len(instance_defs))
     # See collect_instance_storeys' own docstring: enrichment only, does not
-    # change which objects flatten_elements treats as elements.
+    # change which objects flatten_elements treats as elements. For bundle-
+    # format commits this is now normally a no-op — speckle/fetch.py's
+    # _full_projection bakes level directly onto each leaf as a real "level"
+    # attribute, which get_storey() below already reads on its own — but it
+    # stays as a fallback for a bundle with no Level nodes at all (a source
+    # that models storeys as plain Collections instead).
     instance_storeys = collect_instance_storeys(root, instance_defs)
-    # Bundle-format commits (speckle/fetch.py's _fetch_bundle): applicationId ->
-    # level name, read directly from the bundle's ON_LEVEL relation — authoritative
-    # where present, unlike collect_instance_storeys' Collection-nesting heuristic
-    # above. Empty for non-bundle commits and for bundles with no Level nodes at
-    # all (e.g. a source that models storeys as plain Collections instead).
-    bundle_levels = commit_meta.get("bundle_levels") or {}
-    # Same idea, for real IFC classification: leaf id -> (ifcType, category),
-    # read from the bundle's own root-scalar properties (see _fetch_bundle's
-    # docstring for why to_base() drops these) — authoritative over
-    # classify_element()'s speckle_type/category_hint guessing whenever a
-    # sender actually populated ifcType.
-    bundle_classification = commit_meta.get("bundle_classification") or {}
 
     # ------------------------------------------------------------------ #
     # 2. Flatten element tree                                              #
@@ -214,6 +208,12 @@ def ingest_commit(
     # the SpecklePy object.
     element_tuples = flatten_elements(root)
     logger.info("Flattened %d elements (source=%s)", len(element_tuples), source)
+    # For delete_stale_elements below — a re-ingest only ever upserts, so an
+    # element no longer produced by this ingest (deleted upstream, or an id-
+    # scheme change like this session's def-geo-{k} -> real applicationId
+    # migration) would otherwise leave a stale row behind forever.
+    current_speckle_ids = {str(getattr(obj, "id", None)) for obj, _ in element_tuples
+                            if getattr(obj, "id", None)}
 
     # Log unique collection hints to verify they are being picked up
     hints = {hint for _, hint in element_tuples if hint}
@@ -403,16 +403,15 @@ def ingest_commit(
 
             # ── Stage 1: classify — pure CPU, the actual upsert_element write ─
             # happens in _flush_batch() once BATCH_SIZE elements are queued.
+            # For bundle-format commits, classify_element's own IFC path
+            # already reads obj.ifcType (speckle/fetch.py's _full_projection
+            # bakes it directly onto the object as a real attribute) — no
+            # separate override needed here.
             try:
-                class_override = bundle_classification.get(str(speckle_id))
-                if class_override and class_override[0]:
-                    classification = classify_from_ifc_type(class_override[0])
-                else:
-                    classification = classify_element(speckle_type, obj, category_hint, source=source)
+                classification = classify_element(speckle_type, obj, category_hint, source=source)
                 ifc_class    = classification["ifc_class"]
                 category     = classification["category"]
-                storey       = (get_storey(obj) or bundle_levels.get(str(speckle_id))
-                                 or instance_storeys.get(str(speckle_id)))
+                storey       = get_storey(obj) or instance_storeys.get(str(speckle_id))
                 app_id       = get_application_id(obj)
                 elem_hash    = compute_element_hash(obj)
                 name         = _get_name(obj)
@@ -522,6 +521,19 @@ def ingest_commit(
         logger.info("DIAG: about to commit main loop — model_id=%s element_count=%d", model_id, element_count)
         conn.commit()
         logger.info("DIAG: main loop committed OK — model_id=%s", model_id)
+
+        # Remove elements this ingest no longer produced (deleted upstream,
+        # or an id-scheme change) before computing relationships below, so
+        # they resolve against the current element set only.
+        try:
+            stale_count = delete_stale_elements(conn, model_id, current_speckle_ids)
+            conn.commit()
+            if stale_count:
+                logger.info("Removed %d stale element(s) for model %s (no longer in source)",
+                            stale_count, model_id)
+        except Exception as exc:
+            conn.rollback()
+            logger.warning("delete_stale_elements failed for model %s: %s", model_id, exc)
 
         # Relationship resolution (parent/room/space) needs every element's
         # element_id to already exist — must run after the per-object loop's

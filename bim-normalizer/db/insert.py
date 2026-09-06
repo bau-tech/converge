@@ -1112,3 +1112,31 @@ def insert_bundle_relationships(conn, model_id: str, raw_triples: list[tuple[str
                 list(links),
             )
         return len(links)
+
+
+def delete_stale_elements(conn, model_id: str, current_speckle_ids: set[str]) -> int:
+    """
+    Remove any bim_elements row for this model whose speckle_id is not in the
+    current ingest's element set — a re-ingest only ever upserts, so an
+    element that no longer exists in the source (deleted upstream, or —
+    concretely, what surfaced this — a change to how source ids are derived,
+    like speckle/fetch.py's _full_projection replacing to_base()'s
+    "def-geo-{k}" scheme with real applicationIds) would otherwise leave a
+    stale row behind forever, silently double-counting in every dashboard
+    chart. Cascades to bim_geometry/bim_parameters/bim_relationships/
+    bim_element_embeddings/bim_task_elements via their FK ON DELETE CASCADE.
+
+    Returns the number of stale elements removed. Refuses to do anything if
+    current_speckle_ids is empty — an ingest that found zero elements is far
+    more likely a transient fetch problem than a model that's genuinely
+    gone empty, and the failure mode of wrongly wiping a model's data is
+    much worse than leaving stale rows in place for one more ingest.
+    """
+    if not current_speckle_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM bim_elements WHERE model_id = %s AND speckle_id <> ALL(%s)",
+            (model_id, list(current_speckle_ids)),
+        )
+        return cur.rowcount

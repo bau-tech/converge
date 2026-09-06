@@ -1,4 +1,3 @@
-import copy
 import logging
 
 import requests as _requests
@@ -33,8 +32,6 @@ def _filter_tree(
     id_set: set[str],
     depth: int = 0,
     max_depth: int = 50,
-    bundle_levels: dict[str, str] | None = None,
-    bundle_classification: dict | None = None,
 ) -> tuple[Base | None, int]:
     """
     Recursively clone the Speckle object tree keeping only the elements
@@ -44,22 +41,11 @@ def _filter_tree(
     only when at least one descendant matches.  Pure-geometry fragments
     (Mesh, Line, RenderMaterial, …) are always dropped.
 
-    bundle_levels/bundle_classification (from fetch_commit's commit_meta,
-    non-empty only for a bundle-format source commit — see speckle/fetch.py's
-    _fetch_bundle docstring): baked onto each surviving leaf as real "level"/
-    "ifcType" attributes before republishing, rather than left for the
-    republished (always classic-format) commit to somehow recover on its own
-    re-ingest. Without this, filtering a bundle-origin model silently threw
-    away the storey/classification enrichment pipeline.normalize's
-    ingest_commit recovers on direct ingest — the republished copy has
-    is_bundle=False, so it would never see bundle_levels/bundle_classification
-    at all on its own later ingest. get_storey()/classify_element() already
-    read exactly these attribute names (ifc/spatial.py, ifc/classify.py's IFC
-    path), so baking them in requires no changes on the re-ingest side.
-    Kept ids are shallow-copied (never mutating the shared original tree,
-    which is also reused by create_viewer_bridge/other filter selections) —
-    copy.copy is enough since only new top-level attributes are added, no
-    nested value (displayValue, properties, …) is modified in place.
+    For a bundle-format source commit, `node` already carries real "level"/
+    "ifcType" attributes baked in by speckle/fetch.py's _full_projection —
+    no override step needed here to keep them alive on the republished
+    (always classic-format) copy; a plain reference to the already-complete
+    leaf is enough, since we never mutate it.
 
     Returns (filtered_node_or_None, matched_leaf_count).
     """
@@ -78,8 +64,7 @@ def _filter_tree(
         for child in children:
             if not isinstance(child, Base):
                 continue
-            filtered, count = _filter_tree(
-                child, id_set, depth + 1, max_depth, bundle_levels, bundle_classification)
+            filtered, count = _filter_tree(child, id_set, depth + 1, max_depth)
             if filtered is not None:
                 kept.append(filtered)
                 total += count
@@ -99,20 +84,9 @@ def _filter_tree(
 
     # Leaf element: keep as-is if selected
     node_id = getattr(node, "id", None)
-    if node_id not in id_set:
-        return None, 0
-
-    level_override = (bundle_levels or {}).get(str(node_id))
-    class_override = (bundle_classification or {}).get(str(node_id))
-    ifc_type_override = class_override[0] if class_override else None
-    if (level_override and not getattr(node, "level", None)) or (
-            ifc_type_override and not getattr(node, "ifcType", None)):
-        node = copy.copy(node)
-        if level_override and not getattr(node, "level", None):
-            node["level"] = level_override
-        if ifc_type_override and not getattr(node, "ifcType", None):
-            node["ifcType"] = ifc_type_override
-    return node, 1
+    if node_id in id_set:
+        return node, 1
+    return None, 0
 
 
 def _gql(srv: str, tok: str, query: str, variables: dict | None = None) -> dict:
@@ -381,11 +355,7 @@ def filter_and_publish(
     root, meta = fetch_commit(stream_id, commit_id, token=tok, server_url=srv)
 
     id_set = set(speckle_ids)
-    new_root, element_count = _filter_tree(
-        root, id_set,
-        bundle_levels=meta.get("bundle_levels"),
-        bundle_classification=meta.get("bundle_classification"),
-    )
+    new_root, element_count = _filter_tree(root, id_set)
 
     total_elements = len(flatten_elements(root))
     logger.info(

@@ -196,19 +196,6 @@ def _fetch_commit_meta(stream_id: str, commit_id: str, token: str,
     return result
 
 
-def _resolved_keys(obj) -> list[str]:
-    """
-    Every id a bundle ModelObject can appear under on the *classic* tree
-    to_base() produces — see _fetch_bundle's docstring for why an instanced
-    object's geometry surfaces under a synthetic "def-geo-{k}" id decoupled
-    from the object node itself, while an un-instanced object keeps its own
-    applicationId. Used to key every per-object signal (level, classification,
-    relations) so pipeline.normalize can look them up by the same speckle_id
-    flatten_elements' leaves carry.
-    """
-    return [obj.application_id] + [f"def-geo-{g.k}" for g in obj.geometries]
-
-
 # Relation types extracted into bim_relationships by db/insert.py's
 # insert_bundle_relationships — object<->object only (object<->node relations
 # like IN_SYSTEM/IN_GROUP have no bim_elements row to point at and are out of
@@ -219,46 +206,154 @@ def _resolved_keys(obj) -> list[str]:
 _BUNDLE_RELATION_TYPES = ("hosted_on", "connects_to", "in_assembly", "in_room")
 
 
-def _fetch_bundle(obj_id: str, transport: ServerTransport):
+def _relation_pairs(obj) -> list[tuple[object, str]]:
+    """Every object<->object relation _full_projection/fetch_bundle_selection
+    care about, for a single native ModelObject."""
+    pairs: list[tuple[object, str]] = []
+    host = obj.host
+    if host is not None:
+        pairs.append((host, "hosted_on"))
+    for connected in obj.connected_to:
+        pairs.append((connected, "connects_to"))
+    assembly = obj.assembly
+    if assembly is not None:
+        pairs.append((assembly, "in_assembly"))
+    room = obj.room
+    if room is not None:
+        pairs.append((room, "in_room"))
+    return pairs
+
+
+def _merged_properties(obj) -> dict:
+    """Type properties overlaid by instance properties, as nested dicts —
+    local reimplementation of specklepy.bundle.base_projection's private
+    _merged_properties/_overlay (not imported directly: that module is
+    third-party-internal, and this is ~10 lines)."""
+    merged = obj.type_properties.to_nested()
+    _overlay_nested(merged, obj.properties.to_nested())
+    return merged
+
+
+def _overlay_nested(target: dict, source: dict) -> None:
+    for key, value in source.items():
+        existing = target.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            _overlay_nested(existing, value)
+        else:
+            target[key] = value
+
+
+def _full_projection(model) -> tuple[Base, list[tuple[str, str, str]]]:
     """
-    Fetch a bundle-format commit via specklepy's native operations.receive3()
-    instead of going through the classic operations.receive() -> Model.to_base()
-    compatibility shim. We still call to_base() ourselves — it correctly carries
-    over geometry/properties/materials, so the rest of this pipeline (flatten_
-    elements, classify_element, extract_geometry, ...) doesn't need to change —
-    but doing it via the native Model first also gives us relation-graph data
-    to_base() silently drops on the floor:
+    Project a received bundle Model onto a classic Base tree — like
+    Model.to_base(), but building one leaf DataObject per PHYSICAL OBJECT
+    that has geometry, not one per unique geometry/instance-definition.
 
-    - ON_LEVEL (ModelObject.level): to_base()'s Collection tree is built only
-      from CONTAINER-kind nodes; it never reads NodeKind.LEVEL nodes at all.
-    - ifcType/category root scalars (ModelObject.root_properties): to_base()'s
-      property projection only copies paths under the "properties." prefix
-      (see base_projection._geometry_object's `table.under(object_k,
-      "properties")`) — but specklepy's own EAV producer (eav_extraction.py)
-      writes ifcType/category/level/family/type as *bare* root scalars,
-      outside that prefix. Any sender that populates them is invisible to
-      classify_element() through the classic tree.
-    - HOSTED_ON/CONNECTS_TO/IN_ASSEMBLY/IN_ROOM (ModelObject.host/
-      connected_to/assembly/room): object<->object relations with literally no
-      projection in to_base() at all, lossy or otherwise.
+    Verified live against the real Snowdon Towers bundle commit: to_base()'s
+    _attach_instance_definitions emits exactly one synthetic geometry object
+    per unique instance DEFINITION (i.e. per shared mesh), regardless of how
+    many physically distinct objects place that definition — of 917 real
+    IfcBeam objects in that model (most reusing a handful of standard
+    profiles), to_base()'s classic tree only ever surfaced 287 leaves; non-
+    instanced categories in the same model (Walls/Slabs/Footings/Spaces)
+    were completely unaffected and matched 1:1, confirming this is
+    specifically an instance-collapsing gap in to_base(), not a general
+    ingest bug. This function iterates model.objects instead — one row per
+    real object regardless of how many others share its definition — and
+    applies each object's own resolved instance transform (ModelGeometry.
+    transform, composed through the full instance/definition chain by
+    ModelObject.geometries) to the decoded local-space mesh, using the same
+    _apply_transform_matrix ifc/geometry.py already relies on for Revit v3's
+    analogous InstanceProxy+InstanceDefinitionProxy case — confirmed live
+    that the shared local mesh genuinely needs this: two beams sharing one
+    geometry_k had identical raw (untransformed) bbox centers but different
+    transforms (different floor heights), and to_base() never applies it at
+    all for its own synthetic members (unlike its InstanceProxy branch,
+    which does — that branch just isn't what backs the elements themselves
+    here, since _should_skip() drops InstanceProxy nodes from flatten_
+    elements entirely).
 
-    All three are confirmed by reading specklepy 2026.9.0b3's source directly
-    (base_projection.py has no LEVEL/ON_LEVEL/root-scalar/relation handling
-    whatsoever) — none of this is specific to any one exporter.
+    Also bakes level/ifcType/category directly onto each leaf as real
+    attributes (get_storey()/classify_element() already know how to read
+    them: obj.level, obj.type/obj.ifcType — see ifc/spatial.py and ifc/
+    classify.py's IFC path) rather than returning them via a side channel
+    like the previous version of this function did. The one thing that
+    still needs a side channel is object<->object relations (HOSTED_ON/
+    CONNECTS_TO/IN_ASSEMBLY/IN_ROOM), which don't have a natural single-
+    object attribute to live on.
 
-    Returns (root, levels, classification, relations):
-      - levels: leaf id -> level name (ON_LEVEL), as before.
-      - classification: leaf id -> (ifcType, category), either may be None.
-      - relations: list of (from_leaf_id, to_leaf_id, relation_type) triples,
-        relation_type one of _BUNDLE_RELATION_TYPES.
-    Every dict/list is keyed by _resolved_keys(obj) — see its docstring for
-    why a leaf id is not simply the object's own applicationId. All empty if
-    the bundle carries none of this — e.g. a source that models storeys as
-    plain Collections and skips properties/relations entirely, as
-    app.speckle.systems's alpha IFC importer was observed doing on
-    2026-09-06; pipeline.normalize's collect_instance_storeys() heuristic
-    stays in place as a level fallback for exactly that case.
+    Trade-offs, deliberately out of scope for this fix: no collection/
+    storey hierarchy (every leaf goes straight under one flat root —
+    flatten_elements doesn't need it: the Revit-category-hint mechanism it
+    exists for doesn't apply to IFC-sourced bundles, gated on the caller
+    only using this for is_bundle commits) and no renderMaterialProxies
+    (materials aren't attached to the projected tree, unlike to_base() —
+    affects viewer-bridge's visual appearance, not ingested data).
+
+    Returns (root, relations) — relations is a list of (from_application_id,
+    to_application_id, relation_type) triples, relation_type one of
+    _BUNDLE_RELATION_TYPES.
     """
+    from specklepy.bundle import sgeo
+    from specklepy.objects.data_objects import DataObject
+    from specklepy.objects.models.collections.collection import Collection
+    from ifc.geometry import _apply_transform_matrix
+
+    root = Collection(name="Received model", applicationId="artifact-root")
+    root.id = "artifact-root"
+    root["units"] = model.units
+    root["version"] = 4
+
+    relations: list[tuple[str, str, str]] = []
+
+    for obj in model.objects:
+        geometries = obj.geometries
+        if not geometries:
+            continue
+
+        displays = []
+        for g in geometries:
+            if not g.is_sgeo:
+                continue
+            decoded = sgeo.decode(g.content)
+            if g.transform is not None:
+                verts = getattr(decoded, "vertices", None)
+                if verts:
+                    decoded.vertices = _apply_transform_matrix(list(verts), g.transform)
+            decoded.applicationId = obj.application_id
+            displays.append(decoded)
+        if not displays:
+            continue
+
+        data_obj = DataObject(
+            name=obj.name or obj.application_id,
+            displayValue=displays,
+            properties=_merged_properties(obj),
+        )
+        data_obj.applicationId = data_obj.id = obj.application_id
+        data_obj["units"] = model.units
+
+        level = obj.level
+        if level is not None and level.name:
+            data_obj["level"] = level.name
+        ifc_type = obj.root_properties.get_string("ifcType")
+        if ifc_type:
+            data_obj["ifcType"] = ifc_type
+        category = obj.root_properties.get_string("category")
+        if category:
+            data_obj["category"] = category
+
+        root.elements.append(data_obj)
+
+        for related, relation_type in _relation_pairs(obj):
+            relations.append((obj.application_id, related.application_id, relation_type))
+
+    return root, relations
+
+
+def _fetch_bundle(obj_id: str, transport: ServerTransport) -> tuple[Base, list[tuple[str, str, str]]]:
+    """Native-receive + project a bundle-format commit. See _full_projection's
+    docstring for why this replaced calling Model.to_base() directly."""
     from specklepy.bundle.download import BundleReference
 
     parsed = BundleReference.parse(obj_id)
@@ -267,45 +362,7 @@ def _fetch_bundle(obj_id: str, transport: ServerTransport):
         raise ValueError("bundle receive requires an authenticated ServerTransport (transport.account is None)")
 
     with operations.receive3(account, parsed.project_id, parsed.model_id, parsed.version_id) as model:
-        root = model.to_base()
-        levels: dict[str, str] = {}
-        classification: dict[str, tuple[str | None, str | None]] = {}
-        relations: list[tuple[str, str, str]] = []
-
-        for obj in model.objects:
-            level = obj.level
-            level_name = level.name if (level is not None and level.name) else None
-            ifc_type = obj.root_properties.get_string("ifcType")
-            category = obj.root_properties.get_string("category")
-
-            related_pairs: list[tuple[object, str]] = []
-            host = obj.host
-            if host is not None:
-                related_pairs.append((host, "hosted_on"))
-            for connected in obj.connected_to:
-                related_pairs.append((connected, "connects_to"))
-            assembly = obj.assembly
-            if assembly is not None:
-                related_pairs.append((assembly, "in_assembly"))
-            room = obj.room
-            if room is not None:
-                related_pairs.append((room, "in_room"))
-
-            if not (level_name or ifc_type or category or related_pairs):
-                continue
-
-            keys = _resolved_keys(obj)
-            for key in keys:
-                if level_name:
-                    levels[key] = level_name
-                if ifc_type or category:
-                    classification[key] = (ifc_type, category)
-            if related_pairs and keys:
-                for related_obj, relation_type in related_pairs:
-                    for to_key in _resolved_keys(related_obj):
-                        relations.append((keys[0], to_key, relation_type))
-
-    return root, levels, classification, relations
+        return _full_projection(model)
 
 
 def fetch_bundle_selection(obj_id: str, transport: ServerTransport, id_set: set[str]) -> tuple[list[dict], str]:
@@ -313,24 +370,12 @@ def fetch_bundle_selection(obj_id: str, transport: ServerTransport, id_set: set[
     Native-Model extraction for speckle/publish.py's native bundle-authoring
     path (used by filter_and_publish when the source commit is bundle-format,
     to republish a filtered selection as a bundle version instead of a
-    classic commit): for exactly the leaf ids in id_set (same key scheme as
-    _fetch_bundle/_resolved_keys), return one dict per surviving bundle
-    object, carrying everything needed to author a new bundle — pulled
-    straight from the bundle's own tables, with geometry passed through
-    byte-for-byte (BundleObject.add_raw_geometry, no SGEO re-encoding/no
-    round-trip through sgeo.decode()+re-encode) rather than via the classic
-    Base tree, which has already thrown away level/ifcType/category by the
-    time _filter_tree ever sees it.
-
-    Placements are baked flat: an instanced object's geometries each become
-    their own standalone bundle object carrying the parent object's
-    properties/level/name (matching to_base()'s own "def-geo-{k}" id scheme
-    for the *selection* ids this must match against) — simpler and lower-
-    risk than reproducing the original instance/definition sharing graph, at
-    the cost of losing that de-duplication in the republished copy. An
-    un-instanced object keeps its own applicationId and keeps every one of
-    its geometries under that single object (matching how to_base()'s
-    _geometry_object folds multiple direct displays into one DataObject).
+    classic commit): for exactly the leaf ids in id_set — now simply each
+    object's own applicationId, since _full_projection no longer produces
+    any other kind of id — return one dict per surviving bundle object,
+    carrying everything needed to author a new bundle. Geometry is passed
+    through byte-for-byte (BundleObject.add_raw_geometry, no SGEO re-encode)
+    rather than via the classic Base tree.
 
     Returns (units, model_units): each unit dict is {key, geometries:
     [(content: bytes, type: str), ...], name, ifc_type, category, properties
@@ -349,14 +394,24 @@ def fetch_bundle_selection(obj_id: str, transport: ServerTransport, id_set: set[
     with operations.receive3(account, parsed.project_id, parsed.model_id, parsed.version_id) as model:
         model_units = model.units
         for obj in model.objects:
+            key = obj.application_id
+            if key not in id_set:
+                continue
             geometries = obj.geometries
             if not geometries:
                 continue
 
-            is_instanced = bool(obj.placements)
             level = obj.level
             material = obj.material
-            unit_common = {
+            if material is None:
+                for g in geometries:
+                    if g.effective_material is not None:
+                        material = g.effective_material
+                        break
+
+            units.append({
+                "key": key,
+                "geometries": [(g.content, g.type) for g in geometries],
                 "name": obj.name,
                 "ifc_type": obj.root_properties.get_string("ifcType"),
                 "category": obj.root_properties.get_string("category"),
@@ -364,25 +419,7 @@ def fetch_bundle_selection(obj_id: str, transport: ServerTransport, id_set: set[
                 "level_name": level.name if (level is not None and level.name) else None,
                 "level_elevation": level.elevation if level is not None else None,
                 "material_argb": material.argb if material is not None else None,
-            }
-
-            if is_instanced:
-                for g in geometries:
-                    key = f"def-geo-{g.k}"
-                    if key not in id_set:
-                        continue
-                    unit = dict(unit_common, key=key, geometries=[(g.content, g.type)])
-                    if unit["material_argb"] is None and g.effective_material is not None:
-                        unit["material_argb"] = g.effective_material.argb
-                    units.append(unit)
-            else:
-                key = obj.application_id
-                if key not in id_set:
-                    continue
-                units.append(dict(
-                    unit_common, key=key,
-                    geometries=[(g.content, g.type) for g in geometries],
-                ))
+            })
 
     return units, model_units
 
@@ -415,9 +452,7 @@ def fetch_commit(stream_id: str, commit_id: str, token: str = None,
         # (browser JS) can't fetch these via its classic /objects/{oid} REST
         # endpoint. See pipeline.normalize.ingest_commit's viewer-bridge step.
         "is_bundle":          obj_id.startswith("bundle."),
-        "bundle_levels":         {},
-        "bundle_classification": {},
-        "bundle_relations":      [],
+        "bundle_relations":   [],
     }
 
     client = get_client(server_url=srv, token=tok)
@@ -425,19 +460,19 @@ def fetch_commit(stream_id: str, commit_id: str, token: str = None,
 
     if meta["is_bundle"]:
         try:
-            (root, meta["bundle_levels"], meta["bundle_classification"],
-             meta["bundle_relations"]) = _fetch_bundle(obj_id, transport)
+            root, meta["bundle_relations"] = _fetch_bundle(obj_id, transport)
         except Exception as exc:
             logger.warning(
                 "Native bundle receive (receive3) failed for commit %s (%s: %s) — "
-                "falling back to the classic receive()->to_base() shim. Geometry/"
-                "properties/materials are unaffected, but ON_LEVEL storey data "
-                "(if this bundle has any) will be lost for this ingest.",
+                "falling back to the classic receive()->to_base() shim. Geometry is "
+                "unaffected, but any instanced elements sharing a definition will "
+                "collapse to a single element, and level/ifcType/relations will be "
+                "lost for this ingest (see _full_projection's docstring).",
                 commit_id, type(exc).__name__, exc,
             )
             root = operations.receive(obj_id=obj_id, remote_transport=transport, local_transport=None)
-        logger.info("Received bundle commit %s from stream %s (%d levels resolved)",
-                    commit_id, stream_id, len(meta["bundle_levels"]))
+        logger.info("Received bundle commit %s from stream %s (%d elements projected)",
+                    commit_id, stream_id, len(getattr(root, "elements", None) or []))
         return root, meta
 
     try:

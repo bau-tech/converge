@@ -52,24 +52,6 @@ def reload_classification_maps() -> None:
 reload_classification_maps()
 
 
-def classify_from_ifc_type(ifc_type: str) -> dict:
-    """
-    Return {ifc_class, category} directly from an authoritative IFC class name
-    (e.g. "IfcWall"), bypassing every speckle_type/category_hint heuristic
-    below. For bundle-format commits (speckle/fetch.py's _fetch_bundle):
-    specklepy's own EAV producer reserves "ifcType" as a bare root-scalar
-    field a sender can set, but base_projection.to_base() never copies bare
-    root scalars onto the classic tree at all (only "properties.*" survives
-    the projection) — so a well-behaved sender's real IFC class is otherwise
-    invisible to classify_element(), which only ever guesses from
-    speckle_type/obj.type strings. Mirrors the same lookup the IFC path in
-    classify_element() already does at its `obj.type`/`obj.ifcType` fallback
-    step, just reachable before the full dispatch for callers that already
-    have the answer.
-    """
-    return {"ifc_class": ifc_type, "category": _IFC_CLASS_TO_CATEGORY.get(ifc_type, "Generic Models")}
-
-
 def _lookup_by_type(speckle_type: str) -> dict | None:
     """
     Return mapping entry for a speckle_type via:
