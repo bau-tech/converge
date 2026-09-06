@@ -3,6 +3,7 @@ import functools
 import logging
 import multiprocessing
 import os
+import pickle
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
@@ -56,6 +57,28 @@ def _worker_init() -> None:
 
 def _noop() -> None:
     pass
+
+
+def _run_job(func, args, kwargs):
+    """Runs in the worker process. On exception, verifies the exception
+    survives a pickle round trip before letting it propagate — some
+    third-party exceptions (e.g. specklepy's SpeckleException, which
+    requires a `message` positional arg it doesn't actually put in
+    self.args) fail to unpickle in the parent process. That failure
+    happens deep inside concurrent.futures.process's own result-handling,
+    which reads it as the worker connection having died — surfacing an
+    ordinary, informative error as a misleading BrokenProcessPool instead.
+    Converting to a plain, always-picklable exception here preserves the
+    original type and message while guaranteeing it crosses the process
+    boundary intact."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:
+        try:
+            pickle.loads(pickle.dumps(exc))
+        except Exception:
+            raise RuntimeError(f"{type(exc).__name__}: {exc}") from None
+        raise
 
 
 def init_process_pool() -> None:
@@ -114,7 +137,7 @@ async def run_cpu_bound(func, *args, **kwargs):
     in progress; it does not resume it, since a crashed worker can't hand
     back partial state."""
     loop = asyncio.get_running_loop()
-    call = functools.partial(func, *args, **kwargs)
+    call = functools.partial(_run_job, func, args, kwargs)
     _log = logging.getLogger(__name__)
     _log.info("DIAG: run_cpu_bound submitting %s", getattr(func, "__name__", func))
     try:

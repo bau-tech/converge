@@ -116,6 +116,64 @@ def _fetch_commit_meta(stream_id: str, commit_id: str, token: str,
     return commit
 
 
+def _fetch_bundle(obj_id: str, transport: ServerTransport) -> tuple[Base, dict[str, str]]:
+    """
+    Fetch a bundle-format commit via specklepy's native operations.receive3()
+    instead of going through the classic operations.receive() -> Model.to_base()
+    compatibility shim. We still call to_base() ourselves — it correctly carries
+    over geometry/properties/materials, so the rest of this pipeline (flatten_
+    elements, classify_element, extract_geometry, ...) doesn't need to change —
+    but doing it via the native Model first also gives us the ON_LEVEL relation,
+    which to_base() silently drops: specklepy.bundle.base_projection.to_base()
+    builds its Collection tree only from CONTAINER-kind nodes and never reads
+    NodeKind.LEVEL nodes or ON_LEVEL edges at all. Confirmed by reading specklepy
+    2026.9.0b3's source directly (base_projection.py has no LEVEL/ON_LEVEL
+    handling whatsoever) — this is a real gap in the compatibility shim, not
+    something specific to any one exporter.
+
+    Returns (root, levels), where levels maps a leaf id — as it will appear on
+    the *classic* tree flatten_elements walks — to level name, for every
+    object that has an ON_LEVEL relation. Keyed two ways because of how
+    base_projection.to_base() places geometry (verified against a real 654-
+    element commit: only 141 objects have no instance placement and keep their
+    own applicationId in the classic tree; the other 513 are placed via an
+    Instance/Definition pair, so to_base()'s main loop skips emitting them
+    directly — see its `if placements: ... continue` — and instead
+    _attach_instance_definitions() emits their geometry as a synthetic
+    DataObject id'd "def-geo-{geometry_k}", decoupled from the object node
+    ON_LEVEL actually attaches to):
+      - the object's own applicationId (the un-instanced case), and
+      - "def-geo-{k}" for every geometry key resolved through the object's
+        own placements (ModelObject.geometries already walks the instance/
+        definition chain the same way _attach_instance_definitions does).
+    Empty if the bundle has no Level nodes at all — e.g. a source that models
+    storeys as plain Collections instead, as app.speckle.systems's alpha IFC
+    importer was observed doing on 2026-09-06; pipeline.normalize's
+    collect_instance_storeys() heuristic stays in place as a fallback for
+    exactly that case (confirmed on that same commit: heuristic-only, since
+    that importer uses no Level nodes/ON_LEVEL relations whatsoever).
+    """
+    from specklepy.bundle.download import BundleReference
+
+    parsed = BundleReference.parse(obj_id)
+    account = transport.account
+    if account is None:
+        raise ValueError("bundle receive requires an authenticated ServerTransport (transport.account is None)")
+
+    with operations.receive3(account, parsed.project_id, parsed.model_id, parsed.version_id) as model:
+        root = model.to_base()
+        levels: dict[str, str] = {}
+        for obj in model.objects:
+            level = obj.level
+            if level is None or not level.name:
+                continue
+            levels[obj.application_id] = level.name
+            for geometry in obj.geometries:
+                levels[f"def-geo-{geometry.k}"] = level.name
+
+    return root, levels
+
+
 def fetch_commit(stream_id: str, commit_id: str, token: str = None,
                  server_url: str = None) -> tuple[Base, dict]:
     """
@@ -135,10 +193,33 @@ def fetch_commit(stream_id: str, commit_id: str, token: str = None,
         "author":             commit.get("authorName") or "",
         "message":            commit.get("message") or "",
         "source_application": commit.get("sourceApplication") or "",
+        # Bundle-format objects (a newer Speckle server-side storage format)
+        # have ids like "bundle.<streamId>.<hash>.<commitId>" — @speckle/viewer
+        # (browser JS) can't fetch these via its classic /objects/{oid} REST
+        # endpoint. See pipeline.normalize.ingest_commit's viewer-bridge step.
+        "is_bundle":          obj_id.startswith("bundle."),
+        "bundle_levels":      {},
     }
 
     client = get_client(server_url=srv, token=tok)
     transport = ServerTransport(client=client, stream_id=stream_id)
+
+    if meta["is_bundle"]:
+        try:
+            root, meta["bundle_levels"] = _fetch_bundle(obj_id, transport)
+        except Exception as exc:
+            logger.warning(
+                "Native bundle receive (receive3) failed for commit %s (%s: %s) — "
+                "falling back to the classic receive()->to_base() shim. Geometry/"
+                "properties/materials are unaffected, but ON_LEVEL storey data "
+                "(if this bundle has any) will be lost for this ingest.",
+                commit_id, type(exc).__name__, exc,
+            )
+            root = operations.receive(obj_id=obj_id, remote_transport=transport, local_transport=None)
+        logger.info("Received bundle commit %s from stream %s (%d levels resolved)",
+                    commit_id, stream_id, len(meta["bundle_levels"]))
+        return root, meta
+
     try:
         root = operations.receive(
             obj_id=obj_id,
@@ -532,6 +613,75 @@ def collect_instance_definitions(root: Base) -> dict:
 
     logger.info("Collected %d instance definition proxies from commit root", len(defs))
     return defs
+
+
+# Literal Collection names observed to be generic organisational wrappers
+# (the commit root's own name, and a phase-like grouping layer) rather than
+# real spatial/storey names — best-effort, not foolproof, since there's no
+# IFC class info to tell wrapper collections from storey collections here.
+_GENERIC_COLLECTION_NAMES = {"received model", "default"}
+
+
+def collect_instance_storeys(root: Base, instance_defs: dict) -> dict[str, str]:
+    """
+    Best-effort storey/level lookup for sources where the real BIM elements
+    are Instance/InstanceDefinitionProxy pairs (Speckle v3's IFC web importer
+    on app.speckle.systems, observed 2026-09: every element flattens to a
+    bare `Objects.Data.DataObject` mesh with NO type/properties/storey of its
+    own — flatten_elements() only sees these ungrouped, contextless leaves
+    since _should_skip() drops the InstanceProxy layer entirely).
+
+    The InstanceProxy placements DO carry real spatial context: they sit
+    nested inside named Collections mirroring the IFC spatial structure
+    (Site/Building/Storey, e.g. "Snowdon Towers" > "Elevator Pit"). This walks
+    that structure independently of flatten_elements (does not change what
+    counts as an element — additive only) and returns
+    {resolved_geometry_object_id: storey_name} so pipeline.normalize can
+    enrich get_storey()'s result for whichever of flatten_elements' leaves
+    happen to match one of these ids. Elements with no InstanceProxy
+    placement (e.g. this source's own redundant flat, unplaced duplicates)
+    simply get no entry — get_storey() still runs first and wins when it
+    finds something.
+
+    instance_defs: id/applicationId -> Base map, e.g. collect_instance_definitions()
+    merged with build_object_map() (same convention normalize.py already uses
+    to resolve InstanceDefinitionProxy.objects string ids).
+    """
+    storeys: dict[str, str] = {}
+    visited_ids: set[str] = set()
+
+    def _walk(obj: Base, chain: list[str]):
+        st = getattr(obj, "speckle_type", "") or ""
+        if "InstanceProxy" in st and "DefinitionProxy" not in st:
+            obj_id = str(getattr(obj, "id", "") or "")
+            if not obj_id or obj_id in visited_ids:
+                return
+            visited_ids.add(obj_id)
+
+            storey = next(
+                (name for name in reversed(chain) if name and name.lower() not in _GENERIC_COLLECTION_NAMES),
+                None,
+            )
+            if not storey:
+                return
+
+            definition_id = str(getattr(obj, "definitionId", "") or "")
+            defn = instance_defs.get(definition_id) if definition_id else None
+            for target_id in (getattr(defn, "objects", None) or []) if defn else []:
+                resolved = instance_defs.get(str(target_id))
+                key = str(getattr(resolved, "id", None) or target_id) if resolved else str(target_id)
+                storeys.setdefault(key, storey)
+            return
+
+        if "Collection" in st or "Model" in st:
+            name = getattr(obj, "name", None) or ""
+            for child in (getattr(obj, "elements", None) or []):
+                if isinstance(child, Base):
+                    _walk(child, chain + [name])
+
+    _walk(root, [])
+    logger.info("collect_instance_storeys: resolved storeys for %d geometry objects", len(storeys))
+    return storeys
 
 
 def detect_source(root: Base, source_app: str = "") -> str:

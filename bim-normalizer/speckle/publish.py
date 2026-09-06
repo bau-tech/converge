@@ -150,6 +150,57 @@ def _create_commit(
     return data["commitCreate"]
 
 
+# Public (not _-prefixed): pipeline.normalize.ingest_commit imports this too,
+# to reject direct ingest of the branch's own commits — see the guard there.
+BRIDGE_BRANCH = "bim-normalizer-viewer-bridge"
+
+
+def create_viewer_bridge(
+    root: Base,
+    stream_id: str,
+    token: str,
+    server_url: str,
+    source_commit_id: str,
+) -> dict | None:
+    """Republish an already-fetched bundle-format commit's tree as a classic
+    commit on a dedicated branch of the SAME stream/server, so
+    @speckle/viewer's SpeckleLoader (REST /objects/{oid}, no bundle support)
+    can render it. Best-effort: any failure (most commonly the ingest token
+    lacking write access on the source stream) is caught and logged here —
+    a bridge failure must never fail the overall ingest, since BIM data
+    ingest is the primary job and only 3D rendering depends on this.
+
+    Returns {"stream_id", "commit_id", "server_url"} on success, else None.
+    """
+    try:
+        client = get_client(server_url=server_url, token=token)
+        _ensure_branch(
+            server_url, token, stream_id, BRIDGE_BRANCH,
+            description="Auto-created by bim-normalizer to republish "
+                         "bundle-format commits as classic-format so the "
+                         "3D viewer can render them",
+        )
+        transport = ServerTransport(client=client, stream_id=stream_id)
+        obj_id = operations.send(root, [transport])
+        new_commit_id = _create_commit(
+            server_url, token, stream_id, obj_id, BRIDGE_BRANCH,
+            message=f"Viewer bridge for bundle-format commit {source_commit_id}",
+            source_application="bim-normalizer-bridge",
+        )
+        logger.info(
+            "Created viewer-bridge commit %s on branch %r (stream %s) for source commit %s",
+            new_commit_id, BRIDGE_BRANCH, stream_id, source_commit_id,
+        )
+        return {"stream_id": stream_id, "commit_id": new_commit_id, "server_url": server_url}
+    except Exception as exc:
+        logger.warning(
+            "Viewer bridge publish failed for commit %s on stream %s (%s): %s — "
+            "3D viewer unavailable for this commit; ingest continues unaffected",
+            source_commit_id, stream_id, type(exc).__name__, exc,
+        )
+        return None
+
+
 def filter_and_publish(
     stream_id: str,
     commit_id: str,

@@ -89,11 +89,16 @@ def _prepare_ingest(request: IngestRequest, user: CurrentUser) -> dict:
             # entirely sequential GET /summary round trip for data this
             # request already has the connection open to compute.
             from db.query import get_model_summary
+            summary = get_model_summary(conn, row[0])
             return {"done": {
                 "model_id": row[0],
                 "status": "complete",
                 "element_count": int(row[1]),
-                "summary": get_model_summary(conn, row[0]),
+                "viewer_available":  summary.get("viewer_available", True),
+                "viewer_stream_id":  summary.get("viewer_stream_id"),
+                "viewer_commit_id":  summary.get("viewer_commit_id"),
+                "viewer_server_url": summary.get("viewer_server_url"),
+                "summary": summary,
             }}
 
         # Anything past this point actually starts or joins an ingest run
@@ -166,6 +171,10 @@ async def ingest(request: IngestRequest, user: CurrentUser = Depends(require_log
                     "skipped_count": result.get("skipped_count"),
                     "skip_geo_count": result.get("skip_geo_count"),
                     "skip_param_count": result.get("skip_param_count"),
+                    "viewer_available":  result.get("viewer_available"),
+                    "viewer_stream_id":  result.get("viewer_stream_id"),
+                    "viewer_commit_id":  result.get("viewer_commit_id"),
+                    "viewer_server_url": result.get("viewer_server_url"),
                 })
             finally:
                 _release_conn(job_conn)

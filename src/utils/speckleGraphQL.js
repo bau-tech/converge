@@ -1,3 +1,9 @@
+// Internal branch bim-normalizer auto-creates on a stream (see bim-normalizer's
+// speckle/publish.py BRIDGE_BRANCH) to republish bundle-format commits as
+// classic-format so @speckle/viewer can render them. Never a real model —
+// every branches/models listing shown to users must filter it out.
+export const BRIDGE_BRANCH_NAME = 'bim-normalizer-viewer-bridge'
+
 // GraphQL helper: uses variables (no string interpolation), checks HTTP status
 // + GraphQL errors. Takes serverUrl/token explicitly (unlike App.jsx's own
 // local gqlFetch, which reads the static default-server CONFIG) so callers

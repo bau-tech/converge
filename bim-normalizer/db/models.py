@@ -45,6 +45,17 @@ ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS stream_name TEXT;
 -- along, so there's nothing to retroactively flag as incomplete.
 ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS ingest_status TEXT NOT NULL DEFAULT 'complete';
 
+-- viewer_available is the single authoritative flag: TRUE for all non-bundle
+-- commits; for bundle-format commits (see speckle/fetch.py's is_bundle), TRUE
+-- only once pipeline.normalize.ingest_commit's viewer-bridge republish
+-- (speckle/publish.py's create_viewer_bridge) actually succeeded. NULL
+-- bridge_* columns mean either "nothing to bridge" or "bridging failed" —
+-- viewer_available is what tells those two apart.
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS viewer_available BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_stream_id TEXT;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_commit_id TEXT;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_server_url TEXT;
+
 CREATE TABLE IF NOT EXISTS bim_elements (
     element_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id        UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,

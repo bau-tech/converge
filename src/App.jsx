@@ -66,6 +66,7 @@ import { flattenObject, getNestedValue } from './utils/propertyScanner'
 import { generateSummaryFromElements } from './utils/propertyScanner'
 import { listTopics, listViewpoints } from './utils/bcfClient'
 import { pullFromSpeckle, pushToSpeckle } from './utils/bcfSync'
+import { BRIDGE_BRANCH_NAME } from './utils/speckleGraphQL'
 import { useAuth } from './contexts/AuthContext'
 import { LoginScreen } from './components/LoginScreen'
 import { ResetPasswordScreen } from './components/ResetPasswordScreen'
@@ -955,7 +956,10 @@ function Dashboard({ readOnly = false }) {
                 }`,
                 { projectId }
             )
-            const branchList = gqlData.stream.branches.items
+            // BRIDGE_BRANCH_NAME is an internal artifact bim-normalizer auto-creates
+            // on the stream (see its speckle/publish.py) — never a real model, so it
+            // must never reach the model picker.
+            const branchList = gqlData.stream.branches.items.filter(b => b.name !== BRIDGE_BRANCH_NAME)
             setModels(branchList)
 
             const branchesWithCommits = branchList.filter(b => b.commits.totalCount > 0)
@@ -1605,6 +1609,13 @@ function Dashboard({ readOnly = false }) {
         // lets loadModelDataFromNormalizer skip a separate GET /summary round trip
         // for the common case of reopening an already-ingested model/version.
         let summary = ingestData.summary ?? null
+        // viewer_available/viewer_commit_id: whether this commit's Speckle object
+        // was in the newer "bundle" format @speckle/viewer can't render, and if so,
+        // the republished classic-format commit id to load instead (see
+        // pipeline.normalize.ingest_commit's viewer-bridge step). Undefined/true
+        // for ordinary (non-bundle) commits.
+        let viewerAvailable = ingestData.viewer_available
+        let viewerCommitId = ingestData.viewer_commit_id
 
         // Large/first-time model: ingest runs in background — poll until complete
         if (ingestData.status === 'pending') {
@@ -1619,12 +1630,17 @@ function Dashboard({ readOnly = false }) {
                 )
                 if (!statusRes.ok) continue  // retry on transient error
                 const statusData = await statusRes.json()
-                if (statusData.status === 'complete') { normModelId = statusData.model_id; break }
+                if (statusData.status === 'complete') {
+                    normModelId = statusData.model_id
+                    viewerAvailable = statusData.viewer_available
+                    viewerCommitId = statusData.viewer_commit_id
+                    break
+                }
                 if (statusData.status === 'failed') throw new Error(`Ingest failed: ${statusData.error || 'Unknown error'}`)
                 // still running — keep polling
             }
         }
-        return { modelId: normModelId, summary }
+        return { modelId: normModelId, summary, viewerAvailable, viewerCommitId }
     }
 
     // Flat per-element rows for an already-ingested model, adapted to the
@@ -1640,7 +1656,7 @@ function Dashboard({ readOnly = false }) {
     }
 
     const loadModelDataFromNormalizer = async (streamId, commitId, projectId, branchId, modelName, abortSignal) => {
-        const { modelId: normModelId, summary: inlineSummary } =
+        const { modelId: normModelId, summary: inlineSummary, viewerAvailable, viewerCommitId } =
             await ingestModelToNormalizer(streamId, commitId, abortSignal, () => setIngestPhase('ingesting'))
 
         setIngestPhase('parsing')
@@ -1662,6 +1678,13 @@ function Dashboard({ readOnly = false }) {
             model_id:             branchId,
             model_name:           modelName,
             normalizer_model_id:  normModelId,
+            // Separate from version_id (which reIngestModel/version picker/etc.
+            // treat as the real Speckle commit id) — this is only what the 3D
+            // viewer should load. Differs from commitId only when this commit was
+            // bundle-format and got republished (see pipeline.normalize's
+            // viewer-bridge step); null when bundle-format and bridging failed.
+            viewer_version_id:    viewerAvailable === false ? null : (viewerCommitId || commitId),
+            viewer_available:     viewerAvailable !== false,
         })
         setLoading(false)
         setIngestPhase(null)
@@ -2166,34 +2189,58 @@ function Dashboard({ readOnly = false }) {
             contentClassName="overflow-hidden"
         >
             <div className="h-full relative overflow-hidden">
-                <SpeckleViewer
-                    ref={speckleViewerRef}
-                    key={activeServer.id}
-                    projectId={selectedProject?.id}
-                    versionId={data?.version_id}
-                    config={CONFIG}
-                    fullData={fullData}
-                    onElementClick={(element) => {
-                        setSelectedElement(element)
-                        setViewerSelectedElement(element)
-                    }}
-                    onSelectionChange={handleViewerSelection}
-                    filteredElementIds={timelinePlaybackIds ? null : effectiveFilterIds}
-                    diffResult={diffResult}
-                    compareVersionId={compareVersionId}
-                    onExitCompare={deactivateCompare}
-                    timelinePlaybackIds={timelinePlaybackIds}
-                    timelineSyncEnabled={timelineSyncEnabled}
-                    onTimelineSync={handleTimelineSync}
-                    bcfTopics={bcfTopics}
-                    documentPins={documentPins}
-                    darkMode={darkMode}
-                    federatedMode={combineMode}
-                    federatedModels={federatedModelsArray}
-                    federatedFullData={federatedElementData}
-                    onExitFederated={exitCombineMode}
-                    onSetFederatedModelHidden={setCombinedModelHidden}
-                />
+                {data?.viewer_available === false ? (
+                    <div className="flex flex-col items-center justify-center h-full gap-4 p-6 text-center">
+                        <div className="w-14 h-14 rounded-full bg-amber-500/10 flex items-center justify-center">
+                            <AlertCircle className="w-7 h-7 text-amber-500" />
+                        </div>
+                        <div>
+                            <p className="text-sm font-semibold text-zinc-200 mb-1">3D preview unavailable for this version</p>
+                            <p className="text-xs text-zinc-500 max-w-sm">
+                                This version uses Speckle's newer "bundle" storage format. Data
+                                ingest succeeded, but automatically republishing a
+                                viewer-compatible copy failed — most likely the connected
+                                account doesn't have write access to this project. Ask the
+                                project owner to grant write access and retry.
+                            </p>
+                        </div>
+                        <button
+                            onClick={reIngestModel}
+                            className="px-4 py-2 text-xs rounded bg-primary/20 text-primary hover:bg-primary/30"
+                        >
+                            Retry
+                        </button>
+                    </div>
+                ) : (
+                    <SpeckleViewer
+                        ref={speckleViewerRef}
+                        key={activeServer.id}
+                        projectId={selectedProject?.id}
+                        versionId={data?.viewer_version_id}
+                        config={CONFIG}
+                        fullData={fullData}
+                        onElementClick={(element) => {
+                            setSelectedElement(element)
+                            setViewerSelectedElement(element)
+                        }}
+                        onSelectionChange={handleViewerSelection}
+                        filteredElementIds={timelinePlaybackIds ? null : effectiveFilterIds}
+                        diffResult={diffResult}
+                        compareVersionId={compareVersionId}
+                        onExitCompare={deactivateCompare}
+                        timelinePlaybackIds={timelinePlaybackIds}
+                        timelineSyncEnabled={timelineSyncEnabled}
+                        onTimelineSync={handleTimelineSync}
+                        bcfTopics={bcfTopics}
+                        documentPins={documentPins}
+                        darkMode={darkMode}
+                        federatedMode={combineMode}
+                        federatedModels={federatedModelsArray}
+                        federatedFullData={federatedElementData}
+                        onExitFederated={exitCombineMode}
+                        onSetFederatedModelHidden={setCombinedModelHidden}
+                    />
+                )}
                 {playbackBarOpen && data?.normalizer_model_id && (
                     <div className="absolute bottom-3 left-3 right-3 z-20">
                         <Suspense fallback={null}>
@@ -2209,7 +2256,7 @@ function Dashboard({ readOnly = false }) {
             </div>
         </GridPanel>
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    ), [activeServer.id, selectedProject?.id, data?.version_id, data?.normalizer_model_id,
+    ), [activeServer.id, selectedProject?.id, data?.version_id, data?.viewer_version_id, data?.viewer_available, data?.normalizer_model_id,
         fullData, effectiveFilterIds, diffResult, compareVersionId,
         bcfTopics, documentPins, timelinePlaybackIds, timelineSyncEnabled, handleViewerSelection, handleTimelineSync, deactivateCompare, darkMode,
         combineMode, federatedModelsArray, federatedElementData, exitCombineMode, setCombinedModelHidden,

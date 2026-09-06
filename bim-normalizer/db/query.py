@@ -251,7 +251,8 @@ def get_model_summary(conn, model_id: str) -> dict:
     with conn.cursor() as cur:
         # Model metadata (source app, author, etc.)
         cur.execute("""
-            SELECT source, author, branch_name, message, ingested_at, stream_id, commit_id
+            SELECT source, author, branch_name, message, ingested_at, stream_id, commit_id,
+                   server_url, viewer_available, bridge_stream_id, bridge_commit_id, bridge_server_url
             FROM bim_models WHERE model_id = %s
         """, (model_id,))
         meta_row = cur.fetchone()
@@ -265,6 +266,10 @@ def get_model_summary(conn, model_id: str) -> dict:
                 "ingested_at": meta_row[4].isoformat() if meta_row[4] else None,
                 "stream_id":   meta_row[5] or "",
                 "commit_id":   meta_row[6] or "",
+                "viewer_available":  meta_row[8],
+                "viewer_stream_id":  meta_row[9]  or meta_row[5],
+                "viewer_commit_id":  meta_row[10] or meta_row[6],
+                "viewer_server_url": meta_row[11] or meta_row[7],
             }
 
         # Totals — volume and area COALESCE bim_geometry (mesh) with bim_parameters

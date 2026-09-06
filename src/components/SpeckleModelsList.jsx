@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHand
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { Loader2, GitBranch, ImageOff, Trash2, FolderOpen, ChevronLeft } from 'lucide-react'
-import { gqlFetch } from '../utils/speckleGraphQL'
+import { gqlFetch, BRIDGE_BRANCH_NAME } from '../utils/speckleGraphQL'
 import { useAuthedImage } from '../utils/useAuthedImage'
 import { PanoramaThumbnail } from './PanoramaThumbnail'
 
@@ -173,7 +173,8 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
                     }
                 }
             `, { streamId })
-            const items = (data?.stream?.branches?.items || []).filter(b => b.commits.totalCount > 0)
+            const items = (data?.stream?.branches?.items || [])
+                .filter(b => b.commits.totalCount > 0 && b.name !== BRIDGE_BRANCH_NAME)
             setBranches(items)
         } catch (err) {
             setError(err.message)

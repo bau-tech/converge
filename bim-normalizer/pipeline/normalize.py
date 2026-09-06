@@ -22,7 +22,11 @@ from ifc.classify import classify_element, compute_element_hash
 from ifc.geometry import extract_geometry, extract_axis_footprint
 from ifc.schema import length_to_m, LENGTH_TO_M
 from ifc.spatial import get_storey, get_application_id
-from speckle.fetch import fetch_commit, flatten_elements, detect_source, collect_instance_definitions, build_object_map
+from speckle.fetch import (
+    fetch_commit, flatten_elements, detect_source, collect_instance_definitions,
+    build_object_map, collect_instance_storeys,
+)
+from speckle.publish import create_viewer_bridge, BRIDGE_BRANCH
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +170,33 @@ def ingest_commit(
     message     = commit_meta.get("message", "")
     source_app  = commit_meta.get("source_application", "")
 
+    # BRIDGE_BRANCH is an internal artifact create_viewer_bridge() (below)
+    # auto-creates on the source stream — never a real model a caller should
+    # be ingesting directly. Reject it explicitly rather than silently
+    # normalizing it: its commits carry a rewritten sourceApplication
+    # ("bim-normalizer-bridge"), which defeats detect_source()'s primary
+    # signal and produces a confusing, misclassified duplicate model.
+    if branch_name == BRIDGE_BRANCH:
+        raise ValueError(
+            f"Commit {commit_id} is on the internal '{BRIDGE_BRANCH}' branch "
+            "(an auto-generated viewer-compatibility copy, not a real model) "
+            "and cannot be ingested directly. Ingest the original model/version instead."
+        )
+
     source = forced_source or detect_source(root, source_app)
     instance_defs = collect_instance_definitions(root)
     obj_map = build_object_map(root)
     instance_defs.update(obj_map)  # merge so string IDs in InstanceDefinitionProxy.objects can be resolved
     logger.info("Object map built: %d entries total in instance_defs after merge", len(instance_defs))
+    # See collect_instance_storeys' own docstring: enrichment only, does not
+    # change which objects flatten_elements treats as elements.
+    instance_storeys = collect_instance_storeys(root, instance_defs)
+    # Bundle-format commits (speckle/fetch.py's _fetch_bundle): applicationId ->
+    # level name, read directly from the bundle's ON_LEVEL relation — authoritative
+    # where present, unlike collect_instance_storeys' Collection-nesting heuristic
+    # above. Empty for non-bundle commits and for bundles with no Level nodes at
+    # all (e.g. a source that models storeys as plain Collections instead).
+    bundle_levels = commit_meta.get("bundle_levels") or {}
 
     # ------------------------------------------------------------------ #
     # 2. Flatten element tree                                              #
@@ -192,6 +218,44 @@ def ingest_commit(
     # ------------------------------------------------------------------ #
     conn = get_conn()
     try:
+        # ------------------------------------------------------------------ #
+        # Viewer bridge: bundle-format commits (see fetch_commit's is_bundle)  #
+        # can't be rendered by @speckle/viewer's browser-side SpeckleLoader,   #
+        # which has no bundle support and no upstream fix available. Republish#
+        # the tree we already fetched as a classic commit on the same stream, #
+        # once per source commit (reused on every re-ingest), so the frontend #
+        # can point the viewer at that instead. Best-effort: a bridge failure #
+        # (e.g. no write access on the source stream) must not fail ingest.   #
+        # ------------------------------------------------------------------ #
+        is_bundle = commit_meta.get("is_bundle", False)
+        bridge_stream_id = bridge_commit_id = bridge_server_url = None
+        viewer_available = True
+
+        if is_bundle:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT bridge_stream_id, bridge_commit_id, bridge_server_url "
+                    "FROM bim_models WHERE stream_id = %s AND commit_id = %s",
+                    (stream_id, commit_id),
+                )
+                existing = cur.fetchone()
+
+            if existing and existing[1]:
+                bridge_stream_id, bridge_commit_id, bridge_server_url = existing
+                logger.info("Reusing existing viewer-bridge commit %s for source commit %s",
+                            bridge_commit_id, commit_id)
+            else:
+                bridge = create_viewer_bridge(
+                    root, stream_id=stream_id, token=token,
+                    server_url=resolved_server_url, source_commit_id=commit_id,
+                )
+                if bridge:
+                    bridge_stream_id, bridge_commit_id, bridge_server_url = (
+                        bridge["stream_id"], bridge["commit_id"], bridge["server_url"],
+                    )
+                else:
+                    viewer_available = False
+
         model_id = upsert_model(
             conn,
             stream_id=stream_id,
@@ -201,6 +265,10 @@ def ingest_commit(
             author=author,
             message=message,
             server_url=resolved_server_url,
+            viewer_available=viewer_available,
+            bridge_stream_id=bridge_stream_id,
+            bridge_commit_id=bridge_commit_id,
+            bridge_server_url=bridge_server_url,
         )
 
         element_count = 0
@@ -332,7 +400,8 @@ def ingest_commit(
                 classification = classify_element(speckle_type, obj, category_hint, source=source)
                 ifc_class    = classification["ifc_class"]
                 category     = classification["category"]
-                storey       = get_storey(obj)
+                storey       = (get_storey(obj) or bundle_levels.get(str(speckle_id))
+                                 or instance_storeys.get(str(speckle_id)))
                 app_id       = get_application_id(obj)
                 elem_hash    = compute_element_hash(obj)
                 name         = _get_name(obj)
@@ -477,12 +546,16 @@ def ingest_commit(
             for t, cnt in sorted(no_geo_by_type.items(), key=lambda x: -x[1]):
                 logger.info("  no geometry: %s × %d", t, cnt)
         return {
-            "model_id":         model_id,
-            "element_count":    element_count,
-            "skipped_count":    skipped_count,
-            "skip_geo_count":   skip_geo_count,
-            "skip_param_count": skip_param_count,
-            "duration_s":       duration,
+            "model_id":          model_id,
+            "element_count":     element_count,
+            "skipped_count":     skipped_count,
+            "skip_geo_count":    skip_geo_count,
+            "skip_param_count":  skip_param_count,
+            "duration_s":        duration,
+            "viewer_available":  viewer_available,
+            "viewer_stream_id":  bridge_stream_id  or stream_id,
+            "viewer_commit_id":  bridge_commit_id  or commit_id,
+            "viewer_server_url": bridge_server_url or resolved_server_url,
         }
 
     except Exception:

@@ -2,7 +2,15 @@ fastapi>=0.116.0
 uvicorn[standard]
 pydantic>=2.0
 psycopg2-binary
-specklepy>=3.0.0
+# Pinned to a pre-release: bundle-object read support (operations.receive
+# dispatching on bundle references) landed only in 2026.9.0a1+, not yet in
+# any stable release. Needed to ingest commits from servers already storing
+# data in the newer bundle format (e.g. app.speckle.systems on 2026.9.3).
+specklepy==2026.9.0b3
+# specklepy's bundle-format reader (specklepy.bundle.envelope_writer, used
+# by operations.receive's bundle dispatch above) imports pyarrow directly
+# but doesn't declare it as an install dependency.
+pyarrow
 ifcopenshell>=0.7.0
 ifc5d>=0.8.0
 ifctester>=0.8.0
