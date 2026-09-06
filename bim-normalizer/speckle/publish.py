@@ -1,3 +1,4 @@
+import copy
 import logging
 
 import requests as _requests
@@ -7,7 +8,7 @@ from specklepy.transports.server import ServerTransport
 
 from config import settings
 from speckle.client import get_client
-from speckle.fetch import fetch_commit, flatten_elements, _should_skip
+from speckle.fetch import fetch_commit, fetch_bundle_selection, flatten_elements, _should_skip
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ def _filter_tree(
     id_set: set[str],
     depth: int = 0,
     max_depth: int = 50,
+    bundle_levels: dict[str, str] | None = None,
+    bundle_classification: dict | None = None,
 ) -> tuple[Base | None, int]:
     """
     Recursively clone the Speckle object tree keeping only the elements
@@ -40,6 +43,23 @@ def _filter_tree(
     Container nodes (Collection, Model, Folder, …) are cloned and kept
     only when at least one descendant matches.  Pure-geometry fragments
     (Mesh, Line, RenderMaterial, …) are always dropped.
+
+    bundle_levels/bundle_classification (from fetch_commit's commit_meta,
+    non-empty only for a bundle-format source commit — see speckle/fetch.py's
+    _fetch_bundle docstring): baked onto each surviving leaf as real "level"/
+    "ifcType" attributes before republishing, rather than left for the
+    republished (always classic-format) commit to somehow recover on its own
+    re-ingest. Without this, filtering a bundle-origin model silently threw
+    away the storey/classification enrichment pipeline.normalize's
+    ingest_commit recovers on direct ingest — the republished copy has
+    is_bundle=False, so it would never see bundle_levels/bundle_classification
+    at all on its own later ingest. get_storey()/classify_element() already
+    read exactly these attribute names (ifc/spatial.py, ifc/classify.py's IFC
+    path), so baking them in requires no changes on the re-ingest side.
+    Kept ids are shallow-copied (never mutating the shared original tree,
+    which is also reused by create_viewer_bridge/other filter selections) —
+    copy.copy is enough since only new top-level attributes are added, no
+    nested value (displayValue, properties, …) is modified in place.
 
     Returns (filtered_node_or_None, matched_leaf_count).
     """
@@ -58,7 +78,8 @@ def _filter_tree(
         for child in children:
             if not isinstance(child, Base):
                 continue
-            filtered, count = _filter_tree(child, id_set, depth + 1, max_depth)
+            filtered, count = _filter_tree(
+                child, id_set, depth + 1, max_depth, bundle_levels, bundle_classification)
             if filtered is not None:
                 kept.append(filtered)
                 total += count
@@ -78,9 +99,20 @@ def _filter_tree(
 
     # Leaf element: keep as-is if selected
     node_id = getattr(node, "id", None)
-    if node_id in id_set:
-        return node, 1
-    return None, 0
+    if node_id not in id_set:
+        return None, 0
+
+    level_override = (bundle_levels or {}).get(str(node_id))
+    class_override = (bundle_classification or {}).get(str(node_id))
+    ifc_type_override = class_override[0] if class_override else None
+    if (level_override and not getattr(node, "level", None)) or (
+            ifc_type_override and not getattr(node, "ifcType", None)):
+        node = copy.copy(node)
+        if level_override and not getattr(node, "level", None):
+            node["level"] = level_override
+        if ifc_type_override and not getattr(node, "ifcType", None):
+            node["ifcType"] = ifc_type_override
+    return node, 1
 
 
 def _gql(srv: str, tok: str, query: str, variables: dict | None = None) -> dict:
@@ -148,6 +180,127 @@ def _create_commit(
         "sourceApplication": source_application,
     }})
     return data["commitCreate"]
+
+
+def _get_branch_id(srv: str, tok: str, stream_id: str, branch_name: str) -> str | None:
+    """Look up a branch's server id by name — needed for send3()'s model_id
+    argument (send3/model_ingestion.create address a "Model" by id, not
+    name), unlike commitCreate's classic path which only ever needs the
+    name. Call after _ensure_branch() has guaranteed the branch exists."""
+    data = _gql(srv, tok, """
+        query($streamId: String!, $branchName: String!) {
+            stream(id: $streamId) {
+                branch(name: $branchName) { id }
+            }
+        }
+    """, {"streamId": stream_id, "branchName": branch_name})
+    branch = data["stream"]["branch"]
+    return branch["id"] if branch else None
+
+
+def _send_native_bundle(
+    units: list[dict],
+    model_units: str,
+    stream_id: str,
+    branch_name: str,
+    token: str,
+    server_url: str,
+    message: str,
+) -> dict:
+    """
+    Author and upload a bundle-format version for exactly the given units
+    (from speckle/fetch.py's fetch_bundle_selection) via specklepy's native
+    BundleBuilder + operations.send3(), instead of the classic operations.
+    send() + commitCreate mutation filter_and_publish otherwise uses.
+
+    Only meaningful/attempted when the *source* commit was itself bundle-
+    format (see filter_and_publish) — there is no requirement to do this
+    (app.speckle.systems still fully accepts classic commitCreate today, see
+    create_viewer_bridge, which depends on that remaining true forever since
+    @speckle/viewer can't render bundle refs at all), but it keeps a
+    republished subset of a "4.0"-native project in the same native format
+    as its source, rather than silently downgrading every filtered copy back
+    to the classic format. Every object gets one flat "Filtered Selection"
+    container — reconstructing the original spatial/collection hierarchy for
+    just an arbitrary element subset isn't attempted.
+
+    Raises on any failure (auth, no /api/v2 support on this server, a
+    malformed unit, ...) — filter_and_publish catches this and falls back to
+    the classic path; this function itself does no fallback.
+
+    Returns {"commit_id": version_id, "branch_name": branch_name,
+    "url": ...} matching filter_and_publish's classic-path return shape.
+    """
+    from specklepy.api.credentials import Account
+    from specklepy.bundle.builder import BundleBuilder
+    from specklepy.bundle.envelope_writer import Producer
+    from specklepy.bundle.send import SendOptions
+
+    if not units:
+        # fetch_bundle_selection only resolves ids that trace back to a real
+        # ModelObject. Some of the classic tree's leaves don't: to_base()'s
+        # _attach_instance_definitions emits a synthetic "def-geo-{k}" object
+        # for every geometry belonging to an INSTANCE DEFINITION regardless
+        # of whether any placed object's own placement chain ever reaches
+        # it — an orphan/catalog entry, not a leaf fetch_bundle_selection's
+        # object-driven walk can rebuild. A selection made up entirely of
+        # such ids (confirmed live: this can be *every* leaf at the very
+        # start of flatten_elements' traversal order) would otherwise upload
+        # a bundle with zero objects, which the server accepts as "created"
+        # but never becomes queryable afterwards. Fail fast here instead so
+        # filter_and_publish's classic fallback (which clones the already-
+        # resolved classic tree nodes directly, orphans included) handles it.
+        raise ValueError("selection resolved to zero bundle objects — nothing to author natively")
+
+    account = Account.from_token(token, server_url)
+    producer = Producer(slug="bim-normalizer", version="1.0")
+
+    _ensure_branch(server_url, token, stream_id, branch_name)
+    model_id = _get_branch_id(server_url, token, stream_id, branch_name)
+    if not model_id:
+        raise ValueError(f"Could not resolve branch id for {branch_name!r} on stream {stream_id}")
+
+    builder = BundleBuilder(producer, units=model_units or "m")
+    container = builder.get_or_add_container_path(["Filtered Selection"])
+
+    for unit in units:
+        obj = builder.get_or_add_object(unit["key"])
+        root_scalars = [
+            (k, v) for k, v in (("ifcType", unit["ifc_type"]), ("category", unit["category"]))
+            if v
+        ]
+        obj.set_properties(unit["properties"] or {}, name=unit["name"], root_scalars=root_scalars)
+        # Deliberately not BundleObject.add_raw_geometry(): it wires a SOLID
+        # relation (pipeline.solid), but the classic-tree projection this
+        # bundle must round-trip through (to_base()'s _geometry_object) only
+        # ever reads DISPLAY relations — confirmed live: using add_raw_
+        # geometry produced a bundle that uploaded and viewer-bridged fine
+        # but round-tripped to zero elements on re-ingest, since every
+        # object's `displays` list came back empty. Calling the lower-level
+        # pipeline directly to wire DISPLAY instead is the raw-bytes
+        # equivalent of BundleObject.add_geometry() (which requires an
+        # already-decoded specklepy geometry object to re-encode via sgeo —
+        # not usable for byte-for-byte passthrough).
+        for i, (content, geometry_type) in enumerate(unit["geometries"]):
+            geometry_k = builder.pipeline.add_raw_geometry(f"{unit['key']}:g{i}", content, geometry_type)
+            builder.pipeline.display(obj.k, geometry_k, i)
+        obj.collection = container
+        if unit["level_name"]:
+            obj.level = builder.get_or_add_level(
+                unit["level_name"], unit["level_name"], unit["level_elevation"] or 0.0)
+        if unit["material_argb"] is not None:
+            obj.material = builder.get_or_add_material(f"mat-{unit['material_argb']}", None, unit["material_argb"])
+
+    result = operations.send3(account, stream_id, model_id, builder, SendOptions(message=message))
+    logger.info(
+        "Published native bundle version %s on branch %r (stream %s, %d objects)",
+        result.version_id, branch_name, stream_id, result.object_count,
+    )
+    return {
+        "commit_id": result.version_id,
+        "branch_name": branch_name,
+        "url": f"{server_url}/projects/{stream_id}/models/{model_id}@{result.version_id}",
+    }
 
 
 # Public (not _-prefixed): pipeline.normalize.ingest_commit imports this too,
@@ -228,7 +381,11 @@ def filter_and_publish(
     root, meta = fetch_commit(stream_id, commit_id, token=tok, server_url=srv)
 
     id_set = set(speckle_ids)
-    new_root, element_count = _filter_tree(root, id_set)
+    new_root, element_count = _filter_tree(
+        root, id_set,
+        bundle_levels=meta.get("bundle_levels"),
+        bundle_classification=meta.get("bundle_classification"),
+    )
 
     total_elements = len(flatten_elements(root))
     logger.info(
@@ -246,19 +403,51 @@ def filter_and_publish(
     original_name = getattr(root, "name", None) or "Model"
     new_root["name"] = f"{original_name} (filtered)"
 
-    _ensure_branch(srv, tok, stream_id, target_branch)
-
-    transport = ServerTransport(client=client, stream_id=stream_id)
-    obj_id = operations.send(new_root, [transport])
-    logger.info("Sent filtered object tree: id=%s (%d elements)", obj_id, element_count)
-
-    original_app = meta.get("source_application") or "bim-normalizer"
     commit_message = message or f"Filtered: {element_count} elements"
-    new_commit_id = _create_commit(
-        srv, tok, stream_id, obj_id, target_branch, commit_message,
-        source_application=original_app,
-    )
-    logger.info("Created commit %s on branch %r", new_commit_id, target_branch)
+    native_result = None
+
+    # If the source was bundle-format, try to keep the republished subset in
+    # the same native format rather than always downgrading it to classic —
+    # see _send_native_bundle's docstring. Best-effort: any failure (most
+    # commonly a server without /api/v2 support, or a malformed unit) falls
+    # back to the classic publish path below, exactly like create_viewer_
+    # bridge falls back to "no viewer" rather than failing the whole publish.
+    if meta.get("is_bundle"):
+        try:
+            units, model_units = fetch_bundle_selection(
+                meta["object_id"],
+                ServerTransport(client=client, stream_id=stream_id),
+                id_set,
+            )
+            native_result = _send_native_bundle(
+                units, model_units, stream_id, target_branch, tok, srv, commit_message)
+            logger.info("Published filtered selection as a native bundle version (commit %s)",
+                        native_result["commit_id"])
+        except Exception as exc:
+            logger.warning(
+                "Native bundle publish failed for filtered selection on stream %s (%s): %s — "
+                "falling back to classic-format publish",
+                stream_id, type(exc).__name__, exc,
+            )
+            native_result = None
+
+    if native_result is not None:
+        new_commit_id = native_result["commit_id"]
+        result_url = native_result["url"]
+    else:
+        _ensure_branch(srv, tok, stream_id, target_branch)
+
+        transport = ServerTransport(client=client, stream_id=stream_id)
+        obj_id = operations.send(new_root, [transport])
+        logger.info("Sent filtered object tree: id=%s (%d elements)", obj_id, element_count)
+
+        original_app = meta.get("source_application") or "bim-normalizer"
+        new_commit_id = _create_commit(
+            srv, tok, stream_id, obj_id, target_branch, commit_message,
+            source_application=original_app,
+        )
+        logger.info("Created commit %s on branch %r", new_commit_id, target_branch)
+        result_url = f"{srv}/streams/{stream_id}/commits/{new_commit_id}"
 
     # Ingest the new commit so the published model has the same normalized
     # structure (bim_elements/parameters) as the source model in the dashboard.
@@ -275,5 +464,5 @@ def filter_and_publish(
         "element_count": element_count,
         "model_id": ingest_result["model_id"],
         "ingested_element_count": ingest_result["element_count"],
-        "url": f"{srv}/streams/{stream_id}/commits/{new_commit_id}",
+        "url": result_url,
     }

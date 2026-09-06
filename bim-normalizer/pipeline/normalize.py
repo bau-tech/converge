@@ -16,9 +16,10 @@ from db.insert import (
     get_element_ids_missing_embedding,
     upsert_element_embeddings_batch,
     build_relationships,
+    insert_bundle_relationships,
 )
 from db.query import get_elements_with_params_for_embedding
-from ifc.classify import classify_element, compute_element_hash
+from ifc.classify import classify_element, classify_from_ifc_type, compute_element_hash
 from ifc.geometry import extract_geometry, extract_axis_footprint
 from ifc.schema import length_to_m, LENGTH_TO_M
 from ifc.spatial import get_storey, get_application_id
@@ -197,6 +198,12 @@ def ingest_commit(
     # above. Empty for non-bundle commits and for bundles with no Level nodes at
     # all (e.g. a source that models storeys as plain Collections instead).
     bundle_levels = commit_meta.get("bundle_levels") or {}
+    # Same idea, for real IFC classification: leaf id -> (ifcType, category),
+    # read from the bundle's own root-scalar properties (see _fetch_bundle's
+    # docstring for why to_base() drops these) — authoritative over
+    # classify_element()'s speckle_type/category_hint guessing whenever a
+    # sender actually populated ifcType.
+    bundle_classification = commit_meta.get("bundle_classification") or {}
 
     # ------------------------------------------------------------------ #
     # 2. Flatten element tree                                              #
@@ -397,7 +404,11 @@ def ingest_commit(
             # ── Stage 1: classify — pure CPU, the actual upsert_element write ─
             # happens in _flush_batch() once BATCH_SIZE elements are queued.
             try:
-                classification = classify_element(speckle_type, obj, category_hint, source=source)
+                class_override = bundle_classification.get(str(speckle_id))
+                if class_override and class_override[0]:
+                    classification = classify_from_ifc_type(class_override[0])
+                else:
+                    classification = classify_element(speckle_type, obj, category_hint, source=source)
                 ifc_class    = classification["ifc_class"]
                 category     = classification["category"]
                 storey       = (get_storey(obj) or bundle_levels.get(str(speckle_id))
@@ -524,6 +535,20 @@ def ingest_commit(
             logger.warning("build_relationships failed for model %s: %s", model_id, exc)
             relationship_count = 0
 
+        # Bundle-native relations (HOSTED_ON/CONNECTS_TO/IN_ASSEMBLY/IN_ROOM,
+        # see speckle/fetch.py's _fetch_bundle) — authoritative, not a
+        # parameter-reference guess, so kept as a separate call/relation_type
+        # set from build_relationships() rather than merged into it. Empty
+        # list for non-bundle commits, a no-op.
+        try:
+            bundle_relationship_count = insert_bundle_relationships(
+                conn, model_id, commit_meta.get("bundle_relations") or [])
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            logger.warning("insert_bundle_relationships failed for model %s: %s", model_id, exc)
+            bundle_relationship_count = 0
+
         # Only reached once every stage above (including relationship
         # resolution) has actually finished — a crash anywhere earlier
         # leaves this model_id at its 'in_progress' default from
@@ -537,10 +562,10 @@ def ingest_commit(
         duration = round(time.monotonic() - t0, 2)
         logger.info(
             "Ingested %d elements (%d with geometry, %d classify-skipped, "
-            "%d geo-failed, %d param-failed, %d relationships) in %.1fs — "
-            "model_id=%s (embeddings run separately, see generate_embeddings_for_model)",
+            "%d geo-failed, %d param-failed, %d relationships, %d bundle-relationships) "
+            "in %.1fs — model_id=%s (embeddings run separately, see generate_embeddings_for_model)",
             element_count, geo_count, skipped_count, skip_geo_count, skip_param_count,
-            relationship_count, duration, model_id,
+            relationship_count, bundle_relationship_count, duration, model_id,
         )
         if no_geo_by_type:
             for t, cnt in sorted(no_geo_by_type.items(), key=lambda x: -x[1]):

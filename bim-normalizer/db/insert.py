@@ -1051,3 +1051,64 @@ def insert_ifc_relationships(conn, model_id: str, links: list[tuple[str, str, st
                     storey_updates,
                 )
         return len(links)
+
+
+# Distinct from _IFC_RELATION_TYPES and build_relationships' own
+# (parent/room/space) relation_type values — see insert_ifc_relationships'
+# comment above for why keeping these disjoint matters (each writer's DELETE
+# only ever removes rows it itself wrote).
+_BUNDLE_RELATION_TYPES = ("hosted_on", "connects_to", "in_assembly", "in_room")
+
+
+def insert_bundle_relationships(conn, model_id: str, raw_triples: list[tuple[str, str, str]]) -> int:
+    """
+    Resolve bundle-native relations (speckle/fetch.py's _fetch_bundle:
+    HOSTED_ON/CONNECTS_TO/IN_ASSEMBLY/IN_ROOM, read directly from the bundle's
+    typed relation graph) into bim_relationships rows.
+
+    Unlike insert_ifc_relationships, raw_triples are NOT pre-resolved to
+    element_id — they're (from_leaf_id, to_leaf_id, relation_type), leaf ids
+    in the same application_id-or-"def-geo-{k}" scheme _fetch_bundle's
+    docstring describes (which for bundle-origin elements equals both
+    bim_elements.application_id and speckle_id), resolved here the same way
+    build_relationships() resolves its own parameter-reference guesses.
+
+    Authoritative over build_relationships()'s heuristic parameter-reference
+    guessing, so kept in a disjoint relation_type set rather than merged into
+    it. Idempotent: replaces this model's rows of these relation_types on
+    every call. Returns the number of relationship rows written.
+    """
+    if not raw_triples:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT application_id, element_id FROM bim_elements "
+            "WHERE model_id = %s AND application_id IS NOT NULL AND application_id <> ''",
+            (model_id,),
+        )
+        app_id_to_element = {row[0]: row[1] for row in cur.fetchall()}
+        if not app_id_to_element:
+            return 0
+
+        links: set[tuple] = set()
+        for from_id, to_id, relation_type in raw_triples:
+            if relation_type not in _BUNDLE_RELATION_TYPES:
+                continue
+            element_id = app_id_to_element.get(from_id)
+            related_id = app_id_to_element.get(to_id)
+            if element_id and related_id and element_id != related_id:
+                links.add((element_id, related_id, relation_type))
+
+        cur.execute(
+            "DELETE FROM bim_relationships WHERE relation_type = ANY(%s) AND element_id IN "
+            "(SELECT element_id FROM bim_elements WHERE model_id = %s)",
+            (list(_BUNDLE_RELATION_TYPES), model_id),
+        )
+        if links:
+            execute_values(
+                cur,
+                "INSERT INTO bim_relationships (element_id, related_id, relation_type) VALUES %s "
+                "ON CONFLICT (element_id, related_id, relation_type) DO NOTHING",
+                list(links),
+            )
+        return len(links)
