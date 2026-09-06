@@ -879,7 +879,7 @@ function Dashboard({ readOnly = false }) {
 
         const ids = fullData.elements
             .filter(el => filters.every(([field, value]) => String(getNestedValue(el, field) ?? '') === String(value)))
-            .map(el => el.speckle_id || el.id)
+            .map(el => el.id || el.speckle_id)
             .filter(Boolean)
 
         const result = ids.length > 0 ? ids : null
@@ -900,7 +900,7 @@ function Dashboard({ readOnly = false }) {
             const idSet = new Set(searchFilteredIds)
             ids = fullData.elements
                 .filter(el => idSet.has(el.id) || idSet.has(el.speckle_id))
-                .map(el => el.speckle_id || el.id)
+                .map(el => el.id || el.speckle_id)
                 .filter(Boolean)
             if (!ids.length) ids = null
         }
@@ -1760,7 +1760,7 @@ function Dashboard({ readOnly = false }) {
         if (!elements || !field || !value) return
         const ids = elements
             .filter(el => String(getNestedValue(el, field) ?? '') === String(value))
-            .map(el => el.speckle_id || el.id)
+            .map(el => el.id || el.speckle_id)
             .filter(Boolean)
         if (ids.length) speckleViewerRef.current?.highlightObjects(ids)
     }, [])
@@ -1897,7 +1897,7 @@ function Dashboard({ readOnly = false }) {
                 const res = await fetch(url)
                 if (!res.ok) throw new Error(`HTTP ${res.status}`)
                 const rows = await res.json()
-                rows.forEach(r => { if (r.speckle_id) allSpeckleIds.add(r.speckle_id) })
+                rows.forEach(r => { const vid = r.viewer_object_id || r.speckle_id; if (vid) allSpeckleIds.add(vid) })
             }
 
             const ids = [...allSpeckleIds]
@@ -1920,7 +1920,7 @@ function Dashboard({ readOnly = false }) {
                 )
             })
             const result = matches.length > 0
-                ? matches.map(el => el.speckle_id || el.id).filter(Boolean)
+                ? matches.map(el => el.id || el.speckle_id).filter(Boolean)
                 : null
             setViewerFilteredIds(result)
             setTableOwnFilterIds(null)

@@ -251,6 +251,11 @@ def ingest_commit(
         is_bundle = commit_meta.get("is_bundle", False)
         bridge_stream_id = bridge_commit_id = bridge_server_url = None
         viewer_available = True
+        # applicationId -> the id @speckle/viewer's FilteringExtension will
+        # actually match against, from create_viewer_bridge's own re-fetch of
+        # what it just published (see its docstring). Empty for non-bundle
+        # commits, where speckle_id already IS the viewer's id (same tree).
+        viewer_id_map: dict[str, str] = {}
 
         if is_bundle:
             bridge = create_viewer_bridge(
@@ -261,6 +266,7 @@ def ingest_commit(
                 bridge_stream_id, bridge_commit_id, bridge_server_url = (
                     bridge["stream_id"], bridge["commit_id"], bridge["server_url"],
                 )
+                viewer_id_map = bridge.get("viewer_id_map") or {}
             else:
                 viewer_available = False
 
@@ -334,6 +340,7 @@ def ingest_commit(
                             speckle_id=row["speckle_id"], speckle_type=row["speckle_type"],
                             ifc_class=row["ifc_class"], category=row["category"], name=row["name"],
                             storey=row["storey"], elem_hash=row["elem_hash"],
+                            viewer_object_id=row["viewer_object_id"],
                         )
                     except Exception as exc2:
                         with conn.cursor() as cur:
@@ -426,6 +433,7 @@ def ingest_commit(
                 "application_id": app_id, "speckle_id": speckle_id, "speckle_type": speckle_type,
                 "ifc_class": ifc_class, "category": category, "name": name,
                 "storey": storey, "elem_hash": elem_hash,
+                "viewer_object_id": viewer_id_map.get(str(speckle_id)) or str(speckle_id),
             })
             element_count += 1
 

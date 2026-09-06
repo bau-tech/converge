@@ -465,7 +465,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             if (!viewer || !applicationIds?.length) return
             try {
                 const ids = applicationIds
-                    .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
+                    .map((appId) => { const e = elementByAppIdRef.current.get(appId); return e?.id || e?.speckle_id })
                     .filter(Boolean)
                 if (!ids.length) return
                 isolateByHiding(viewer, ids, 'clash')
@@ -491,7 +491,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             if (!viewer || !applicationIds?.length) return null
             try {
                 const ids = applicationIds
-                    .map((appId) => elementByAppIdRef.current.get(appId)?.speckle_id)
+                    .map((appId) => { const e = elementByAppIdRef.current.get(appId); return e?.id || e?.speckle_id })
                     .filter(Boolean)
                 if (ids.length) {
                     isolateByHiding(viewer, ids, 'clash')
@@ -731,11 +731,16 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         const federatedElements = federatedMode && Array.isArray(federatedFullData?.elements)
             ? federatedFullData.elements : []
         for (const el of [...elements, ...federatedElements]) {
-            if (el.speckle_id) {
-                map.set(el.speckle_id, el)
-                ids.push(el.speckle_id)
-            }
+            if (el.speckle_id) map.set(el.speckle_id, el)
             if (el.id) map.set(el.id, el)
+            // The id the viewer's own objects are actually keyed by (see
+            // App.jsx's fetchFlatElements/adaptNormalizerElement — normally
+            // el.id === el.speckle_id, but differs for a bundle-format
+            // commit's viewer-bridge republish, whose objects get a fresh
+            // content-hash id on every republish). speckleIdsRef feeds
+            // isolateByHiding's "show everything except X" diff below, so it
+            // needs the id space the loaded viewer objects are actually in.
+            ids.push(el.id || el.speckle_id)
             if (el.application_id) byAppId.set(el.application_id, el)
         }
         elementMapRef.current = map
@@ -1303,9 +1308,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                         if (filterExt && Array.isArray(federatedFullDataRef.current?.elements)) {
                             const byModel = new Map()
                             for (const el of federatedFullDataRef.current.elements) {
-                                if (!el.speckle_id || !el._modelKey) continue
+                                const vid = el.id || el.speckle_id
+                                if (!vid || !el._modelKey) continue
                                 if (!byModel.has(el._modelKey)) byModel.set(el._modelKey, [])
-                                byModel.get(el._modelKey).push(el.speckle_id)
+                                byModel.get(el._modelKey).push(vid)
                             }
                             const colorGroups = federatedModels
                                 .filter((m) => byModel.has(m.branchName))
@@ -1591,11 +1597,12 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
 
             const groups = {}
             for (const el of (speckleIdsRef.current.map(id => elementMapRef.current.get(id)).filter(Boolean))) {
-                if (!el.speckle_id) continue
+                const vid = el.id || el.speckle_id
+                if (!vid) continue
                 const val = String(getNestedValue(el, field) ?? 'Unknown')
                 const color = valueColorMap[val] || CHART_COLOR_OTHER
                 if (!groups[color]) groups[color] = []
-                groups[color].push(el.speckle_id)
+                groups[color].push(vid)
             }
 
             const colorGroups = Object.entries(groups).map(([color, ids]) => ({ objectIds: ids, color }))

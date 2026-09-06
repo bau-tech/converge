@@ -71,6 +71,24 @@ CREATE TABLE IF NOT EXISTS bim_elements (
     UNIQUE (model_id, speckle_id)
 );
 
+-- The id the 3D viewer actually needs to find/highlight this element, as
+-- opposed to speckle_id (a stable identity key used for re-ingest matching
+-- and every DB join here). For most models the two are the same value —
+-- but for a bundle-format commit's viewer-bridge republish (speckle/
+-- publish.py's create_viewer_bridge), the viewer renders a SEPARATE,
+-- freshly re-sent classic commit whose objects get a brand new content-
+-- hash id on every republish, completely unrelated to speckle_id (the
+-- bundle's own stable applicationId). @speckle/viewer's FilteringExtension
+-- resolves isolateObjects()/hideObjects() purely against that content
+-- hash — never applicationId — so passing speckle_id straight through (as
+-- every chart/document/BCF/timeline filter in the frontend already did)
+-- silently matched nothing for bridged models. Defaults to speckle_id at
+-- insert time (see db/insert.py's upsert_element(s_batch)) so non-bridged
+-- models need no special handling; pipeline.normalize.ingest_commit
+-- overrides it per-element from create_viewer_bridge's own id mapping
+-- when a bridge was actually (re)published this ingest.
+ALTER TABLE bim_elements ADD COLUMN IF NOT EXISTS viewer_object_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_bim_elements_model    ON bim_elements(model_id);
 CREATE INDEX IF NOT EXISTS idx_bim_elements_app_id   ON bim_elements(application_id);
 CREATE INDEX IF NOT EXISTS idx_bim_elements_ifc      ON bim_elements(ifc_class);

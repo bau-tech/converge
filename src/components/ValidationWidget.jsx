@@ -389,7 +389,7 @@ export default function ValidationWidget({ widgetId, fullData, paramKeys = [], t
             const ruleResults = rules.map(rule => checkRule(getNested(el, rule.property), rule))
             // AND: must pass every rule. OR: must pass at least one rule.
             const elementPassed = logicMode === 'OR' ? ruleResults.some(Boolean) : ruleResults.every(Boolean)
-            const id = el.speckle_id || el.id
+            const id = el.id || el.speckle_id
 
             if (elementPassed) {
                 passed++

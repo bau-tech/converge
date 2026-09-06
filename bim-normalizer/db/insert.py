@@ -126,25 +126,32 @@ def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
 def upsert_element(conn, model_id: str, application_id: str | None,
                    speckle_id: str, speckle_type: str, ifc_class: str,
                    category: str, name: str, storey: str | None,
-                   elem_hash: str) -> str:
-    """Insert or update a bim_element row. Returns element_id (UUID string)."""
+                   elem_hash: str, viewer_object_id: str | None = None) -> str:
+    """Insert or update a bim_element row. Returns element_id (UUID string).
+
+    viewer_object_id defaults to speckle_id — see db/models.py's column
+    comment for why the two differ for a bundle-format commit's viewer-
+    bridge republish, and why this default is what every other (non-
+    bridged) model needs with no special handling."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_elements
                 (model_id, application_id, speckle_id, speckle_type,
-                 ifc_class, category, name, storey, hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ifc_class, category, name, storey, hash, viewer_object_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (model_id, speckle_id) DO UPDATE SET
-                application_id = EXCLUDED.application_id,
-                speckle_type   = EXCLUDED.speckle_type,
-                ifc_class      = EXCLUDED.ifc_class,
-                category       = EXCLUDED.category,
-                name           = EXCLUDED.name,
-                storey         = EXCLUDED.storey,
-                hash           = EXCLUDED.hash
+                application_id   = EXCLUDED.application_id,
+                speckle_type     = EXCLUDED.speckle_type,
+                ifc_class        = EXCLUDED.ifc_class,
+                category         = EXCLUDED.category,
+                name             = EXCLUDED.name,
+                storey           = EXCLUDED.storey,
+                hash             = EXCLUDED.hash,
+                viewer_object_id = EXCLUDED.viewer_object_id
             RETURNING element_id
         """, (model_id, application_id, speckle_id, speckle_type,
-              ifc_class, category, name, storey, elem_hash))
+              ifc_class, category, name, storey, elem_hash,
+              viewer_object_id or speckle_id))
         return str(cur.fetchone()[0])
 
 
@@ -157,27 +164,31 @@ def upsert_elements_batch(conn, model_id: str, rows: list[dict]) -> dict[str, st
     instead of one per element (see the module-level batching note near
     upsert_geometries_batch/upsert_parameters_batch for why this matters).
     Each row dict needs: application_id, speckle_id, speckle_type, ifc_class,
-    category, name, storey, elem_hash. Returns {speckle_id: element_id}."""
+    category, name, storey, elem_hash, and optionally viewer_object_id
+    (defaults to speckle_id — see upsert_element's docstring). Returns
+    {speckle_id: element_id}."""
     if not rows:
         return {}
     with conn.cursor() as cur:
         result = execute_values(cur, """
             INSERT INTO bim_elements
                 (model_id, application_id, speckle_id, speckle_type,
-                 ifc_class, category, name, storey, hash)
+                 ifc_class, category, name, storey, hash, viewer_object_id)
             VALUES %s
             ON CONFLICT (model_id, speckle_id) DO UPDATE SET
-                application_id = EXCLUDED.application_id,
-                speckle_type   = EXCLUDED.speckle_type,
-                ifc_class      = EXCLUDED.ifc_class,
-                category       = EXCLUDED.category,
-                name           = EXCLUDED.name,
-                storey         = EXCLUDED.storey,
-                hash           = EXCLUDED.hash
+                application_id   = EXCLUDED.application_id,
+                speckle_type     = EXCLUDED.speckle_type,
+                ifc_class        = EXCLUDED.ifc_class,
+                category         = EXCLUDED.category,
+                name             = EXCLUDED.name,
+                storey           = EXCLUDED.storey,
+                hash             = EXCLUDED.hash,
+                viewer_object_id = EXCLUDED.viewer_object_id
             RETURNING speckle_id, element_id
         """, [
             (model_id, r["application_id"], r["speckle_id"], r["speckle_type"],
-             r["ifc_class"], r["category"], r["name"], r["storey"], r["elem_hash"])
+             r["ifc_class"], r["category"], r["name"], r["storey"], r["elem_hash"],
+             r.get("viewer_object_id") or r["speckle_id"])
             for r in rows
         ], page_size=len(rows), fetch=True)
     return {speckle_id: str(element_id) for speckle_id, element_id in result}

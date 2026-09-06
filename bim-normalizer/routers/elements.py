@@ -32,7 +32,7 @@ def get_elements(model_id: str, category: str = None, ifc_class: str = None,
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT element_id, application_id, speckle_id, speckle_type,
-                       ifc_class, category, name, storey, hash
+                       ifc_class, category, name, storey, hash, viewer_object_id
                 FROM bim_elements e
                 WHERE {' AND '.join(where)}
                 ORDER BY category, name
@@ -134,8 +134,9 @@ def get_elements_flat(
 ):
     """
     Flat element list enriched with geometry quantities and key parameter fields
-    (material, profile, grade). The `id` field mirrors `speckle_id` so the
-    dashboard viewer sync works without frontend changes.
+    (material, profile, grade). The `id` field is the id @speckle/viewer
+    actually resolves objects against — see db/query.py's get_elements_flat
+    docstring — so the dashboard viewer sync works without frontend changes.
     """
     from db.connection import get_conn, release_conn
     from db.query import get_elements_flat as _flat
@@ -342,7 +343,7 @@ def get_elements_by_parameter(
             params.append(limit)
             cur.execute(f"""
                 SELECT DISTINCT ON (e.element_id)
-                    e.element_id, e.speckle_id, e.ifc_class, e.category, e.name, e.storey,
+                    e.element_id, e.speckle_id, e.viewer_object_id, e.ifc_class, e.category, e.name, e.storey,
                     p.key AS param_key, p.value AS param_value
                 FROM bim_elements e
                 JOIN bim_parameters p ON p.element_id = e.element_id

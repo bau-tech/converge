@@ -221,7 +221,7 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
             Object.keys(filters).length > 0
         if (hasOwnFilters) {
             hadOwnFiltersRef.current = true
-            onFilteredIdsChange(processedData.map(item => item.speckle_id || item.id))
+            onFilteredIdsChange(processedData.map(item => item.id || item.speckle_id))
         } else if (hadOwnFiltersRef.current) {
             // Transitioning from having own filters to none — clear the viewer filter
             hadOwnFiltersRef.current = false
@@ -426,7 +426,7 @@ export function ElementTable({ fullData, onElementClick, viewerSelectedIds, onFi
                         {paginatedData.map((item, idx) => (
                             <tr
                                 key={`${item.id || item.speckle_id}-${idx}`}
-                                onClick={() => onElementClick && onElementClick(item.speckle_id || item.id)}
+                                onClick={() => onElementClick && onElementClick(item.id || item.speckle_id)}
                                 className="group hover:bg-white/5 transition-colors cursor-pointer border-b border-white/5 last:border-0"
                             >
                                 {tableColumns.map(col => {

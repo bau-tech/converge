@@ -297,7 +297,24 @@ def create_viewer_bridge(
     a bridge failure must never fail the overall ingest, since BIM data
     ingest is the primary job and only 3D rendering depends on this.
 
-    Returns {"stream_id", "commit_id", "server_url"} on success, else None.
+    Returns {"stream_id", "commit_id", "server_url", "viewer_id_map"} on
+    success, else None. viewer_id_map is {applicationId: real_id} for every
+    leaf in the republished tree — operations.send() computes each object's
+    real (content-hash) id internally and never writes it back onto the
+    Python objects passed in (specklepy's serializer builds a wholly
+    separate dict tree), so the only way to learn the ids @speckle/viewer
+    will actually use is to receive the commit back and read them off the
+    round-tripped copy. Needed because @speckle/viewer's FilteringExtension
+    resolves isolateObjects()/hideObjects() purely against that content
+    hash, never applicationId — every chart/document/BCF/timeline filter in
+    the frontend passes bim_elements.speckle_id (the bundle's own stable
+    applicationId) straight through, which silently matched nothing against
+    a bridged model's actual viewer ids until pipeline.normalize.
+    ingest_commit started storing this mapping as bim_elements.
+    viewer_object_id. Best-effort like the rest of this function: a mapping
+    failure still returns the bridge info without one (falls back to
+    speckle_id, no worse than before this existed), it just doesn't fail
+    bridge creation itself.
     """
     try:
         client = get_client(server_url=server_url, token=token)
@@ -318,7 +335,29 @@ def create_viewer_bridge(
             "Created viewer-bridge commit %s on branch %r (stream %s) for source commit %s",
             new_commit_id, BRIDGE_BRANCH, stream_id, source_commit_id,
         )
-        return {"stream_id": stream_id, "commit_id": new_commit_id, "server_url": server_url}
+
+        viewer_id_map: dict[str, str] = {}
+        try:
+            received_root = operations.receive(obj_id=obj_id, remote_transport=transport, local_transport=None)
+            for obj, _hint in flatten_elements(received_root):
+                app_id = getattr(obj, "applicationId", None)
+                real_id = getattr(obj, "id", None)
+                if app_id and real_id:
+                    viewer_id_map[str(app_id)] = str(real_id)
+            logger.info("Resolved %d viewer object id(s) for bridge commit %s",
+                        len(viewer_id_map), new_commit_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not resolve viewer object ids for bridge commit %s (%s): %s — "
+                "3D viewer still works, but chart/document/BCF click-to-highlight "
+                "won't find matches for this model's elements",
+                new_commit_id, type(exc).__name__, exc,
+            )
+
+        return {
+            "stream_id": stream_id, "commit_id": new_commit_id, "server_url": server_url,
+            "viewer_id_map": viewer_id_map,
+        }
     except Exception as exc:
         logger.warning(
             "Viewer bridge publish failed for commit %s on stream %s (%s): %s — "

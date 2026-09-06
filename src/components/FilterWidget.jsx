@@ -280,7 +280,7 @@ export default function FilterWidget({ widgetId, fullData, paramKeys = [], title
         if (!hasActiveConditions(groups)) return null
         return fullData.elements
             .filter(el => evaluateGroups(el, groups, getNestedValue))
-            .map(el => el.speckle_id || el.id)
+            .map(el => el.id || el.speckle_id)
             .filter(Boolean)
     }, [fullData, groups])
 

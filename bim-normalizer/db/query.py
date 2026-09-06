@@ -393,7 +393,10 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
     Return {total, elements: [{id, speckle_id, category, ifc_class, name,
                                 storey, volume_m3, area_m2, material, profile, grade,
                                 material_category, profile_type}]}
-    `id` mirrors speckle_id so the frontend viewer sync works without changes.
+    `id` is viewer_object_id (falling back to speckle_id) — the id
+    @speckle/viewer's FilteringExtension actually resolves objects against,
+    which differs from speckle_id for a bundle-format commit's viewer-bridge
+    republish (see db/models.py's bim_elements.viewer_object_id comment).
     """
     where = ["e.model_id = %s"]
     params: list = [model_id]
@@ -414,7 +417,7 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
             SELECT
                 e.element_id, e.speckle_id, e.application_id,
                 e.category, e.ifc_class, e.name, e.storey, e.speckle_type,
-                g.volume_m3, g.area_m2, g.centroid,
+                g.volume_m3, g.area_m2, g.centroid, e.viewer_object_id,
                 COUNT(*) OVER () AS total_count
             FROM bim_elements e
             LEFT JOIN bim_geometry g ON g.element_id = e.element_id
@@ -425,7 +428,7 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
         rows = cur.fetchall()
 
         if rows:
-            total = rows[0][11]
+            total = rows[0][12]
         else:
             # offset past last page — fetch the true count separately
             cur.execute(f"SELECT COUNT(*) FROM bim_elements e WHERE {where_sql}", params)
@@ -480,7 +483,13 @@ def get_elements_flat(conn, model_id: str, limit: int = 1000, offset: int = 0,
             if material_category == "steel" and a.get("profile") else None
         )
         elements.append({
-            "id":           speckle_id,   # viewer sync key
+            # viewer sync key — viewer_object_id when this model has one (a
+            # bundle-format commit's viewer-bridge republish, see db/models.
+            # py's column comment; the id @speckle/viewer's FilteringExtension
+            # actually resolves against), else speckle_id (same value for a
+            # non-bridged model, since the ingested tree IS what the viewer
+            # renders there).
+            "id":           r[11] or speckle_id,
             "speckle_id":   speckle_id,
             "element_id":   eid,
             "application_id": r[2],
