@@ -230,38 +230,39 @@ def ingest_commit(
         # can't be rendered by @speckle/viewer's browser-side SpeckleLoader,   #
         # which has no bundle support and no upstream fix available. Republish#
         # the tree we already fetched as a classic commit on the same stream, #
-        # once per source commit (reused on every re-ingest), so the frontend #
-        # can point the viewer at that instead. Best-effort: a bridge failure #
-        # (e.g. no write access on the source stream) must not fail ingest.   #
+        # so the frontend can point the viewer at that instead. Best-effort:  #
+        # a bridge failure (e.g. no write access on the source stream) must   #
+        # not fail ingest.                                                    #
+        #                                                                      #
+        # Always regenerated, never reused across ingest_commit() calls —     #
+        # confirmed live this session that reusing a bridge from a prior call #
+        # goes stale the moment fetch_commit's projection logic changes (e.g. #
+        # speckle/fetch.py's _full_projection replacing to_base()): the       #
+        # viewer kept rendering the OLD element set through several re-       #
+        # ingests that had already fixed the underlying data, because the     #
+        # cached bridge_commit_id in bim_models still pointed at a commit     #
+        # built from the very first ingest's root. ingest_commit() itself     #
+        # only ever runs for a genuine first ingest or an explicit forced     #
+        # re-ingest (routers/ingest.py's fast path already skips calling it   #
+        # for an ordinary reopen of an already-ingested model), so a fresh    #
+        # bridge here costs one extra operations.send() on an already-       #
+        # expensive operation, not one per page load.                         #
         # ------------------------------------------------------------------ #
         is_bundle = commit_meta.get("is_bundle", False)
         bridge_stream_id = bridge_commit_id = bridge_server_url = None
         viewer_available = True
 
         if is_bundle:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT bridge_stream_id, bridge_commit_id, bridge_server_url "
-                    "FROM bim_models WHERE stream_id = %s AND commit_id = %s",
-                    (stream_id, commit_id),
+            bridge = create_viewer_bridge(
+                root, stream_id=stream_id, token=token,
+                server_url=resolved_server_url, source_commit_id=commit_id,
+            )
+            if bridge:
+                bridge_stream_id, bridge_commit_id, bridge_server_url = (
+                    bridge["stream_id"], bridge["commit_id"], bridge["server_url"],
                 )
-                existing = cur.fetchone()
-
-            if existing and existing[1]:
-                bridge_stream_id, bridge_commit_id, bridge_server_url = existing
-                logger.info("Reusing existing viewer-bridge commit %s for source commit %s",
-                            bridge_commit_id, commit_id)
             else:
-                bridge = create_viewer_bridge(
-                    root, stream_id=stream_id, token=token,
-                    server_url=resolved_server_url, source_commit_id=commit_id,
-                )
-                if bridge:
-                    bridge_stream_id, bridge_commit_id, bridge_server_url = (
-                        bridge["stream_id"], bridge["commit_id"], bridge["server_url"],
-                    )
-                else:
-                    viewer_available = False
+                viewer_available = False
 
         model_id = upsert_model(
             conn,
