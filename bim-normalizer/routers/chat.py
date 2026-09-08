@@ -18,7 +18,17 @@ def _friendly_error_message(exc: Exception) -> str:
     The full exception/traceback is still logged server-side by callers —
     this only changes what reaches the chat UI.
     """
-    status = getattr(getattr(exc, "response", None), "status_code", None)
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status == 400 and response is not None:
+        try:
+            message = str((response.json() or {}).get("error", {}).get("message", ""))
+        except (ValueError, AttributeError):
+            message = ""
+        if "tool call validation failed" in message.lower():
+            return ("The AI model attempted an invalid action and the request failed, even after "
+                    "automatic retries — a known reliability issue with some faster/smaller models. "
+                    "Try asking again, or ask an admin to switch to a different model.")
     if status == 429:
         return ("The AI provider is rate-limiting requests right now (no quota left this minute). "
                 "Wait a moment and try again, or ask an admin to check the provider account's plan/billing.")

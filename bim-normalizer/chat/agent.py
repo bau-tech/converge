@@ -768,14 +768,38 @@ def _get_url_and_headers(provider: str, api_key: str, base_url: str) -> tuple[st
     return f"{base_url.rstrip('/')}/chat/completions", {"Content-Type": "application/json"}
 
 
+def _is_hallucinated_tool_call_error(resp) -> bool:
+    """True if a 400 is the OpenAI-compatible "Tool call validation failed"
+    error — an LLM-side hallucination (observed live with Groq's
+    openai/gpt-oss-20b: it called tool names that were never declared, e.g.
+    "open_page"/"open_file", or malformed a real tool's arguments), not a
+    deterministic problem with the request body. Reading resp.json() here is
+    safe even for a streaming request: providers send a plain JSON error
+    body (never SSE chunks) when the request is rejected before generation
+    starts, and the caller's later resp.raise_for_status() only needs the
+    already-cached status code, not to re-read the body."""
+    if resp.status_code != 400:
+        return False
+    try:
+        err = (resp.json() or {}).get("error") or {}
+    except (ValueError, json.JSONDecodeError):
+        return False
+    haystack = f"{err.get('type', '')} {err.get('message', '')}".lower()
+    return "tool call validation failed" in haystack
+
+
 def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
                         stream: bool = False, max_retries: int = 2):
     """POST with backoff on transient failures — connection errors/timeouts,
-    429 rate limits, and 5xx server errors. Does NOT retry other 4xx errors
-    (bad request, auth) since the same unchanged request would just fail the
-    same way again. Previously a single requests.post() meant any transient
-    network hiccup or provider rate limit surfaced straight to the user as a
-    raw error instead of the agent quietly recovering."""
+    429 rate limits, 5xx server errors, and a provider-side hallucinated tool
+    call (see _is_hallucinated_tool_call_error). Does NOT retry other 4xx
+    errors (bad request, auth) since the same unchanged request would just
+    fail the same way again — unlike a hallucinated tool call, which comes
+    from the model's own sampling and can plausibly succeed on a fresh
+    attempt with the exact same request. Previously a single requests.post()
+    meant any transient network hiccup or provider rate limit surfaced
+    straight to the user as a raw error instead of the agent quietly
+    recovering."""
     resp = None
     for attempt in range(max_retries + 1):
         try:
@@ -785,7 +809,7 @@ def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
                 raise
             time.sleep(2 ** attempt)
             continue
-        if resp.status_code == 429 or resp.status_code >= 500:
+        if resp.status_code == 429 or resp.status_code >= 500 or _is_hallucinated_tool_call_error(resp):
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
                 continue
