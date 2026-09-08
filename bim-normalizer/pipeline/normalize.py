@@ -475,6 +475,29 @@ def ingest_commit(
                             speckle_id[:8], _debug_prop_layout(obj),
                         )
 
+                # Source-declared zero overrides any mesh/bbox-derived value —
+                # applies regardless of source app (unlike the IFC-only block
+                # above). Render-only content (Revit RPC entourage: planting,
+                # furniture, people) still exports a placeholder/silhouette
+                # mesh that produces a physically meaningless but plausible-
+                # looking volume/area; the source app's own explicit 0 is
+                # authoritative. See _prop_declares_zero's docstring.
+                if geo:
+                    if _prop_declares_zero(obj, _VOL_KEYS):
+                        logger.debug(
+                            "Element %s: source declares Volume=0 (render-only/entourage "
+                            "content) — discarding mesh-derived volume_m3=%s",
+                            speckle_id, geo.get("volume_m3"),
+                        )
+                        geo["volume_m3"] = 0.0
+                    if _prop_declares_zero(obj, _AREA_KEYS):
+                        logger.debug(
+                            "Element %s: source declares Area=0 (render-only/entourage "
+                            "content) — discarding mesh-derived area_m2=%s",
+                            speckle_id, geo.get("area_m2"),
+                        )
+                        geo["area_m2"] = 0.0
+
                 # Axis/footprint enrichment — own try/except so a bug here can
                 # never take down the mesh/bbox extraction above it; this is
                 # enrichment on top of already-successful geometry, not a
@@ -662,7 +685,27 @@ def _read_numeric(raw) -> float | None:
         return None
 
 
-def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0) -> float | None:
+def _read_numeric_zero_ok(raw) -> float | None:
+    """Like _read_numeric, but keeps an explicit 0 instead of discarding it
+    as "no value". Needed to tell a source app's own authoritative zero
+    (e.g. Revit reports Volume=0/Area=0 for RPC/entourage content — a
+    render-only billboard, never a real solid) apart from the property
+    simply being absent, which _read_numeric's callers correctly treat as
+    "unknown, don't override"."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw["value"]
+    elif hasattr(raw, "value") and not isinstance(raw, (int, float)):
+        raw = getattr(raw, "value")
+    try:
+        v = float(raw)
+        return v if v >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_read_numeric) -> float | None:
     """
     Recursively walk a plain dict tree looking for target_keys, in order —
     the first key in target_keys present in d wins, so target_keys' ordering
@@ -676,7 +719,7 @@ def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0) -> float | 
     # Check keys at this level first
     for key in target_keys:
         if key in d:
-            v = _read_numeric(d[key])
+            v = reader(d[key])
             if v is not None:
                 return v
 
@@ -685,14 +728,14 @@ def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0) -> float | 
         if k in _DEEP_SKIP:
             continue
         if isinstance(v, dict):
-            result = _deep_find_in_dict(v, target_keys, _depth + 1)
+            result = _deep_find_in_dict(v, target_keys, _depth + 1, reader)
             if result is not None:
                 return result
         elif hasattr(v, "__dict__") and not isinstance(v, (str, int, float, bool, type(None), list)):
             # SpecklePy Base nested inside a dict value — convert and recurse
             inner = {ik: iv for ik, iv in v.__dict__.items() if not ik.startswith("_")}
             if inner:
-                result = _deep_find_in_dict(inner, target_keys, _depth + 1)
+                result = _deep_find_in_dict(inner, target_keys, _depth + 1, reader)
                 if result is not None:
                     return result
 
@@ -770,6 +813,39 @@ def _prop_area_m2(obj) -> float | None:
         if raw is not None:
             return raw * _area_factor(units, raw)
     return None
+
+
+def _prop_declares_zero(obj, target_keys: tuple) -> bool:
+    """
+    True if the source app's own property scan finds target_keys (Volume or
+    Area) explicitly set to 0 — e.g. Revit reports Volume=0/Area=0 for RPC
+    ("Rich Photorealistic Content") entourage: planting, furniture, and
+    people billboards rendered from a 2D photo, not real solid geometry.
+    extract_geometry() has no way to tell that apart from a real element, so
+    it derives volume_m3/area_m2 from whatever placeholder/silhouette mesh
+    Revit exports for the RPC billboard — physically meaningless, but not
+    obviously wrong-looking on its own (e.g. a plausible-if-large number for
+    a shrub). Trusting the source app's own explicit zero here is the same
+    principle as _prop_volume_m3/_prop_area_m2's IFC quantity-set fallback,
+    just inverted: there the source's *positive* value fills a gap the mesh
+    left empty; here the source's *zero* overrides a mesh value that exists
+    but isn't real.
+
+    Uses the zero-inclusive reader (unlike _prop_volume_m3/_prop_area_m2,
+    which must keep treating 0 as "absent" for their own fill-a-gap use —
+    see _read_numeric_zero_ok's docstring) and, like those, checks
+    _PROP_ATTRS containers in order and stops at the first one that has the
+    property at all, zero or not — a later container's mismatched value
+    should never override an earlier, more specific one's explicit zero.
+    """
+    for attr in _PROP_ATTRS:
+        container = getattr(obj, attr, None)
+        if not isinstance(container, dict):
+            continue
+        raw = _deep_find_in_dict(container, target_keys, reader=_read_numeric_zero_ok)
+        if raw is not None:
+            return raw == 0
+    return False
 
 
 def _debug_prop_layout(obj) -> str:
