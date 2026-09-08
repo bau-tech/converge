@@ -118,11 +118,15 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     }))
     const [mistralConfig, setMistralConfig] = useState(() => ({
         apiKey: localStorage.getItem('chat_mistral_key') || RUNTIME_CONFIG.MISTRAL_API_KEY,
-        model: localStorage.getItem('chat_mistral_model') || 'mistral-large-latest'
+        model: localStorage.getItem('chat_mistral_model') || 'mistral-small-latest'
     }))
     const [anthropicConfig, setAnthropicConfig] = useState(() => ({
         apiKey: localStorage.getItem('chat_anthropic_key') || RUNTIME_CONFIG.ANTHROPIC_API_KEY,
         model: localStorage.getItem('chat_anthropic_model') || 'claude-sonnet-5'
+    }))
+    const [groqConfig, setGroqConfig] = useState(() => ({
+        apiKey: localStorage.getItem('chat_groq_key') || RUNTIME_CONFIG.GROQ_API_KEY,
+        model: localStorage.getItem('chat_groq_model') || 'openai/gpt-oss-20b'
     }))
 
     const scrollToBottom = () => {
@@ -145,6 +149,8 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         localStorage.setItem('chat_mistral_model', mistralConfig.model)
         localStorage.setItem('chat_anthropic_key', anthropicConfig.apiKey)
         localStorage.setItem('chat_anthropic_model', anthropicConfig.model)
+        localStorage.setItem('chat_groq_key', groqConfig.apiKey)
+        localStorage.setItem('chat_groq_model', groqConfig.model)
         setShowSettings(false)
     }
 
@@ -174,6 +180,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             lmstudio_config: provider === 'lmstudio' ? lmStudioConfig : undefined,
             mistral_config: provider === 'mistral' ? mistralConfig : undefined,
             anthropic_config: provider === 'anthropic' ? anthropicConfig : undefined,
+            groq_config: provider === 'groq' ? groqConfig : undefined,
             model_context: modelContext || undefined,
         })
 
@@ -329,7 +336,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 <div>
                                     <h3 className="font-medium text-xs">AI Assistant</h3>
                                     <p className="text-[9px] text-zinc-400">
-                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'anthropic' ? `Claude (${anthropicConfig.model})` : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
+                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'anthropic' ? `Claude (${anthropicConfig.model})` : provider === 'groq' ? `Groq (${groqConfig.model})` : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
                                     </p>
                                 </div>
                             </div>
@@ -404,6 +411,13 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                 >
                                                     <Cpu className="w-2.5 h-2.5" />
                                                     Mistral
+                                                </button>
+                                                <button
+                                                    onClick={() => setProvider('groq')}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'groq' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                >
+                                                    <Cpu className="w-2.5 h-2.5" />
+                                                    Groq
                                                 </button>
                                                 <button
                                                     onClick={() => setProvider('ollama')}
@@ -490,7 +504,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                         type="text"
                                                         value={mistralConfig.model}
                                                         onChange={(e) => setMistralConfig(prev => ({ ...prev, model: e.target.value }))}
-                                                        placeholder="mistral-large-latest"
+                                                        placeholder="mistral-small-latest"
                                                         className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
                                                     />
                                                 </div>
@@ -516,6 +530,31 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                         value={anthropicConfig.model}
                                                         onChange={(e) => setAnthropicConfig(prev => ({ ...prev, model: e.target.value }))}
                                                         placeholder="claude-sonnet-5"
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {provider === 'groq' && (
+                                            <div className="space-y-1.5 pt-1">
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Groq API Key</label>
+                                                    <input
+                                                        type="password"
+                                                        value={groqConfig.apiKey}
+                                                        onChange={(e) => setGroqConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                                                        placeholder="gsk_..."
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
+                                                    <input
+                                                        type="text"
+                                                        value={groqConfig.model}
+                                                        onChange={(e) => setGroqConfig(prev => ({ ...prev, model: e.target.value }))}
+                                                        placeholder="openai/gpt-oss-20b"
                                                         className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
                                                     />
                                                 </div>

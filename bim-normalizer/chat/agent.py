@@ -60,11 +60,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "filter_elements",
-            "description": (
-                "Filter BIM elements by category, IFC class, storey/level, or name. "
-                "Returns matching Speckle IDs for 3D viewer highlighting. "
-                "Call this when the user wants to see or isolate specific elements."
-            ),
+            "description": "Filter BIM elements by category, IFC class, storey, or name. Returns Speckle IDs for viewer highlighting.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,10 +77,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_summary",
-            "description": (
-                "Get aggregate counts and quantities (volume, area) grouped by category, "
-                "storey, or IFC class. Use this to answer quantity / statistics questions."
-            ),
+            "description": "Aggregate counts and quantities (volume, area) grouped by category, storey, or IFC class.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -103,11 +96,9 @@ _TOOLS = [
         "function": {
             "name": "query_by_parameter",
             "description": (
-                "Find elements by any BIM parameter key/value pair. "
-                "Searches the full parameter database — use for material, profile, grade, fire rating, "
-                "structural section, coating, or any other property not covered by filter_elements. "
-                "Supports text matching (contains/eq) and numeric comparisons (gt/lt/gte/lte). "
-                "Also highlights matched elements in the 3D viewer."
+                "Find elements by any BIM parameter key/value — material, profile, grade, fire rating, "
+                "or anything not covered by filter_elements. Text (contains/eq) or numeric (gt/lt/gte/lte) "
+                "match. Highlights matches in the viewer."
             ),
             "parameters": {
                 "type": "object",
@@ -123,12 +114,7 @@ _TOOLS = [
                     "op": {
                         "type": "string",
                         "enum": ["contains", "eq", "gt", "lt", "gte", "lte"],
-                        "description": (
-                            "Comparison operator: "
-                            "contains=partial text match (default), "
-                            "eq=exact text match, "
-                            "gt/lt/gte/lte=numeric comparison using stored numeric value."
-                        ),
+                        "description": "contains=partial text (default), eq=exact text, gt/lt/gte/lte=numeric.",
                     },
                     "category": {
                         "type": "string",
@@ -147,11 +133,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_materials",
-            "description": (
-                "List all distinct materials used in the model with element counts and total volumes. "
-                "Use for questions like 'what materials are in this model?', 'how much concrete is there?', "
-                "'break down volumes by material'."
-            ),
+            "description": "List distinct materials with element counts and total volumes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -168,10 +150,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_profiles",
-            "description": (
-                "List all structural profiles (HEA200, IPE300, etc.) and steel grades (S235, S355, etc.) "
-                "with element counts and volumes. Use for steel structure queries."
-            ),
+            "description": "List structural profiles (HEA200, IPE300, etc.) and steel grades (S235, S355, etc.) with counts and volumes.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -184,13 +163,10 @@ _TOOLS = [
         "function": {
             "name": "estimate_cost",
             "description": (
-                "Apply unit rates to model quantities to produce a rough cost estimate (5D). "
-                "Use when the user gives a rate (e.g. '180 EUR per m3 of concrete', '40 USD per m2 of "
-                "flooring') and asks for a cost, budget, or price estimate. "
-                "Each rate rule matches group names by case-insensitive substring against the "
-                "group_by dimension (e.g. rule match='Concrete' matches a category named 'Concrete Walls'). "
-                "Groups with no matching rule are listed separately so the rate card can be extended — "
-                "always mention them to the user rather than silently omitting them from the total."
+                "Apply unit rates to quantities for a rough cost estimate (5D), e.g. '180 EUR per m3 "
+                "of concrete'. Rate rules match group names by case-insensitive substring (match='Concrete' "
+                "matches 'Concrete Walls'). Unmatched groups are listed separately — always mention them "
+                "rather than dropping them from the total."
             ),
             "parameters": {
                 "type": "object",
@@ -239,10 +215,8 @@ _TOOLS = [
         "function": {
             "name": "get_model_changes",
             "description": (
-                "Compare the current model against a previous version to see what elements were added, "
-                "removed, or modified. Returns counts by category and highlights newly added elements "
-                "in the 3D viewer. Use when the user asks 'what changed?', 'what's new?', "
-                "'compare versions', or 'show added elements'."
+                "Compare the current model against a previous version: elements added/removed/modified, "
+                "counts by category, and newly added elements highlighted in the viewer."
             ),
             "parameters": {
                 "type": "object",
@@ -261,11 +235,8 @@ _TOOLS = [
         "function": {
             "name": "check_data_quality",
             "description": (
-                "Run a BIM data-quality assessment on the current model: a 0-1 quality score plus "
-                "issue breakdowns for unclassified elements, missing geometry, missing names, "
-                "missing storeys, missing materials, and duplicate IDs (with sample element IDs). "
-                "Use when the user asks 'what's wrong with this model?', 'how good is the data?', "
-                "'data quality', or 'QA report'."
+                "BIM data-quality assessment: 0-1 quality score plus issue breakdowns (unclassified, "
+                "missing geometry/names/storeys/materials, duplicate IDs) with sample element IDs."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -274,11 +245,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_parameter_completeness",
-            "description": (
-                "Get the fill-rate (coverage %) of BIM parameters across elements, sorted worst-first. "
-                "Use when the user asks 'which parameters are missing?', 'is fire rating filled in?', "
-                "'how complete is this model's data?', or to find parameters that need cleanup."
-            ),
+            "description": "Fill-rate (coverage %) of BIM parameters across elements, sorted worst-first — use to find parameters needing cleanup.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -298,13 +265,9 @@ _TOOLS = [
         "function": {
             "name": "get_version_history",
             "description": (
-                "Get the version history for the current model's stream: element counts, volume (m3), "
-                "and area (m2) — overall and per category — for every ingested version, ordered oldest "
-                "to newest. Use when the user asks 'how has this model evolved?', 'show version history', "
-                "'what's the trend over versions?', or construction-monitoring questions like "
-                "'is concrete volume growing as planned per pour?' or 'how has structural volume trended "
-                "across versions?'. For comparing two specific versions element-by-element (added/removed/ "
-                "changed), use get_model_changes instead."
+                "Version history for this model's stream: counts, volume, area — overall and per "
+                "category — for every ingested version, oldest to newest. For element-by-element diff "
+                "between two versions, use get_model_changes instead."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -314,11 +277,9 @@ _TOOLS = [
         "function": {
             "name": "get_schedule",
             "description": (
-                "Get construction schedule tasks (with planned/actual dates, status, "
-                "critical-path flag and float/slack days) and their dependencies, and highlight "
-                "the matching tasks' elements in the 3D viewer. Use for 'what's the schedule', "
-                "'what's the critical path', 'what tasks are in progress', 'what milestones are "
-                "coming up'. Returns nothing useful for a model with no imported/generated schedule."
+                "Construction schedule tasks (dates, status, critical-path flag, float/slack) and "
+                "dependencies; highlights matching elements in the viewer. Empty if no schedule was "
+                "imported/generated."
             ),
             "parameters": {
                 "type": "object",
@@ -344,11 +305,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_element_tasks",
-            "description": (
-                "Find which schedule tasks a specific element is linked to. Use for 'what task is "
-                "this element part of', 'when is this being built', or 'is this on the critical "
-                "path' about a specific element."
-            ),
+            "description": "Find which schedule tasks a specific element is linked to.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -366,10 +323,8 @@ _TOOLS = [
         "function": {
             "name": "find_nearby_elements",
             "description": (
-                "Find elements within a radius (in meters) of a reference element or coordinate. "
-                "Use when the user asks 'what's near X?', 'find elements within Nm of...', "
-                "or refers to 'the selected element/object' — use its Speckle ID from the "
-                "Currently Selected Element context as the reference. "
+                "Find elements within a radius (meters) of a reference element. For 'the selected "
+                "element/object', use its Speckle ID from the Currently Selected Element context. "
                 "Only works for elements ingested with SI geometry data."
             ),
             "parameters": {
@@ -397,14 +352,10 @@ _TOOLS = [
         "function": {
             "name": "get_related_elements",
             "description": (
-                "Get elements directly related to a given element via parent/room/space "
-                "references — e.g. a device's host wall, the room/space it's located in, "
-                "or everything hosted by/located in a given element. Use for 'what wall is "
-                "this hosted on?', 'what's in this room?', 'what room is this in?', or similar "
-                "containment/hosting questions. Only reflects relationships captured at ingest "
-                "time (Revit parent/room/space references) — returns nothing for models "
-                "without that data, or where the referenced elements (e.g. Rooms) weren't "
-                "themselves ingested."
+                "Elements directly related via parent/room/space references — e.g. a device's host "
+                "wall, the room it's in, or everything hosted in a given element. One hop only; "
+                "reflects only relationships captured at ingest time (Revit parent/room/space refs) — "
+                "empty if that data, or the referenced elements, weren't ingested."
             ),
             "parameters": {
                 "type": "object",
@@ -423,13 +374,10 @@ _TOOLS = [
         "function": {
             "name": "get_connectivity",
             "description": (
-                "Trace what an element is connected to, possibly through intermediate elements — "
-                "e.g. 'what's connected to this beam', 'trace this duct run', 'what's near this wall "
-                "structurally and physically'. Combines get_related_elements' parent/room/space links, "
-                "real IFC relationships where the model has a usable IFC representation (aggregation, "
-                "spatial containment, physical connections, openings), and geometric bounding-box "
-                "touching — the one signal available for every model regardless of source. Walks "
-                "multiple hops outward, unlike get_related_elements (one hop only)."
+                "Trace what an element connects to, possibly through intermediates — combines "
+                "get_related_elements' links, real IFC relationships (aggregation, spatial containment, "
+                "physical connections, openings) where available, and geometric bounding-box touching "
+                "(works for any model). Multi-hop, unlike get_related_elements (one hop)."
             ),
             "parameters": {
                 "type": "object",
@@ -451,11 +399,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_qa_elements",
-            "description": (
-                "Get the actual elements affected by a specific data-quality issue, for highlighting "
-                "in the 3D viewer. Use after check_data_quality when the user wants to see/select the "
-                "problem elements, e.g. 'show me the elements with no name', 'highlight unclassified elements'."
-            ),
+            "description": "Elements affected by a specific data-quality issue, for viewer highlighting. Use after check_data_quality.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -500,13 +444,9 @@ _TOOLS = [
         "function": {
             "name": "semantic_search",
             "description": (
-                "Find elements by meaning rather than exact text match — describe what you're "
-                "looking for in plain language (e.g. 'fire rated door', 'load bearing column on "
-                "the ground floor') and get back the closest matches, even if the words don't "
-                "literally appear in the element's name or parameters. Prefer this over "
-                "query_by_parameter/filter_elements when you don't know the exact field names or "
-                "wording used in the source model. Requires the model to have been ingested after "
-                "semantic search existed — an empty result means no embeddings, not no matches."
+                "Find elements by meaning, not exact text (e.g. 'fire rated door'). Prefer over "
+                "query_by_parameter/filter_elements when the exact field names/wording are unknown. "
+                "An empty result may mean no embeddings were generated, not no matches."
             ),
             "parameters": {
                 "type": "object",
@@ -523,10 +463,9 @@ _TOOLS = [
         "function": {
             "name": "check_clashes",
             "description": (
-                "Run geometric clash detection between two categories/IFC classes in this model "
-                "(e.g. structural columns vs walls) and highlight the colliding elements in the 3D "
-                "viewer. Use when the user asks to 'check for clashes', 'find collisions', or "
-                "'does X clash with Y'. Can take up to a minute or more for a large model."
+                "Geometric clash detection between two categories/IFC classes in this model "
+                "(e.g. columns vs walls); highlights collisions in the viewer. Can take a minute+ on "
+                "large models."
             ),
             "parameters": {
                 "type": "object",
@@ -551,12 +490,9 @@ _TOOLS = [
         "function": {
             "name": "check_federated_clashes",
             "description": (
-                "Run geometric clash detection between this model and a DIFFERENT model (e.g. "
-                "structure vs architecture, cross-discipline coordination) — unlike check_clashes, "
-                "which only compares categories within the current model. Use when the user asks to "
-                "check clashes 'against' or 'with' another model/discipline. Only elements from the "
-                "current model can be highlighted in the 3D viewer; the other model's clashing "
-                "elements are reported by name/id in the text only. Can take up to a minute or more."
+                "Geometric clash detection between this model and a DIFFERENT model (cross-discipline) "
+                "— unlike check_clashes (same-model only). Only this model's elements highlight in the "
+                "viewer; the other model's are reported by name/id only. Can take a minute+."
             ),
             "parameters": {
                 "type": "object",
@@ -581,11 +517,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "list_ids_specs",
-            "description": (
-                "List IDS (buildingSMART Information Delivery Specification) compliance specs "
-                "already uploaded for this model, via the IDS Check panel. Use before "
-                "check_ids_compliance to find a spec_id."
-            ),
+            "description": "List IDS (buildingSMART Information Delivery Specification) compliance specs uploaded for this model. Use before check_ids_compliance to find a spec_id.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -593,12 +525,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "check_ids_compliance",
-            "description": (
-                "Run an IDS compliance check against a previously uploaded spec and report pass/"
-                "fail per requirement. Use when the user asks to 'check IDS compliance' or "
-                "'validate against the spec'. Find spec_id via list_ids_specs first if not already "
-                "known. Can take up to a minute or more for a large model."
-            ),
+            "description": "Run an IDS compliance check against an uploaded spec, pass/fail per requirement. Get spec_id via list_ids_specs first. Can take a minute+ on large models.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -613,15 +540,10 @@ _TOOLS = [
         "function": {
             "name": "list_documents",
             "description": (
-                "List CDE (Common Data Environment) documents for this project — drawings, specs, "
-                "and other files with their WIP/Shared/Published/Archived status, approval gates, "
-                "ISO 19650 suitability code and filename-naming-convention compliance, folder, and "
-                "any linked element. Use when the user asks 'what documents are there', 'is X "
-                "approved', 'what's in WIP', 'what's in the Structural folder', or 'what documents "
-                "cover this element'. Read-only — approving/moving documents happens in the "
-                "Documents panel, not here. WIP visibility respects the asker's organization the "
-                "same way the Documents panel does — a logged-in user only sees their own org's WIP "
-                "(plus unscoped WIP); an anonymous/share-link session sees only unscoped WIP."
+                "List CDE documents (drawings, specs, files) with WIP/Shared/Published/Archived status, "
+                "approval gates, ISO 19650 suitability/naming compliance, folder, and linked element. "
+                "Read-only. WIP visibility is org-scoped: logged-in users see their org's WIP (+ "
+                "unscoped); anonymous/share sessions see only unscoped WIP."
             ),
             "parameters": {
                 "type": "object",
@@ -662,14 +584,10 @@ _TOOLS = [
         "function": {
             "name": "search_document_content",
             "description": (
-                "Search INSIDE the text of this project's documents (PDF/DOCX/XLSX) — not just "
-                "filenames/status, unlike list_documents. Use when the user asks what a document "
-                "says or contains, e.g. 'what does the fire safety report say about door widths' "
-                "or 'find the spec that mentions concrete grade'. Returns matching passages with "
-                "their source filename (and page number, for PDFs). Only PDF/DOCX/XLSX are "
-                "indexed (no OCR, so scanned/image-only PDFs won't match); a document uploaded "
-                "moments ago may not be indexed yet — indexing runs in the background after "
-                "upload. WIP visibility respects the asker's organization, same as list_documents."
+                "Search inside document text (PDF/DOCX/XLSX), not just filenames/status like "
+                "list_documents. Returns matching passages with filename (+ page for PDFs). No OCR "
+                "(scanned PDFs won't match); recent uploads may not be indexed yet. Same org-scoped "
+                "WIP visibility as list_documents."
             ),
             "parameters": {
                 "type": "object",
@@ -705,12 +623,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "create_topic",
-            "description": (
-                "Log a new BCF coordination topic (issue) on this model — e.g. to record a clash "
-                "or QA finding as a trackable issue. Use after check_clashes/check_data_quality "
-                "when the user wants to log what was found, or whenever they ask to 'create an "
-                "issue' / 'log this'."
-            ),
+            "description": "Log a new BCF coordination topic (issue) on this model, e.g. to record a clash or QA finding as trackable.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -771,12 +684,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_notifications",
-            "description": (
-                "Get the current user's notifications (document uploads, BCF issue assignments, "
-                "etc.) for this project. Use for 'do I have any notifications', 'what's new for me', "
-                "'any unread issues assigned to me'. Only works for a logged-in user — tell the user "
-                "to log in if this reports it's unavailable."
-            ),
+            "description": "Current user's notifications (document uploads, BCF assignments, etc.). Logged-in users only — tell the user to log in if unavailable.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -792,21 +700,14 @@ _TOOLS = [
         "function": {
             "name": "generate_report",
             "description": (
-                "Generate one of converge's standard BIM reports as a real .docx/.xlsx/.pdf file and "
-                "upload it into this project's CDE (Nextcloud) WIP folder. Use when the user asks to "
-                "'generate a report', 'export the bill of materials', 'give me a QA report', 'create "
-                "a clash report', 'list all the concrete beams', etc. Report types: bom (Bill of "
-                "Materials, quantities by material), qa (Data Quality Report), clashes (Clash "
-                "Detection Report — needs rules_json), ids (IDS Compliance Report — needs spec_id), "
-                "documents (CDE Document Register), rooms (Room/Space Schedule), schedule (4D "
-                "Schedule Report), changes (Model Change Report — needs compared_model_id), bcf (BCF "
-                "Coordination Report), anomalies (volume/area outlier report), concrete_beams / "
-                "steel_beams (IfcBeam elements split by material), walls, columns, floors, "
-                "foundations, doors, windows (element schedules for that category), model_summary "
-                "(one-page project fact sheet — source/author/quantities/category breakdowns; no 3D "
-                "view when generated from chat, that needs the dashboard's own Generate Report button). "
-                "Only works for a logged-in user with a project role, since it uploads a document — "
-                "tell the user to log in if this reports it's unavailable."
+                "Generate a converge report (.docx/.xlsx/.pdf) and upload it to this project's CDE WIP "
+                "folder. Types: bom (bill of materials, by material), qa (data quality), clashes (needs "
+                "rules_json), ids (IDS compliance, needs spec_id), documents (CDE register), rooms, "
+                "schedule (4D), changes (needs compared_model_id), bcf, anomalies (volume/area "
+                "outliers), concrete_beams/steel_beams (IfcBeam split by material), "
+                "walls/columns/floors/foundations/doors/windows (schedules by category), model_summary "
+                "(fact sheet — no 3D view via chat, use the dashboard's own button for that). Logged-in "
+                "user with a project role only — tell the user to log in if unavailable."
             ),
             "parameters": {
                 "type": "object",
@@ -852,6 +753,13 @@ def _get_url_and_headers(provider: str, api_key: str, base_url: str) -> tuple[st
         }
     if provider == "mistral":
         return "https://api.mistral.ai/v1/chat/completions", {
+            "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+        }
+    if provider == "groq":
+        # Groq's API is OpenAI-compatible (same chat/completions + tools wire
+        # shape), so no separate _call_llm/_call_llm_stream branch is needed —
+        # only the endpoint/auth differ, same as openai/mistral above.
+        return "https://api.groq.com/openai/v1/chat/completions", {
             "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
         }
     if provider == "ollama":
@@ -2479,41 +2387,14 @@ def _build_static_model_context(conn, model_id: str) -> str:
 # rebuilt on every call, since _build_system_prompt used to reconstruct this
 # same literal string on every single chat turn for no reason.
 _TOOLS_AND_REASONING_TRAILER = (
-        "\n## Tools Available\n"
-        "- filter_elements: highlight elements by category, ifc_class, storey, name\n"
-        "- get_summary: aggregate counts/volumes grouped by category, storey, or ifc_class\n"
-        "- query_by_parameter: find elements by any parameter key/value; supports numeric ops (gt/lt/gte/lte)\n"
-        "- get_materials: list all materials with element counts and volumes\n"
-        "- get_profiles: list structural profiles and steel grades\n"
-        "- estimate_cost: apply user-supplied unit rates to quantities for a rough cost/budget estimate\n"
-        "- get_model_changes: diff current model against another version (show added/removed/changed)\n"
-        "- check_data_quality: BIM QA score + issues (missing names/storeys/materials/geometry, duplicates)\n"
-        "- get_parameter_completeness: fill-rate % per parameter, worst-covered first\n"
-        "- get_version_history: element-count/volume/area trend (overall + per category) across all ingested versions of this model\n"
-        "- get_schedule: construction schedule tasks (status, critical path, float) and dependencies\n"
-        "- get_element_tasks: which schedule tasks a specific element is linked to\n"
-        "- find_nearby_elements: find elements within a radius (meters) of a reference element or coordinate\n"
-        "- get_related_elements: parent/room/space relationships (host wall, room contents, etc.) for an element\n"
-        "- get_connectivity: multi-hop connectivity graph for an element — structural/IFC relationships plus "
-        "physical touching, e.g. 'trace this duct run' or 'what's connected to this beam'\n"
-        "- get_qa_elements: drill into a specific data-quality issue and highlight the affected elements\n"
-        "- get_element_details: full details (geometry, all parameters) for one specific element\n"
-        "- semantic_search: find elements by meaning/description rather than exact text match\n"
-        "- check_clashes: geometric clash detection between two categories/IFC classes within this model (can be slow)\n"
-        "- check_federated_clashes: geometric clash detection between this model and a different model (can be slow)\n"
-        "- list_ids_specs / check_ids_compliance: buildingSMART IDS spec compliance checking (can be slow)\n"
-        "- list_documents / get_document_status: CDE document status, approval gates, suitability code, "
-        "folder, and linked element (read-only, org-scoped WIP visibility)\n"
-        "- search_document_content: search INSIDE document text (PDF/DOCX/XLSX), not just "
-        "filename/status — use for 'what does X say about Y' (org-scoped WIP visibility)\n"
-        "- list_topics / get_topic / create_topic / update_topic / list_topic_comments / add_topic_comment: "
-        "BCF coordination issues — log/track/discuss findings as trackable topics\n"
-        "- get_notifications: the current logged-in user's notifications for this project (unavailable when anonymous)\n"
-        "- generate_report: generate a standard BIM report (bom/qa/clashes/ids/documents/rooms/schedule/"
-        "changes/bcf/anomalies/concrete_beams/steel_beams/walls/columns/floors/foundations/doors/"
-        "windows/model_summary) as a real .docx/.xlsx/.pdf and upload it to this project's CDE "
-        "(requires login + a project role)\n\n"
-        "## Reasoning Guidance\n"
+        # No tool-by-tool listing here — every tool's name/params/description
+        # already reaches the model via the API's own `tools` array (see
+        # _TOOLS above), which every provider's chat/completions endpoint
+        # feeds it directly. Restating them in prose here was pure duplicate
+        # token cost (~700 tokens on every single call) for zero added
+        # information — removed when trimming for tight free-tier TPM budgets
+        # (see chat.py's groq default-model comment).
+        "\n## Reasoning Guidance\n"
         "Before calling tools, briefly state your plan in one sentence (e.g. 'I'll filter beams by "
         "storey then get their volume.'). For multi-step queries, chain tools — each result informs the next. "
         "If a filter returns 0 results, use the fallback information to suggest alternatives.\n"

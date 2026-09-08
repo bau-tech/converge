@@ -12,6 +12,26 @@ router = APIRouter(tags=["chat"])
 logger = logging.getLogger(__name__)
 
 
+def _friendly_error_message(exc: Exception) -> str:
+    """Translate a raw provider-call exception into something a chat user can
+    actually act on, instead of a dumped `HTTPError: 500 Server Error: ...`.
+    The full exception/traceback is still logged server-side by callers —
+    this only changes what reaches the chat UI.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return ("The AI provider is rate-limiting requests right now (no quota left this minute). "
+                "Wait a moment and try again, or ask an admin to check the provider account's plan/billing.")
+    if status == 403:
+        return ("The AI provider rejected this request — the configured model isn't available on the "
+                "current subscription tier. Ask an admin to check the provider account's plan or pick a different model.")
+    if status == 401:
+        return "The AI provider rejected the API key. Ask an admin to check the configured API key."
+    if status is not None and status >= 500:
+        return "The AI provider is temporarily unavailable. Please try again in a moment."
+    return f"{type(exc).__name__}: {exc}"
+
+
 class ChatRequest(BaseModel):
     message: str
     model_id: str | None = None   # normalizer model UUID (bim_models.model_id)
@@ -22,6 +42,7 @@ class ChatRequest(BaseModel):
     lmstudio_config: dict | None = None
     mistral_config: dict | None = None
     anthropic_config: dict | None = None
+    groq_config: dict | None = None
     model_context: dict | None = None  # optional frontend-supplied context (families, phases, worksets, etc.)
 
 
@@ -43,12 +64,26 @@ def _resolve_provider(request: ChatRequest) -> tuple[str, str, str, str]:
     elif provider == "mistral":
         cfg = request.mistral_config or {}
         api_key = cfg.get("apiKey") or os.getenv("MISTRAL_API_KEY", "")
-        model_name = cfg.get("model", "mistral-large-latest")
+        model_name = cfg.get("model", "mistral-small-latest")
         base_url = ""
     elif provider == "anthropic":
         cfg = request.anthropic_config or {}
         api_key = cfg.get("apiKey") or os.getenv("ANTHROPIC_API_KEY", "")
         model_name = cfg.get("model", "claude-sonnet-5")
+        base_url = ""
+    elif provider == "groq":
+        cfg = request.groq_config or {}
+        api_key = cfg.get("apiKey") or os.getenv("GROQ_API_KEY", "")
+        # 20b over 120b: measured identical account-level free-tier TPM cap
+        # (8000 tokens/min, flat across models on this account — NOT raised by
+        # picking a smaller model) but 20b's reasoning is less verbose, using
+        # somewhat fewer completion tokens per call. Doesn't fix the ceiling —
+        # this app's 33-tool schema alone costs ~4300 prompt tokens per call,
+        # and one chat turn needs 2 calls (tool decision + answer synthesis),
+        # so ~8600+ tokens/turn structurally exceeds an 8000 TPM free tier
+        # regardless of model. A real fix needs a paid Groq tier or trimming
+        # the tools payload, not a different free-tier model.
+        model_name = cfg.get("model", "openai/gpt-oss-20b")
         base_url = ""
     elif provider == "ollama":
         cfg = request.ollama_config or {}
@@ -102,7 +137,7 @@ async def chat(request: ChatRequest, user: CurrentUser | None = Depends(get_curr
         return result
     except Exception as exc:
         logger.error("Chat agent error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=_friendly_error_message(exc))
     finally:
         release_conn(conn)
 
@@ -155,7 +190,7 @@ async def chat_stream(request: ChatRequest, user: CurrentUser | None = Depends(g
             tb_tail = " | ".join(
                 l.strip() for l in tb.splitlines() if l.strip() and not l.strip().startswith("Traceback")
             )[-300:]
-            yield f"data: {json.dumps({'type': 'error', 'message': f'{type(exc).__name__}: {exc}', 'detail': tb_tail})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': _friendly_error_message(exc), 'detail': tb_tail})}\n\n"
         finally:
             release_conn(conn)
 
