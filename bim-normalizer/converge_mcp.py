@@ -3064,11 +3064,16 @@ def speckle_set_overrides(model_id: str, overrides_json: str) -> str:
     if not isinstance(items, list):
         return "overrides_json must be a JSON array."
 
-    resp = _requests_with_retry("POST", 
-        f"{_NORMALIZER_URL}/models/{model_id}/overrides",
-        json=items,
-        timeout=30,
-    )
+    # POST /overrides requires a logged-in dashboard user (see routers/overrides.py's
+    # Depends(require_login)) — unlike speckle_list_overrides' GET above, which
+    # doesn't. _requests_with_retry has no session/cookie handling at all, so it
+    # was hitting this 401 on every call regardless of user/role; _dashboard_request
+    # (same helper the document tools use) carries the authenticated session and
+    # transparently logs in on a 401, same as speckle_list_notifications below.
+    try:
+        resp = _dashboard_request("POST", f"/models/{model_id}/overrides", json=items, timeout=30)
+    except RuntimeError as exc:
+        return str(exc)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     if resp.status_code == 422:
@@ -3089,10 +3094,11 @@ def speckle_apply_overrides(model_id: str) -> str:
     → use after: speckle_set_overrides(model_id, ...)
     → verify with: speckle_query_elements(model_id)
     """
-    resp = _requests_with_retry("POST", 
-        f"{_NORMALIZER_URL}/models/{model_id}/overrides/apply",
-        timeout=30,
-    )
+    # Same auth requirement as speckle_set_overrides above — see its comment.
+    try:
+        resp = _dashboard_request("POST", f"/models/{model_id}/overrides/apply", timeout=30)
+    except RuntimeError as exc:
+        return str(exc)
     if resp.status_code == 404:
         return f"Model {model_id} not found. Use speckle_list_ingested() to verify."
     resp.raise_for_status()
