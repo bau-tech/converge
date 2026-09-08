@@ -132,16 +132,26 @@ def _plausible_length_factor(bbox_min: list, bbox_max: list, units: str) -> floa
     coordinates silently produced volumes/areas ~1e9x/1e6x too small instead
     of erroring.
 
-    A real building element's raw bbox diagonal is never plausible as
-    millimetres if it's already under ~1 in its raw scale (a "1mm door"
-    doesn't exist), so: if the declared unit's factor is not already 1.0
-    (metres) but the RAW, unconverted diagonal already falls in a plausible
-    metre range, trust the raw scale over the declared unit."""
+    Trust the DECLARED unit's conversion first, and only fall back to
+    assuming the raw scale is already metres if that conversion is itself
+    implausible. The naive version of this guard (raw diagonal alone decides
+    whether to trust the declared unit) over-fires on feet: a steel beam
+    correctly tagged "ft" with a raw diagonal of ~27 lands in the same
+    plausible-metres window (0.01-300) as an actual ~27m object purely by
+    coincidence, so the guard discarded the correct 0.3048 factor and
+    returned 1.0 instead — inflating that beam's volume by 1/0.3048³ ≈ 35x.
+    The mm-mistagged-door case above is a ~1000x unit-factor error and fails
+    the *converted* check hard (0.47 raw * 0.001 = 0.00047, nowhere near
+    plausible), so it still correctly falls through to the raw-diagonal
+    fallback; feet is only ~3.3x off and easily passes the converted check,
+    so it no longer gets misclassified as an mm-style tagging error."""
     declared_factor = length_to_m(1.0, units)
     if declared_factor == 1.0:
         return declared_factor
     raw_diag = sum((bbox_max[i] - bbox_min[i]) ** 2 for i in range(3)) ** 0.5
     lo, hi = _PLAUSIBLE_BBOX_DIAGONAL_M
+    if lo <= raw_diag * declared_factor <= hi:
+        return declared_factor
     if lo <= raw_diag <= hi:
         return 1.0
     return declared_factor
