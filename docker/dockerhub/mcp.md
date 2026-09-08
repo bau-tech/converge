@@ -4,13 +4,13 @@
 
 # Converge MCP Server
 
-The AI-copilot entry point of **Converge** — a BIM coordination, analytics, and collaboration platform built on [Speckle](https://speckle.systems/). This image runs a [FastMCP](https://github.com/jlowin/fastmcp) server (85 tools, 2 resources) so Claude Code or Claude.ai can query and reason over your BIM data in natural language, backed by an in-memory `ifcopenshell`/`ifc5d` IFC session plus a thin REST/GraphQL client over the rest of the stack.
+The AI-copilot entry point of **Converge** — a BIM coordination, analytics, and collaboration platform built on [Speckle](https://speckle.systems/). This image runs a [FastMCP](https://github.com/jlowin/fastmcp) server (86 tools, 2 resources) so Claude Code or Claude.ai can query and reason over your BIM data in natural language, backed by an in-memory `ifcopenshell`/`ifc5d` IFC session plus a thin REST/GraphQL client over the rest of the stack.
 
 Like `converge-bcf-server`, this is a deliberately slim image split out of the main normalizer build — `converge_mcp.py` never touches `fastapi`, `psycopg2`, `specklepy`, `ifctester`, `ifcclash`, `numpy`, `fastembed`, `ezdxf`, `cairosvg`, `python-docx`, `openpyxl`, or `reportlab`, so it ships its own minimal `requirements-converge-mcp.txt` instead of inheriting the ~800MB normalizer image.
 
 ## What's inside
 
-- **85 MCP tools + 2 resources** covering: element search and detail lookup, quantities/cost estimation, clash-check results, BCF issue topics/comments, IDS compliance checks, document read/search (including local PDF text extraction via `poppler-utils`), Speckle project/model/version management, schedule/status queries, and semantic search
+- **86 MCP tools + 2 resources** covering: element search and detail lookup, quantities/cost estimation, clash-check results, BCF issue topics/comments, IDS compliance checks, document read/search (including local PDF text extraction via `poppler-utils`), Speckle project/model/version management, schedule/status queries, and semantic search
 - **In-memory IFC editing session** — load, inspect, edit, and save IFC files directly via `ifcopenshell`/`ifc5d`, independent of the normalizer's PostgreSQL-backed data
 - **Two transports** — stdio for local Claude Code use, or streamable-HTTP (this image's default, port `8003`) for remote/shared access
 - **Speckle-native tools** — talks to Speckle servers directly via `specklepy`/GraphQL for stream, commit, and object-level queries, not just through the normalizer's cached schema

@@ -536,7 +536,7 @@ converge/
 ├── bim-normalizer/
 │   ├── main.py                        FastAPI app: lifespan, middleware, /health, router wiring
 │   ├── job_registry.py                UUID validation + Content-Disposition header helpers shared by routers (job state itself lives in db/jobs.py, not here)
-│   ├── converge_mcp.py                MCP server (85 tools + 2 resources)
+│   ├── converge_mcp.py                MCP server (86 tools + 2 resources)
 │   ├── bcf_server.py                  BCF-API 2.1/3.0 server (separate process/container)
 │   ├── clash_check.py                 Clash detection via ifcclash
 │   ├── ids_check.py                   IDS validation via ifctester

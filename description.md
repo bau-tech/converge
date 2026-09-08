@@ -2,13 +2,13 @@
 
 ## English
 
-Converge — BIM coordination and analytics dashboard that ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper via Speckle, normalizing them into a unified schema for 3D visualization, clash detection, IDS compliance checking, BCF issue tracking, and ISO 19650-aligned document management backed by a dedicated Nextcloud CDE (WIP → Shared → Published → Archived, with an app-enforced approval gate). It closes the loop between design and coordination with 4D schedule playback, 5D quantity/cost takeoff, cross-version model diffing, and an AI copilot (via MCP) that lets you query and reason over your BIM data in natural language.
+Converge — BIM coordination and analytics dashboard that ingests models from Revit, Tekla, IFC, Navisworks, Blender, Rhino, and Grasshopper via Speckle, normalizing them into a unified schema for 3D visualization, clash detection, IDS compliance checking, BCF issue tracking, and ISO 19650-aligned document management backed by a dedicated Nextcloud CDE (WIP → Shared → Published → Archived, with an app-enforced approval gate). It closes the loop between design and coordination with 4D schedule playback, 5D quantity/cost takeoff, cross-version model diffing, and an AI copilot — a built-in multi-provider chat assistant plus an MCP server for Claude — that lets you query and reason over your BIM data in natural language.
 
 ## Deutsch
 
 **Kompakt (2 Sätze):**
 
-Converge ist ein BIM-Koordinations- und Analyse-Dashboard, das Modelle aus Revit, Tekla, IFC, Navisworks, Blender, Rhino und Grasshopper über Speckle zusammenführt und in ein einheitliches Schema für 3D-Visualisierung, Kollisionsprüfung, IDS-Konformitätsprüfung, BCF-Issue-Tracking sowie ISO-19650-konformes Dokumentenmanagement (eigene Nextcloud-basierte CDE mit Freigabe-Workflow: In Bearbeitung → Geteilt → Veröffentlicht → Archiviert) normalisiert. Dazu kommen 4D-Bauablaufsimulation, 5D-Mengen- und Kostenermittlung, versionsübergreifender Modellvergleich sowie ein KI-Assistent (via MCP) für natürlichsprachliche Abfragen der BIM-Daten.
+Converge ist ein BIM-Koordinations- und Analyse-Dashboard, das Modelle aus Revit, Tekla, IFC, Navisworks, Blender, Rhino und Grasshopper über Speckle zusammenführt und in ein einheitliches Schema für 3D-Visualisierung, Kollisionsprüfung, IDS-Konformitätsprüfung, BCF-Issue-Tracking sowie ISO-19650-konformes Dokumentenmanagement (eigene Nextcloud-basierte CDE mit Freigabe-Workflow: In Bearbeitung → Geteilt → Veröffentlicht → Archiviert) normalisiert. Dazu kommen 4D-Bauablaufsimulation, 5D-Mengen- und Kostenermittlung, versionsübergreifender Modellvergleich sowie ein KI-Assistent — ein integrierter Chat-Assistent mit mehreren LLM-Anbietern plus ein MCP-Server für Claude — für natürlichsprachliche Abfragen der BIM-Daten.
 
 **Noch kompakter (1 Satz):**
 

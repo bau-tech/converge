@@ -20,7 +20,7 @@ This image is a React + Vite single-page app, built once and served by Nginx. It
 - **Documents (ISO 19650 CDE)** — WIP → Shared → Published → Archived, app-enforced reviewed → approved → verified gate, purpose-of-issue suitability codes, advisory filename-convention checking, org-scoped WIP visibility for multi-contractor projects, drag-and-drop folders, bulk move/delete
 - **Notifications** — in-app + email feed for uploads and status changes
 - **Charts & analytics** (ECharts) — model composition, clash trends, schedule status
-- **AI Assistant** — chat over your BIM data (OpenAI/Mistral/Ollama/LM Studio), semantic search over documents and elements
+- **AI Assistant** — chat over your BIM data (OpenAI/Anthropic/Mistral/Groq/Ollama/LM Studio), semantic search over documents and elements
 - **Auth** — dashboard login, session-based
 
 ## Configuration
@@ -32,7 +32,7 @@ This image bakes in no secrets or server URLs at build time. Instead, an Nginx `
 | `VITE_SPECKLE_SERVER` / `VITE_SPECKLE_TOKEN` | Speckle server URL + personal access token |
 | `VITE_EXTRA_SPECKLE_SERVERS` | Additional Speckle servers, for multi-server projects |
 | `NORMALIZER_URL` / `BCF_SERVER_URL` | Internal proxy targets for `bim-normalizer` and `bcf-server` |
-| `VITE_OLLAMA_BASE_URL` / `VITE_LMSTUDIO_BASE_URL` / `VITE_MISTRAL_API_KEY` | Optional local/hosted LLM backends for the AI Assistant |
+| `VITE_OLLAMA_BASE_URL` / `VITE_LMSTUDIO_BASE_URL` / `VITE_MISTRAL_API_KEY` / `VITE_ANTHROPIC_API_KEY` / `VITE_GROQ_API_KEY` | Optional local/hosted LLM backends for the AI Assistant |
 | `VITE_SHARE_LINK_MODE` | Controls how public share links expose model data |
 
 ## Ports

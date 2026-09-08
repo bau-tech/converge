@@ -29,7 +29,7 @@ const features = [
   },
   {
     title: 'AI-assisted BIM reasoning',
-    description: 'MCP integration lets your BIM data be queried, summarized and reasoned over in natural language.',
+    description: 'A built-in chat assistant (OpenAI, Anthropic, Mistral, Groq, Ollama, LM Studio) with semantic search, plus an MCP server for Claude — query and reason over your BIM data in natural language.',
     icon: Sparkles,
   },
 ]

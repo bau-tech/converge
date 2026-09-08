@@ -30,7 +30,7 @@ Full variable list in [`.env.example`](https://github.com/bau-tech/converge/blob
 | `SPECKLE_SERVER_URL` / `SPECKLE_TOKEN` | Speckle server to ingest from |
 | `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASS` / `PG_NAME` | PostgreSQL connection |
 | `NEXTCLOUD_URL` / `NEXTCLOUD_ADMIN_USER` / `NEXTCLOUD_ADMIN_PASSWORD` | Nextcloud CDE backend for Documents |
-| `OPENAI_API_KEY` / `MISTRAL_API_KEY` | Optional hosted LLM backends for the AI Assistant |
+| `OPENAI_API_KEY` / `MISTRAL_API_KEY` / `ANTHROPIC_API_KEY` / `GROQ_API_KEY` | Optional hosted LLM backends for the AI Assistant |
 | `BCF_SERVER_URL` | Internal URL to reach `bcf-server` for coordination reports |
 | `AUTO_SYNC_SCAN_INTERVAL_S` | How often to poll Speckle for new commits |
 | `DASHBOARD_SESSION_SECRET` | Session signing secret for dashboard auth |
