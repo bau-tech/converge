@@ -9,29 +9,26 @@ import { COLOR_SCHEMES } from './AdaptiveCharts'
 import { useHeaderHeight } from '../utils/useHeaderHeight'
 
 const MOBILE_BREAKPOINT = 768
-// iPhone 7 reference viewport (375x667 CSS px) — mobile panel heights are
-// fixed px fractions of this, not vh. vh is unreliable in mobile Safari: it's
-// computed against the *largest* possible viewport (address bar collapsed),
-// so 50vh measured while the address bar is showing is taller than the
-// visible area, and the value jumps as the address bar shows/hides on
-// scroll. A fixed px height tied to a real device viewport doesn't move.
-const MOBILE_VIEWPORT_HEIGHT = 667
-// Sized so the viewer plus one full chart/widget panel both fit within one
-// iPhone 7 screen with (near-)zero scrolling: measured overhead above the
-// viewer (header incl. collapsed Stats accordion + the mobile layout's own
-// top padding) is 137px, plus an 8px gap between the two panels, leaving
-// ~522px to split.
-//
-// MOBILE_CHART_HEIGHT can't go much below ~240 — a vertical bar chart with
-// rotated category labels (e.g. "Elements by Level") reserves a fixed ~110px
-// for axis/label chrome (prepareBarOption's `grid.top`/`grid.bottom` in
-// AdaptiveCharts.jsx) regardless of container size, so anything shorter
-// leaves too little room for the bars themselves — tried 200px first and it
-// rendered as illegible squashed bars with overlapping axis text, which
-// defeats the point of fitting it on screen at all. 240 leaves a legible
-// ~100px plot area. The viewer gets the remaining budget.
-const MOBILE_VIEWER_HEIGHT = 280
-const MOBILE_CHART_HEIGHT = 240
+// A vertical bar chart with rotated category labels (e.g. "Elements by
+// Level") reserves a fixed ~110px for axis/label chrome (prepareBarOption's
+// `grid.top`/`grid.bottom` in AdaptiveCharts.jsx) regardless of container
+// size, so anything shorter than this leaves too little room for the bars
+// themselves — 200px was tried first and rendered as illegible squashed bars
+// with overlapping axis text. 240 leaves a legible ~100px plot area. This
+// floor is device-independent (it's about chart chrome, not screen size).
+const MOBILE_MIN_CHART_HEIGHT = 240
+// Viewer/chart height split, as a ratio rather than a fixed px pair: on an
+// iPhone 7 (667px viewport), fitting the viewer plus one full chart panel on
+// screen with (near-)zero scrolling landed on 280/240 once header + gap
+// overhead was subtracted. Keeping that as a ratio (rather than reusing the
+// raw 280/240 px on every phone) lets useMobileViewport's real measured
+// height below scale the same "viewer + one chart, no scrolling" fit to any
+// device — an iPhone 11's taller screen gets a proportionally taller viewer
+// and chart instead of the iPhone-7 pixel count plus dead space.
+const MOBILE_VIEWER_HEIGHT_RATIO = 280 / (280 + 240)
+// Gap between the sticky viewer and the first chart panel (Tailwind gap-2
+// on the flex-col container in the mobile render branch below).
+const MOBILE_PANEL_GAP = 8
 // Bumped v4 -> v5 to force everyone onto the new compact default sizing below
 // (viewer + 4 charts + a table all fit on one screen without scrolling).
 //
@@ -135,16 +132,36 @@ function calcColWidth(containerWidthPx) {
     return (containerWidthPx - GRID_MARGIN * (COLS - 1) - GRID_CONTAINER_PADDING * 2) / COLS
 }
 
-function useIsMobile() {
-    const [isMobile, setIsMobile] = useState(
-        () => typeof window !== 'undefined' && window.innerWidth < MOBILE_BREAKPOINT
+// Tracks the mobile breakpoint plus the real visible viewport height, so
+// mobile panel sizing (MOBILE_MIN_CHART_HEIGHT/MOBILE_VIEWER_HEIGHT_RATIO
+// above) fits whatever phone this actually is instead of one hardcoded
+// pixel pair tuned for a single device.
+//
+// Height is recaptured only when width changes, not on every resize: mobile
+// Safari fires a resize event when its address-bar chrome shows/hides on
+// scroll, which changes window.innerHeight but not innerWidth. Reacting to
+// that would resize panels mid-scroll. The chrome-visible height is also the
+// *smaller* of the two states, so measuring against it is the conservative
+// choice — panels sized to fit with the chrome showing still fit (with a
+// little extra breathing room, never an overflow) once it hides.
+function measureViewport() {
+    return {
+        width: window.innerWidth,
+        isMobile: window.innerWidth < MOBILE_BREAKPOINT,
+        height: window.visualViewport?.height ?? window.innerHeight,
+    }
+}
+
+function useMobileViewport() {
+    const [state, setState] = useState(
+        () => (typeof window === 'undefined' ? { width: 0, isMobile: false, height: 0 } : measureViewport())
     )
     useEffect(() => {
-        const fn = () => setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+        const fn = () => setState(prev => (window.innerWidth === prev.width ? prev : measureViewport()))
         window.addEventListener('resize', fn)
         return () => window.removeEventListener('resize', fn)
     }, [])
-    return isMobile
+    return state
 }
 
 function loadSavedLayout() {
@@ -359,8 +376,19 @@ const DEFAULT_CHART_SETTINGS = {
 // protects against everything else (mobile-nav toggles, search text,
 // unrelated tooltips) that has zero business rebuilding this whole grid.
 export const GridDashboard = memo(function GridDashboard({ panels, renderPanel, onClosePanel, darkMode = true, readOnly = false }) {
-    const isMobile = useIsMobile()
+    const { isMobile, height: viewportHeight } = useMobileViewport()
     const headerHeight = useHeaderHeight()
+    // Budget the real viewport between the sticky viewer and one full
+    // chart/widget panel below it (see MOBILE_VIEWER_HEIGHT_RATIO above) so
+    // both fit on screen with (near-)zero scrolling on whatever phone this
+    // is. Falls back to the iPhone-7-tuned 280/240 budget until headerHeight
+    // (measured via ResizeObserver, see useHeaderHeight) reports its first
+    // real value, to avoid a flash of an oversized viewer at mount.
+    const mobileAvailableHeight = headerHeight > 0
+        ? Math.max(MOBILE_MIN_CHART_HEIGHT, viewportHeight - headerHeight - PIN_TOP_GAP - MOBILE_PANEL_GAP)
+        : 280 + 240
+    const mobileViewerHeight = Math.round(mobileAvailableHeight * MOBILE_VIEWER_HEIGHT_RATIO)
+    const mobileChartHeight = Math.max(MOBILE_MIN_CHART_HEIGHT, mobileAvailableHeight - mobileViewerHeight)
     const containerRef = useRef(null)
     const [containerWidth, setContainerWidth] = useState(1200)
     // Square grid units (see the v15->v16 note above calcColWidth): recomputed
@@ -590,14 +618,14 @@ export const GridDashboard = memo(function GridDashboard({ panels, renderPanel, 
                         // Viewer always pins directly below the header on mobile — there's
                         // no per-user toggle here (unlike desktop's Pin/PinOff button);
                         // it's always on for this layout. Viewer and chart/widget panels
-                        // get different fixed heights (not a shared constant) so the
-                        // viewer plus one full chart both fit within the iPhone 7's
-                        // native 667px viewport height with no scrolling needed — see
-                        // MOBILE_VIEWER_HEIGHT/MOBILE_CHART_HEIGHT above.
+                        // get different heights, computed above from the real measured
+                        // viewport (see useMobileViewport/mobileAvailableHeight) so the
+                        // viewer plus one full chart both fit on screen with no scrolling
+                        // needed, on whatever phone this actually is.
                         style={
                             panel.type === 'viewer'
-                                ? { height: MOBILE_VIEWER_HEIGHT, position: 'sticky', top: headerHeight + PIN_TOP_GAP, zIndex: PIN_Z_INDEX }
-                                : { height: MOBILE_CHART_HEIGHT }
+                                ? { height: mobileViewerHeight, position: 'sticky', top: headerHeight + PIN_TOP_GAP, zIndex: PIN_Z_INDEX }
+                                : { height: mobileChartHeight }
                         }
                     >
                         {renderPanel(panel)}
