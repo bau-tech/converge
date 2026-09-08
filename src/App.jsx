@@ -2912,7 +2912,12 @@ function Dashboard({ readOnly = false }) {
                     {showMobileNav && (
                         <motion.div
                             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden"
+                            // text-* here isn't decorative — this subtree is portaled straight to
+                            // document.body (see comment below), skipping the app root's own text
+                            // color. Without an explicit color here, any icon that relies on
+                            // inherited `currentColor` (no class of its own) falls back to the
+                            // browser default black, invisible against this dark sheet.
+                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden text-[var(--speckle-foreground-2)]"
                             onClick={() => setShowMobileNav(false)}
                         >
                             <motion.div
@@ -2966,7 +2971,11 @@ function Dashboard({ readOnly = false }) {
                     {showMobileActions && (
                         <motion.div
                             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden"
+                            // See the model-picker sheet's identical comment above: portaled to
+                            // document.body, so an explicit color is needed here or icon-only
+                            // buttons below (no color class of their own, just `currentColor`)
+                            // render invisible-black instead of inheriting the app's foreground.
+                            className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm sm:hidden text-[var(--speckle-foreground-2)]"
                             onClick={() => setShowMobileActions(false)}
                         >
                             <motion.div
