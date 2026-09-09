@@ -958,11 +958,13 @@ function Dashboard({ readOnly = false }) {
             )
             // BRIDGE_BRANCH_NAME is an internal artifact bim-normalizer auto-creates
             // on the stream (see its speckle/publish.py) — never a real model, so it
-            // must never reach the model picker.
+            // must never reach the model picker. Same for any branch with zero
+            // commits — Speckle auto-creates a "main" branch for every new project
+            // whether or not anything was ever pushed to it, so an empty "main" is
+            // common, not an edge case, and there's nothing to load if selected.
             const branchList = gqlData.stream.branches.items.filter(b => b.name !== BRIDGE_BRANCH_NAME)
-            setModels(branchList)
-
             const branchesWithCommits = branchList.filter(b => b.commits.totalCount > 0)
+            setModels(branchesWithCommits)
             setSelectedVersion(null)
             setVersions([])
             const pending = pendingSelectionRef.current
