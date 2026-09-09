@@ -472,6 +472,24 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
 
     useEffect(() => { loadDocuments() }, [loadDocuments])
 
+    // Editing a document (handleEdit / createNewDocument) opens Collabora in
+    // a separate browser tab — this panel's own tab just sits there with
+    // whatever `documents` it last loaded. Without this, coming back after
+    // a save never re-fetches, so even a fully-synced backend (fresh etag,
+    // fresh thumbnail render) never reaches the UI: nothing ever asks for
+    // it again. Re-running the same load this component already does on
+    // mount whenever the tab regains visibility is the minimal fix — no new
+    // polling loop, just "check when the user plausibly just got back."
+    useEffect(() => {
+        const onVisible = () => { if (document.visibilityState === 'visible') loadDocuments() }
+        document.addEventListener('visibilitychange', onVisible)
+        window.addEventListener('focus', onVisible)
+        return () => {
+            document.removeEventListener('visibilitychange', onVisible)
+            window.removeEventListener('focus', onVisible)
+        }
+    }, [loadDocuments])
+
     // A folderPath from a previous project would be meaningless (or worse,
     // coincidentally valid but wrong) after switching streams.
     useEffect(() => { setFolderPath('') }, [streamId])
