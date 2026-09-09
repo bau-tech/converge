@@ -1959,6 +1959,27 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 />
             )}
 
+        </div>,
+        document.body
+    ) : null
+
+    // BCF/document pin badges get their own portal (same viewer-tracking rect
+    // as overlayJSX, but z-[140] — below the header's z-[150], see App.jsx)
+    // rather than sharing the toolbar's z-[240] tier. They used to live in
+    // that portal too, which put them above the header's own dropdown menus
+    // (e.g. the Model switcher) whenever the badge's screen position happened
+    // to land on top of an open menu — unlike the toolbar/diffbar/federated
+    // bar, these badges have no reason to outrank the header.
+    const pinOverlayJSX = toolbarRect ? createPortal(
+        <div style={{
+            position: 'fixed',
+            top: toolbarRect.top,
+            left: toolbarRect.left,
+            width: toolbarRect.width,
+            height: toolbarRect.height,
+            pointerEvents: 'none',
+            zIndex: 140,
+        }}>
             {/* BCF topics toggle button — top-right corner */}
             {isViewerReady && bcfTopics.length > 0 && (
                 <button
@@ -2064,10 +2085,12 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 </div>
             )}
 
-            {/* All interactive overlays (toolbar, timeline, diffbar, BCF topics)
-                are rendered via the overlayJSX portal below — outside the viewer DOM. */}
+            {/* All interactive overlays (toolbar, timeline, diffbar, BCF/document
+                pin badges) are rendered via the overlayJSX/pinOverlayJSX portals
+                below — outside the viewer DOM. */}
         </div>
         {overlayJSX}
+        {pinOverlayJSX}
         </>
     )
 })
