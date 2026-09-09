@@ -118,7 +118,35 @@ services:
     image: nextcloud:apache
     container_name: nextcloud-cron
     mem_limit: 256m
-    entrypoint: /cron.sh
+    # Overrides the image's own baked-in */5 schedule (plain `entrypoint:
+    # /cron.sh` just execs busybox crond -f — no install step of its own, so
+    # nothing else ever touches that file). Every 1 minute instead of every
+    # 5: measured on this deployment at ~0.25s CPU per cron.php run
+    # (iterating all ~60 registered background jobs, most no-op since
+    # they're not due yet), so 5x the invocations is a negligible cost —
+    # bounds worst-case nextcloud/webhooks.py delivery latency (see its own
+    # docstring) to ~1 min instead of ~5 min. Also speeds up every other
+    # background job sharing this same schedule (preview generation,
+    # trash/versions cleanup, share expiration, ...), not just webhook
+    # delivery.
+    #
+    # Deliberately copied into place at startup rather than bind-mounted
+    # straight at /var/spool/cron/crontabs/www-data: this repo lives on a
+    # CIFS network share (the `terra` mount), which doesn't preserve real
+    # Unix ownership — a file bind-mounted directly from it showed up inside
+    # the container as nobody:nogroup with mangled rwx bits, and busybox
+    # crond silently refuses to load a crontab it doesn't trust the
+    # ownership/permissions of (no error logged either — it just never
+    # fires). Copying onto the container's own writable layer and
+    # re-chown/chmod-ing there sidesteps the share's permission mapping
+    # entirely.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cp /custom-crontab.ro /var/spool/cron/crontabs/www-data
+        chown root:root /var/spool/cron/crontabs/www-data
+        chmod 644 /var/spool/cron/crontabs/www-data
+        exec /cron.sh
     environment:
       TZ: ${TZ:-Europe/Berlin}
     volumes:
@@ -126,6 +154,7 @@ services:
       - nextcloud_data:/var/www/html/data
       - nextcloud_config:/var/www/html/config
       - nextcloud_custom_apps:/var/www/html/custom_apps
+      - ./nextcloud-hooks/crontab-www-data:/custom-crontab.ro:ro
     depends_on:
       nextcloud:
         condition: service_healthy
