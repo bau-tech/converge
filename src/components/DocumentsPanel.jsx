@@ -711,6 +711,18 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
         const filename = newDocName.trim()
         if (!filename) return
         setCreatingDoc(true)
+        // Opened synchronously, still inside the click handler's call stack —
+        // popup blockers allow this. Redirecting it once the URL comes back
+        // from the (async) create call still counts as "the same window the
+        // click opened," unlike calling window.open() only after the await,
+        // which every mainstream browser's popup blocker rejects since by
+        // then the call is no longer attributable to the user gesture.
+        // No 'noopener' here — with it, window.open() returns null (that's
+        // the whole point of noopener: no reference back), which would make
+        // the redirect below silently do nothing. Safe to omit only because
+        // the redirect target (Collabora, resolved server-side) is trusted,
+        // not attacker-controlled.
+        const editorWindow = window.open('', '_blank')
         try {
             const res = await fetch(`${base}/projects/${streamId}/documents/new`, {
                 method: 'POST',
@@ -722,11 +734,12 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                 throw new Error(body.detail || `Could not create document (${res.status})`)
             }
             const { url } = await res.json()
-            if (url) window.open(url, '_blank', 'noopener')
+            if (url && editorWindow) editorWindow.location.href = url
             await loadDocuments()
             setNewDocPrompt(false)
             setNewDocName('')
         } catch (err) {
+            editorWindow?.close()
             setError(err.message)
         } finally {
             setCreatingDoc(false)
@@ -1175,6 +1188,14 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
 
     const handleEdit = async (doc) => {
         if (!doc) return
+        // Same popup-blocker reasoning as createNewDocument() above: open
+        // synchronously inside the click, redirect once the URL resolves.
+        // No 'noopener' here — with it, window.open() returns null (that's
+        // the whole point of noopener: no reference back), which would make
+        // the redirect below silently do nothing. Safe to omit only because
+        // the redirect target (Collabora, resolved server-side) is trusted,
+        // not attacker-controlled.
+        const editorWindow = window.open('', '_blank')
         try {
             const res = await fetch(`${base}/projects/${streamId}/documents/${doc.doc_id}/edit-session`, { method: 'POST' })
             if (!res.ok) {
@@ -1182,8 +1203,9 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                 throw new Error(body.detail || `Could not open editor (${res.status})`)
             }
             const { url } = await res.json()
-            if (url) window.open(url, '_blank', 'noopener')
+            if (url && editorWindow) editorWindow.location.href = url
         } catch (err) {
+            editorWindow?.close()
             setError(err.message)
         }
     }

@@ -375,6 +375,21 @@ async def create_new_document(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
 
+    # Checked proactively rather than relying on create_direct_editing()
+    # itself to reject an existing path: unlike the plain OCS calls
+    # NextcloudConflictError is built for (statuscode 102), the Direct
+    # Editing "create" endpoint reports "already exists" as a bare
+    # generic-failure 403 with no message (confirmed against this
+    # deployment's own nextcloud.log — the real RuntimeException text never
+    # reaches the OCS response body), so there's no reliable way to
+    # distinguish that from any other failure after the fact.
+    try:
+        await asyncio.to_thread(stat_file, path)
+    except NextcloudError:
+        pass  # doesn't exist yet — good, proceed
+    else:
+        raise HTTPException(status_code=409, detail=f"'{filename}' already exists in this folder")
+
     try:
         result = await asyncio.to_thread(create_direct_editing, path, body.creator_id)
     except NextcloudConflictError:
