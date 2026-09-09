@@ -294,6 +294,26 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
     // while still knowing which specific version each drawing belongs to.
     // Not a picker (removed — see git history): read-only lookup only.
     const [modelsById, setModelsById] = useState({})
+    // Keyed by doc_id:etag, not doc_id alone — a plain doc_id key never
+    // re-fetches once set, so a document edited+saved in Collabora (which
+    // writes to Nextcloud directly, bypassing this app entirely) kept
+    // showing its pre-edit thumbnail for the rest of the session even after
+    // the backend's own etag-keyed cache (bim_document_thumbnails) had
+    // already re-rendered the new content. etag changing is exactly the
+    // signal a new render exists — same cache-key reasoning as the backend.
+    const thumbKey = (doc) => `${doc.doc_id}:${doc.etag || ''}`
+    // Deleting a document should drop every thumbs entry for it — there's
+    // only ever one live etag per doc_id, but a stale one could still be
+    // sitting around from before a very recent edit's re-fetch settled.
+    const removeThumbsFor = (prev, docId) => {
+        const stalePrefix = `${docId}:`
+        const rest = {}
+        for (const [k, v] of Object.entries(prev)) {
+            if (k.startsWith(stalePrefix)) { if (v) URL.revokeObjectURL(v) }
+            else rest[k] = v
+        }
+        return rest
+    }
     const [thumbs, setThumbs] = useState({})
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
@@ -517,20 +537,31 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
     }, [streamId, base])
 
 
-    // Lazy-load each document's thumbnail once, tolerating 404 (no preview
-    // available for CAD formats) by just leaving the icon fallback in place.
+    // Lazy-load each document's thumbnail once per (doc_id, etag), tolerating
+    // 404 (no preview available for CAD formats) by just leaving the icon
+    // fallback in place.
     useEffect(() => {
-        const missing = documents.filter(d => !(d.doc_id in thumbs))
+        const missing = documents.filter(d => !(thumbKey(d) in thumbs))
         if (missing.length === 0) return
         let cancelled = false
         missing.forEach(async d => {
+            const key = thumbKey(d)
             try {
                 const res = await fetch(`${base}/projects/${streamId}/documents/${d.doc_id}/thumbnail`)
-                if (!res.ok) { if (!cancelled) setThumbs(prev => ({ ...prev, [d.doc_id]: null })); return }
+                if (!res.ok) { if (!cancelled) setThumbs(prev => ({ ...prev, [key]: null })); return }
                 const blob = await res.blob()
-                if (!cancelled) setThumbs(prev => ({ ...prev, [d.doc_id]: URL.createObjectURL(blob) }))
+                if (!cancelled) setThumbs(prev => {
+                    // A previous etag's entry for this same doc_id is now
+                    // unreachable (nothing looks it up by its old key again) —
+                    // revoke it here rather than leaking it until unmount.
+                    const stalePrefix = `${d.doc_id}:`
+                    for (const [k, v] of Object.entries(prev)) {
+                        if (k !== key && k.startsWith(stalePrefix) && v) URL.revokeObjectURL(v)
+                    }
+                    return { ...prev, [key]: URL.createObjectURL(blob) }
+                })
             } catch {
-                if (!cancelled) setThumbs(prev => ({ ...prev, [d.doc_id]: null }))
+                if (!cancelled) setThumbs(prev => ({ ...prev, [key]: null }))
             }
         })
         return () => { cancelled = true }
@@ -1093,11 +1124,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
             const res = await fetch(`${base}/projects/${streamId}/documents/${doc.doc_id}`, { method: 'DELETE' })
             if (!res.ok) throw new Error(`Delete failed (${res.status})`)
             setDocuments(prev => prev.filter(d => d.doc_id !== doc.doc_id))
-            setThumbs(prev => {
-                const { [doc.doc_id]: removedUrl, ...rest } = prev
-                if (removedUrl) URL.revokeObjectURL(removedUrl)
-                return rest
-            })
+            setThumbs(prev => removeThumbsFor(prev, doc.doc_id))
             if (selectedDoc?.doc_id === doc.doc_id) setSelectedDoc(null)
             // A deleted document's linked_element (if any) is gone too — the
             // viewer's document-pin overlay only refreshes on its own
@@ -1129,11 +1156,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                 const res = await fetch(`${base}/projects/${streamId}/documents/${id}`, { method: 'DELETE' })
                 if (!res.ok) throw new Error()
                 setDocuments(prev => prev.filter(d => d.doc_id !== id))
-                setThumbs(prev => {
-                    const { [id]: removedUrl, ...rest } = prev
-                    if (removedUrl) URL.revokeObjectURL(removedUrl)
-                    return rest
-                })
+                setThumbs(prev => removeThumbsFor(prev, id))
                 if (selectedDoc?.doc_id === id) setSelectedDoc(null)
             } catch {
                 failed.push(id)
@@ -1572,7 +1595,7 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                                     <Card
                                         key={d.doc_id}
                                         doc={d}
-                                        thumbUrl={thumbs[d.doc_id]}
+                                        thumbUrl={thumbs[thumbKey(d)]}
                                         downloadUrl={`${base}/projects/${streamId}/documents/${d.doc_id}/download`}
                                         onDelete={setConfirmDeleteDoc}
                                         canDelete={canAct}
@@ -1601,8 +1624,8 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                         {activeDoc && (
                             <div className={`relative ${viewMode === 'list' ? 'w-[300px]' : 'w-[220px]'}`}>
                                 {viewMode === 'list'
-                                    ? <ListRowContent doc={activeDoc} thumbUrl={thumbs[activeDoc.doc_id]} grabbing />
-                                    : <CardContent doc={activeDoc} thumbUrl={thumbs[activeDoc.doc_id]} grabbing />}
+                                    ? <ListRowContent doc={activeDoc} thumbUrl={thumbs[thumbKey(activeDoc)]} grabbing />
+                                    : <CardContent doc={activeDoc} thumbUrl={thumbs[thumbKey(activeDoc)]} grabbing />}
                                 {selectedIds.has(activeDoc.doc_id) && selectedIds.size > 1 && (
                                     <div className="absolute -top-2 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-amber-400 text-black text-[10px] font-bold flex items-center justify-center">
                                         {selectedIds.size}
@@ -1635,8 +1658,8 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
                         <div className="aspect-video bg-[var(--speckle-outline-3)] rounded-lg flex items-center justify-center overflow-hidden">
-                            {thumbs[selectedDoc.doc_id]
-                                ? <img src={thumbs[selectedDoc.doc_id]} className="w-full h-full object-cover" alt="" />
+                            {thumbs[thumbKey(selectedDoc)]
+                                ? <img src={thumbs[thumbKey(selectedDoc)]} className="w-full h-full object-cover" alt="" />
                                 : <DocTypeIcon filename={selectedDoc.filename} className="w-8 h-8 text-[var(--speckle-foreground-disabled)]" />}
                         </div>
                         <h4 className="text-sm font-semibold text-[var(--speckle-foreground)] break-all">{selectedDoc.filename}</h4>
