@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import {
     X, Upload, FileText, Trash2, ChevronLeft, Check, History, Download, ShieldCheck, Eye, EyeOff, UploadCloud, GitBranch, Ruler,
-    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag, Crosshair, Loader2, FileSpreadsheet,
+    LayoutGrid, List, Folder, FolderPlus, Pencil, Info, Tag, Crosshair, Loader2, FileSpreadsheet, FilePlus, Presentation,
 } from 'lucide-react'
 import { DocumentPreview } from './DocumentPreview'
 import { SpeckleModelsList } from './SpeckleModelsList'
@@ -348,6 +348,13 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
     const [newFolderPrompt, setNewFolderPrompt] = useState(false)
     const [newFolderName, setNewFolderName] = useState('')
     const [creatingFolder, setCreatingFolder] = useState(false)
+    // New (blank) document — mirrors the New Folder prompt above, plus a
+    // creator_id picker (document/spreadsheet/presentation) since a blank
+    // document needs a file type up front, unlike a folder.
+    const [newDocPrompt, setNewDocPrompt] = useState(false)
+    const [newDocName, setNewDocName] = useState('')
+    const [newDocCreatorId, setNewDocCreatorId] = useState('document')
+    const [creatingDoc, setCreatingDoc] = useState(false)
     // Rename targets the folder *name* being edited (a direct child of the
     // currently-browsed folderPath — never folderPath itself), so no
     // adjustment to folderPath is ever needed on success.
@@ -697,6 +704,32 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
             setError(err.message)
         } finally {
             setCreatingFolder(false)
+        }
+    }
+
+    const createNewDocument = async () => {
+        const filename = newDocName.trim()
+        if (!filename) return
+        setCreatingDoc(true)
+        try {
+            const res = await fetch(`${base}/projects/${streamId}/documents/new`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename, creator_id: newDocCreatorId, folder_path: folderPath }),
+            })
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}))
+                throw new Error(body.detail || `Could not create document (${res.status})`)
+            }
+            const { url } = await res.json()
+            if (url) window.open(url, '_blank', 'noopener')
+            await loadDocuments()
+            setNewDocPrompt(false)
+            setNewDocName('')
+        } catch (err) {
+            setError(err.message)
+        } finally {
+            setCreatingDoc(false)
         }
     }
 
@@ -1240,6 +1273,15 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                             >
                                 <Upload className="w-3.5 h-3.5" /> {uploading ? 'Uploading…' : 'Upload'}
                             </button>
+                            {activeTab === 'documents' && collaboraEnabled && (
+                                <button
+                                    onClick={() => { setNewDocName(''); setNewDocCreatorId('document'); setNewDocPrompt(true) }}
+                                    title="Create a new blank document in-place"
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors"
+                                >
+                                    <FilePlus className="w-3.5 h-3.5" /> New Document
+                                </button>
+                            )}
                             <span
                                 title={`ISO 19650 naming (optional): ${NAMING_TEMPLATE}\ne.g. PRJ-ABC-00-00-DR-A-000001.pdf`}
                                 className="text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] cursor-help"
@@ -1886,6 +1928,64 @@ export function DocumentsPanel({ streamId, normalizerUrl, collaboraEnabled = fal
                                     className="flex-1 text-xs px-2 py-2 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
                                 >
                                     {creatingFolder ? 'Creating…' : 'Create'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+                {newDocPrompt && (
+                    <motion.div
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[215000] flex items-center justify-center bg-black/50"
+                        onClick={() => !creatingDoc && setNewDocPrompt(false)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            className="glass-card w-[320px] p-4 space-y-3"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <p className="text-sm font-medium text-[var(--speckle-foreground)]">New document</p>
+                            <div className="flex gap-1.5">
+                                {[
+                                    { id: 'document', label: 'Word', Icon: WordIcon },
+                                    { id: 'spreadsheet', label: 'Excel', Icon: ExcelIcon },
+                                    { id: 'presentation', label: 'Slides', Icon: Presentation },
+                                ].map(({ id, label, Icon }) => (
+                                    <button
+                                        key={id}
+                                        onClick={() => setNewDocCreatorId(id)}
+                                        className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-[11px] transition-colors ${
+                                            newDocCreatorId === id
+                                                ? 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/50'
+                                                : 'bg-[var(--speckle-outline-3)]/50 text-[var(--speckle-foreground-2)] hover:bg-[var(--speckle-outline-3)]'
+                                        }`}
+                                    >
+                                        <Icon className="w-4 h-4" /> {label}
+                                    </button>
+                                ))}
+                            </div>
+                            <input
+                                autoFocus
+                                value={newDocName}
+                                onChange={e => setNewDocName(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && createNewDocument()}
+                                placeholder="Document name"
+                                className="w-full text-xs px-2 py-2 rounded-lg bg-zinc-800 border border-white/10 text-zinc-100 outline-none focus:border-primary/60"
+                            />
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    onClick={() => setNewDocPrompt(false)}
+                                    disabled={creatingDoc}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-[var(--speckle-outline-3)]/50 hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)] transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={createNewDocument}
+                                    disabled={creatingDoc || !newDocName.trim()}
+                                    className="flex-1 text-xs px-2 py-2 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+                                >
+                                    {creatingDoc ? 'Creating…' : 'Create & Edit'}
                                 </button>
                             </div>
                         </motion.div>

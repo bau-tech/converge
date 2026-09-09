@@ -134,6 +134,22 @@ def open_direct_editing(path: str) -> dict:
     )
 
 
+def create_direct_editing(path: str, creator_id: str, editor_id: str = "richdocuments") -> dict:
+    """Counterpart to open_direct_editing() for a file that doesn't exist
+    yet: creates a brand-new document at `path` from creator_id's blank
+    template ("document"/"spreadsheet"/"presentation"/"drawing" — see
+    GET apps/files/api/v1/directEditing for the live list of ids this
+    Nextcloud instance actually registers) and returns an editor URL for it
+    in the same one call, via the same OCS Direct Editing API. Raises
+    NextcloudConflictError (via _ocs_request's statuscode==102 handling) if
+    `path` already exists — callers should surface that as "already exists",
+    not silently overwrite."""
+    return _ocs_request(
+        "POST", "apps/files/api/v1/directEditing/create", _auth(),
+        data={"path": path, "editorId": editor_id, "creatorId": creator_id},
+    )
+
+
 _PROPFIND_BODY = """<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
   <d:prop>
@@ -191,6 +207,36 @@ def list_folder(path: str, depth: str = "1") -> list[dict]:
     if resp.status_code >= 400:
         raise NextcloudError(f"PROPFIND {path} failed: {resp.status_code} {resp.text[:300]}")
     return _parse_propfind(resp.content, path)
+
+
+def stat_file(path: str) -> dict:
+    """PROPFIND for exactly one file's own metadata (Depth: 0) — unlike
+    list_folder() (Depth: 1, and deliberately drops the entry matching its
+    own base_path since that's "list this folder's children"), here that
+    self-entry IS the thing we want. Used after create_direct_editing()
+    creates a file with no upload_bytes()-style response body of its own to
+    read fileid/etag/size from directly."""
+    resp = _session.request(
+        "PROPFIND", _dav_url(path), auth=_auth(),
+        headers={"Depth": "0", "Content-Type": "application/xml"},
+        data=_PROPFIND_BODY, timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise NextcloudError(f"PROPFIND {path} failed: {resp.status_code} {resp.text[:300]}")
+    root = ET.fromstring(resp.content)
+    response = root.find("d:response", _DAV_NS)
+    prop = response.find("d:propstat/d:prop", _DAV_NS)
+    fileid = prop.findtext("oc:fileid", namespaces=_DAV_NS)
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    return {
+        "path": path,
+        "name": name,
+        "fileid": int(fileid) if fileid else None,
+        "etag": (prop.findtext("d:getetag", namespaces=_DAV_NS) or "").strip('"'),
+        "size": int(prop.findtext("d:getcontentlength", default="0", namespaces=_DAV_NS) or 0),
+        "mime_type": prop.findtext("d:getcontenttype", namespaces=_DAV_NS),
+        "last_modified": prop.findtext("d:getlastmodified", namespaces=_DAV_NS),
+    }
 
 
 def download_bytes(path: str) -> bytes:

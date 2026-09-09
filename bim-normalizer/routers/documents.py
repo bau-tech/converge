@@ -310,6 +310,100 @@ def open_edit_session(stream_id: str, doc_id: str, user: CurrentUser = Depends(r
         release_conn(conn)
 
 
+# Nextcloud Direct Editing "creator" ids richdocuments registers for blank
+# documents (confirmed against a live GET apps/files/api/v1/directEditing —
+# each maps 1:1 to a file extension/mimetype; "drawing" is an .odg diagram,
+# not our doc_type='drawing' DWG/DXF/IFC uploads, so it's deliberately not
+# offered here).
+_NEW_DOCUMENT_CREATORS = {"document": "docx", "spreadsheet": "xlsx", "presentation": "pptx"}
+
+
+class NewDocumentRequest(BaseModel):
+    filename: str
+    creator_id: str = "document"
+    folder_path: str | None = None
+
+
+@router.post("/projects/{stream_id}/documents/new")
+async def create_new_document(
+    stream_id: str, body: NewDocumentRequest,
+    user: CurrentUser = Depends(require_role(*ANY_PROJECT_ROLE)),
+):
+    """Creates a brand-new blank Office document in-place and opens it for
+    editing — the create-from-scratch counterpart to upload_document_bytes()
+    above (whole-file upload) and open_edit_session() (edit something that
+    already exists). Same one-call Nextcloud OCS API open_edit_session()
+    uses, just its /create sibling (nextcloud/client.py's
+    create_direct_editing()), which both creates the file from richdocuments'
+    blank template AND returns an editor URL in one round-trip.
+
+    Always lands in 01_WIP, same as upload_document_bytes() — a
+    freshly-created document still needs to go through the approval
+    workflow before reaching Published."""
+    from config import settings
+    if not settings.COLLABORA_ENABLED:
+        raise HTTPException(status_code=503, detail="In-browser document creation is not enabled on this deployment")
+
+    extension = _NEW_DOCUMENT_CREATORS.get(body.creator_id)
+    if extension is None:
+        raise HTTPException(status_code=400, detail=f"creator_id must be one of {sorted(_NEW_DOCUMENT_CREATORS)}")
+
+    from db.connection import get_conn, release_conn
+    from db.documents import upsert_document, record_event
+    from nextcloud.client import NextcloudConflictError, NextcloudError, create_direct_editing, ensure_folder, stat_file
+    from nextcloud.provisioning import ensure_project_group
+
+    filename = (body.filename or "New document").strip()
+    if not filename.lower().endswith(f".{extension}"):
+        filename = f"{filename}.{extension}"
+
+    sub = _sanitize_folder_path(body.folder_path)
+    group_folder = _group_folder(stream_id)
+    target_dir = f"{group_folder}/{_STATUS_FOLDERS['WIP']}/{sub}" if sub else f"{group_folder}/{_STATUS_FOLDERS['WIP']}"
+    path = f"{target_dir}/{filename}"
+
+    conn = get_conn()
+    try:
+        model_id = _latest_model_id(conn, stream_id)
+    finally:
+        release_conn(conn)
+
+    try:
+        await asyncio.to_thread(ensure_project_group, stream_id)
+        if sub:
+            await asyncio.to_thread(ensure_folder, target_dir)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nextcloud provisioning failed: {exc}")
+
+    try:
+        result = await asyncio.to_thread(create_direct_editing, path, body.creator_id)
+    except NextcloudConflictError:
+        raise HTTPException(status_code=409, detail=f"'{filename}' already exists in this folder")
+    except NextcloudError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not create document: {exc}")
+
+    try:
+        meta = await asyncio.to_thread(stat_file, path)
+    except NextcloudError as exc:
+        raise HTTPException(status_code=502, detail=f"Document was created but could not be registered: {exc}")
+
+    conn = get_conn()
+    try:
+        doc = upsert_document(
+            conn, stream_id=stream_id, model_id=model_id,
+            nc_fileid=meta["fileid"], nc_path=meta["path"], nc_group_folder=group_folder,
+            filename=meta["name"], mime_type=meta.get("mime_type"), size_bytes=meta.get("size"),
+            etag=meta.get("etag"), status="WIP", doc_type="document", org_id=user.org_id,
+        )
+        record_event(conn, doc["doc_id"], "created", to_value="WIP", actor=user.name, actor_guid=user.guid)
+    finally:
+        release_conn(conn)
+    from notifications.dispatch import notify_document_event
+    fire_and_forget_sync(notify_document_event, stream_id, doc["doc_id"], "created", None, user.guid)
+    fire_and_forget_sync(_index_document_safe, doc["doc_id"])
+    return {"url": result.get("url"), "doc": doc}
+
+
 @router.get("/projects/{stream_id}/documents/{doc_id}/preview.dxf")
 def preview_dwg_as_dxf(stream_id: str, doc_id: str, user: CurrentUser = Depends(require_login)):
     """On-the-fly .dwg -> .dxf conversion (dwg_convert.py, LibreDWG's
