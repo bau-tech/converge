@@ -458,11 +458,6 @@ def ingest_commit(
                 # volume_m3 / area_m2 are null even when Qto_*BaseQuantities values exist.
                 # Fall back to the IFC quantity sets to fill in the gap.
                 if source == "IFC":
-                    # Property scan first — deep-traverse the whole object tree.
-                    # These values take priority over mesh-derived ones (IFC meshes are
-                    # often non-watertight, making signed-volume and area unreliable).
-                    # Mesh geometry is kept for bbox/centroid/viewer but volume/area
-                    # are overwritten whenever the property scan finds an authoritative value.
                     prop_vol  = _prop_volume_m3(obj)
                     prop_area = _prop_area_m2(obj)
                     if prop_vol is not None or prop_area is not None:
@@ -477,8 +472,42 @@ def ingest_commit(
                                 "volume_m3": prop_vol, "area_m2": prop_area, "mesh": None,
                             }
                         else:
-                            if prop_vol  is not None: geo["volume_m3"] = prop_vol
-                            if prop_area is not None: geo["area_m2"]   = prop_area
+                            # A real, complete mesh's own volume/area IS the
+                            # "total area/volume" this app reports elsewhere
+                            # (Revit-native models use it directly, no
+                            # property scan involved) — confirmed live
+                            # against a Wall's raw bbox: its mesh area_m2
+                            # matches the true full box surface (both faces +
+                            # top/bottom + ends) almost exactly. Revit's own
+                            # Fläche/Area parameter is a DIFFERENT, one-face
+                            # convention (what Revit's own UI schedules show)
+                            # — unconditionally preferring it, as this block
+                            # used to, silently swapped a correct total
+                            # surface area for a ~2-5x smaller single-face
+                            # number for every Wall/Slab/Footing.
+                            #
+                            # Only trust the property scan when the mesh
+                            # itself is unusable: some elements (e.g. a beam
+                            # whose IFC mesh is only its cross-section
+                            # profile, missing the swept length entirely)
+                            # produce a tiny-but-nonzero garbage volume/area
+                            # too small for extract_geometry's own "mesh
+                            # sums to exactly 0.0" bbox-fallback to catch.
+                            # Volumen/Volume IS the same physical quantity as
+                            # the mesh integral (unlike Fläche/Area vs.
+                            # surface area), so a large disagreement between
+                            # them is a reliable signal the mesh is missing
+                            # most of the object's geometry — and if so, ITS
+                            # area is equally unreliable, not just its volume.
+                            mesh_vol = geo.get("volume_m3")
+                            mesh_untrustworthy = (
+                                prop_vol is not None and mesh_vol is not None and mesh_vol > 0
+                                and (prop_vol / mesh_vol > 10 or mesh_vol / prop_vol > 10)
+                            )
+                            if prop_vol is not None and (mesh_vol is None or mesh_untrustworthy):
+                                geo["volume_m3"] = prop_vol
+                            if prop_area is not None and (geo.get("area_m2") is None or mesh_untrustworthy):
+                                geo["area_m2"] = prop_area
                     elif _prop_debug_quota > 0:
                         _prop_debug_quota -= 1
                         logger.debug(
@@ -716,28 +745,13 @@ def _read_numeric_zero_ok(raw) -> float | None:
         return None
 
 
-# IFC standard quantity-set pset names (Qto_*BaseQuantities, or a
-# "Quantities" wrapper around one) — present ONLY on a bundle-format IFC
-# import (confirmed live: app.speckle.systems's properties["Quantities"]
-# ["BaseQuantities"]["NetSideArea"]); a classic-format import of the exact
-# same source file carries no such pset at all. See _prop_volume_m3/
-# _prop_area_m2's docstrings for why this makes them connector-asymmetric
-# and thus unsafe to prefer over a portable value that both connectors
-# actually carry.
-_QTO_PSET_NAMES = ("Quantities", "BaseQuantities")
-
-
-def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_read_numeric,
-                        skip_psets: tuple = ()) -> float | None:
+def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_read_numeric) -> float | None:
     """
     Recursively walk a plain dict tree looking for target_keys, in order —
     the first key in target_keys present in d wins, so target_keys' ordering
     encodes a priority (e.g. Net before Gross).
     Values that are SpecklePy Base objects are converted to dicts via __dict__.
     Geometry/element keys are skipped to avoid false positives.
-
-    skip_psets: dict keys (pset names) to never recurse into — see
-    _QTO_PSET_NAMES above for why callers pass this on a first pass.
     """
     if _depth > 8 or not d:
         return None
@@ -751,20 +765,74 @@ def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_rea
 
     # Recurse into nested containers
     for k, v in d.items():
-        if k in _DEEP_SKIP or k in skip_psets:
+        if k in _DEEP_SKIP:
             continue
         if isinstance(v, dict):
-            result = _deep_find_in_dict(v, target_keys, _depth + 1, reader, skip_psets)
+            result = _deep_find_in_dict(v, target_keys, _depth + 1, reader)
             if result is not None:
                 return result
         elif hasattr(v, "__dict__") and not isinstance(v, (str, int, float, bool, type(None), list)):
             # SpecklePy Base nested inside a dict value — convert and recurse
             inner = {ik: iv for ik, iv in v.__dict__.items() if not ik.startswith("_")}
             if inner:
-                result = _deep_find_in_dict(inner, target_keys, _depth + 1, reader, skip_psets)
+                result = _deep_find_in_dict(inner, target_keys, _depth + 1, reader)
                 if result is not None:
                     return result
 
+    return None
+
+
+def _find_key_anywhere(d, key: str, reader=_read_numeric, _depth: int = 0) -> float | None:
+    """Search the whole dict tree for one exact key, regardless of which
+    pset it's nested under. Helper for _deep_find_prioritized below."""
+    if _depth > 8 or not isinstance(d, dict):
+        return None
+    if key in d:
+        v = reader(d[key])
+        if v is not None:
+            return v
+    for k, v in d.items():
+        if k in _DEEP_SKIP:
+            continue
+        if isinstance(v, dict):
+            result = _find_key_anywhere(v, key, reader, _depth + 1)
+            if result is not None:
+                return result
+        elif hasattr(v, "__dict__") and not isinstance(v, (str, int, float, bool, type(None), list)):
+            inner = {ik: iv for ik, iv in v.__dict__.items() if not ik.startswith("_")}
+            if inner:
+                result = _find_key_anywhere(inner, key, reader, _depth + 1)
+                if result is not None:
+                    return result
+    return None
+
+
+def _deep_find_prioritized(d: dict, target_keys: tuple, reader=_read_numeric) -> float | None:
+    """
+    Like _deep_find_in_dict, but resolves target_keys' priority GLOBALLY
+    across the whole tree instead of per dict-branch.
+
+    _deep_find_in_dict checks all of target_keys at the current level
+    before recursing, so whichever pset the tree walk happens to reach
+    FIRST wins even when it only holds a low-priority key — e.g. a wall's
+    "Bemaßungen" pset (visited early) has "Fläche", so _deep_find_in_dict
+    returns that immediately and never even looks at "Quantities" >
+    "BaseQuantities" > "NetSideArea" (visited later), even though
+    NetSideArea is listed FIRST in _AREA_KEYS. That matters here because
+    Fläche/Area is a categorically different quantity, not just a lower-
+    confidence version of the same one: it's Revit's own one-face area-
+    schedule convention (what the Revit UI shows), never the element's
+    total surface area — confirmed live: a wall's NetSideArea (39.98) is
+    ~2.3x its Fläche (17.72), consistent with "one face" vs "both faces
+    plus edges". Used only for area, where this distinction actually
+    changes what's being measured; _prop_volume_m3 doesn't need this
+    (Volumen and NetVolume already agree closely — a Net/Gross magnitude
+    difference, not a different quantity).
+    """
+    for key in target_keys:
+        found = _find_key_anywhere(d, key, reader)
+        if found is not None:
+            return found
     return None
 
 
@@ -865,35 +933,28 @@ def _area_factor(units: str, raw: float) -> float:
 
 def _prop_volume_m3(obj) -> float | None:
     """
-    Scan all known property containers on a Speckle object for a volume quantity.
-    Uses getattr (not __dict__) so SpecklePy's __getattr__ is respected regardless
-    of internal storage implementation.
+    Scan all known property containers on a Speckle object for a volume
+    quantity. Uses getattr (not __dict__) so SpecklePy's __getattr__ is
+    respected regardless of internal storage implementation.
 
-    Three passes, in order — see _QTO_PSET_NAMES' docstring for why a
-    BaseQuantities Qto set is deprioritized rather than trusted outright
-    even though it's a real, valid IFC value: it's only present on a
-    bundle-format import, so preferring it over a value both connectors
-    actually carry (a native Revit parameter, or the material pset) would
-    make the SAME source IFC file report a different volume/area depending
-    on which server it went through — confirmed live for beam/column area.
-      1. Portable native parameter (e.g. Bemaßungen's "Volumen"/"Fläche") —
-         present identically on both classic and bundle-format properties.
-      2. Material pset value (ambiguity-checked) — also portable.
-      3. Anything at all, BaseQuantities included — better than nothing
-         for an element neither of the above covers.
+    Only called by ingest_commit() when the mesh itself has nothing usable
+    (see that call site's mesh_untrustworthy check) — so, unlike area,
+    there's no "prefer the more accurate source" trade-off to make here:
+    Volumen/Volume IS the same physical quantity the mesh integral would
+    have given, whichever pset it's found in (native parameter, IFC
+    BaseQuantities, or a material pset — _material_pset_value's own
+    ambiguity check still guards that last one against a compound/layered
+    element's per-layer partial values).
     """
     units = getattr(obj, "units", None) or ""
     for attr in _PROP_ATTRS:
         container = getattr(obj, attr, None)
         if not isinstance(container, dict):
             continue
-        raw = _deep_find_in_dict(container, _VOL_KEYS, skip_psets=_QTO_PSET_NAMES)
+        raw = _deep_find_in_dict(container, _VOL_KEYS)
         if raw is not None:
             return raw * _vol_factor(units, raw)
         raw = _material_pset_value(container, _MATERIAL_VOL_KEY)
-        if raw is not None:
-            return raw * _vol_factor(units, raw)
-        raw = _deep_find_in_dict(container, _VOL_KEYS)
         if raw is not None:
             return raw * _vol_factor(units, raw)
     return None
@@ -902,21 +963,27 @@ def _prop_volume_m3(obj) -> float | None:
 def _prop_area_m2(obj) -> float | None:
     """
     Scan all known property containers on a Speckle object for an area
-    quantity. Same three-pass, connector-consistency-first strategy as
-    _prop_volume_m3 above.
+    quantity. Only called when the mesh has nothing usable (see
+    ingest_commit's mesh_untrustworthy check) — at that point ANY quantity
+    approximating true surface area is strictly better than the garbage
+    mesh value being replaced, so this prefers whichever candidate is
+    likely closest to that: an IFC BaseQuantities *SideArea (first in
+    _AREA_KEYS) sits closer to a true total surface area than the native
+    Fläche/Area parameter (Revit's own one-face area-schedule convention —
+    see ingest_commit's docstring on why that's a different quantity, not
+    used as a target here at all), with the material pset's own "area" as
+    a last resort when neither exists (e.g. a classic-format IFC import
+    with no BaseQuantities pset at all).
     """
     units = getattr(obj, "units", None) or ""
     for attr in _PROP_ATTRS:
         container = getattr(obj, attr, None)
         if not isinstance(container, dict):
             continue
-        raw = _deep_find_in_dict(container, _AREA_KEYS, skip_psets=_QTO_PSET_NAMES)
+        raw = _deep_find_prioritized(container, _AREA_KEYS)
         if raw is not None:
             return raw * _area_factor(units, raw)
         raw = _material_pset_value(container, _MATERIAL_AREA_KEY)
-        if raw is not None:
-            return raw * _area_factor(units, raw)
-        raw = _deep_find_in_dict(container, _AREA_KEYS)
         if raw is not None:
             return raw * _area_factor(units, raw)
     return None
