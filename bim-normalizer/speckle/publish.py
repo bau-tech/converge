@@ -7,7 +7,10 @@ from specklepy.transports.server import ServerTransport
 
 from config import settings
 from speckle.client import get_client
-from speckle.fetch import fetch_commit, fetch_bundle_selection, flatten_elements, _should_skip
+from speckle.fetch import (
+    fetch_commit, fetch_bundle_selection, flatten_elements, _should_skip,
+    list_project_models_and_versions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -474,4 +477,190 @@ def filter_and_publish(
         "model_id": ingest_result["model_id"],
         "ingested_element_count": ingest_result["element_count"],
         "url": result_url,
+    }
+
+
+def _create_project(srv: str, tok: str, name: str, description: str,
+                     workspace_id: str | None = None) -> dict:
+    """
+    Create a new project via GraphQL, returning {id, name}.
+
+    Self-hosted servers accept a bare projectMutations.create with no
+    workspace concept at all. app.speckle.systems (the SaaS) does NOT —
+    confirmed live: it rejects a bare create with "Projects cannot be
+    created outside of workspaces" and instead requires the nested
+    workspaceMutations.projects.create, whose input takes a required
+    workspaceId. Rather than assume which shape a given destination server
+    needs, try the plain path first and only fall back to the workspace-
+    scoped one on that specific error — self-hosted servers never pay for
+    the extra round trip, and a caller who already knows their destination
+    needs a workspace can skip straight to it by passing workspace_id.
+
+    If a workspace is required but workspace_id wasn't given, auto-picks it
+    ONLY when the account belongs to exactly one workspace (unambiguous);
+    with more than one, raises a clear error listing the choices rather
+    than silently guessing which one the caller meant.
+    """
+    if not workspace_id:
+        try:
+            created = _gql(srv, tok, """
+                mutation($input: ProjectCreateInput) {
+                    projectMutations { create(input: $input) { id name } }
+                }
+            """, {"input": {"name": name, "description": description}})
+            return created["projectMutations"]["create"]
+        except ValueError as exc:
+            if "workspace" not in str(exc).lower():
+                raise
+            workspaces = (_gql(srv, tok, """
+                query { activeUser { workspaces { items { id name } } } }
+            """, {}).get("activeUser") or {}).get("workspaces", {}).get("items") or []
+            if len(workspaces) == 1:
+                workspace_id = workspaces[0]["id"]
+                logger.info(
+                    "_create_project: %s requires a workspace — auto-selected the "
+                    "only one this account belongs to (%r, %s)",
+                    srv, workspaces[0]["name"], workspace_id,
+                )
+            else:
+                choices = ", ".join(f"{w['name']!r} ({w['id']})" for w in workspaces) or "none found"
+                raise ValueError(
+                    f"{srv} requires every project to belong to a workspace, and this "
+                    f"account belongs to {len(workspaces)} of them — pass dest_workspace "
+                    f"to pick one. Available: {choices}"
+                ) from exc
+
+    created = _gql(srv, tok, """
+        mutation($input: WorkspaceProjectCreateInput!) {
+            workspaceMutations { projects { create(input: $input) { id name } } }
+        }
+    """, {"input": {"name": name, "description": description, "workspaceId": workspace_id}})
+    return created["workspaceMutations"]["projects"]["create"]
+
+
+def copy_project_to_server(
+    source_stream_id: str,
+    source_token: str,
+    source_server_url: str,
+    dest_server_url: str,
+    dest_token: str,
+    dest_project_name: str | None = None,
+    dest_workspace_id: str | None = None,
+    full_history: bool = False,
+    progress_cb=None,
+) -> dict:
+    """
+    Copy an entire Speckle project — every model, and either just its latest
+    version or its full version history — to a NEW project on a different
+    Speckle server. Source and destination can be any two servers the
+    caller has tokens for; neither needs to be this app's own default.
+
+    Always lands as classic format on the destination regardless of whether
+    the source commit was bundle-format: fetch_commit() already normalizes
+    both into a plain classic Base tree (see _full_projection's docstring),
+    so there's nothing to gain from replicating _send_native_bundle's
+    bundle-authoring complexity here just to preserve an internal storage
+    detail — the actual geometry/data transfers either way.
+
+    full_history=False (default) copies only each model's latest version —
+    the common "migrate this project's current state" case, and far
+    cheaper than replaying every version of every model. full_history=True
+    walks list_project_models_and_versions' full paginated history instead.
+
+    A failure on one model/version is recorded in `errors` and does NOT
+    abort the rest of the copy — a partial success (e.g. one model's object
+    tree is corrupt) is far more useful to the caller than losing everything
+    already copied.
+
+    dest_workspace_id: only relevant for destinations that require every
+    project to belong to a workspace (see _create_project) — auto-detected
+    and only needs setting explicitly when the account has more than one
+    workspace there.
+
+    Returns {dest_project_id, dest_project_name, dest_url,
+    models: [{branch_name, versions_copied, commit_ids}], total_versions_copied,
+    errors}.
+    """
+    src_srv = source_server_url.rstrip("/")
+    dst_srv = dest_server_url.rstrip("/")
+
+    meta = _gql(src_srv, source_token, """
+        query($id: String!) {
+            stream(id: $id) { name description }
+        }
+    """, {"id": source_stream_id}).get("stream")
+    if meta is None:
+        raise ValueError(f"Source project {source_stream_id} not found on {src_srv}")
+
+    project_name = dest_project_name or meta["name"]
+    project_description = f"Copied from {src_srv}/streams/{source_stream_id}"
+    if meta.get("description"):
+        project_description += f" — {meta['description']}"
+
+    dest_project = _create_project(dst_srv, dest_token, project_name, project_description,
+                                    workspace_id=dest_workspace_id)
+    dest_project_id = dest_project["id"]
+    logger.info("copy_project_to_server: created destination project %s (%r) on %s",
+                dest_project_id, project_name, dst_srv)
+
+    dest_client = get_client(server_url=dst_srv, token=dest_token)
+    dest_transport = ServerTransport(client=dest_client, stream_id=dest_project_id)
+
+    models = list_project_models_and_versions(
+        source_stream_id, token=source_token, server_url=src_srv,
+        max_versions_per_model=None if full_history else 1,
+    )
+
+    results = []
+    errors: list[str] = []
+    total_versions = 0
+    for i, model in enumerate(models):
+        branch_name = model["branch_name"]
+        versions = model["versions"]
+        if not versions:
+            continue
+        try:
+            _ensure_branch(dst_srv, dest_token, dest_project_id, branch_name,
+                            description=model.get("branch_description") or "")
+        except Exception as exc:
+            errors.append(f"Model {branch_name!r}: failed to create branch — {exc}")
+            continue
+
+        commit_ids = []
+        for v in versions:
+            try:
+                root, commit_meta = fetch_commit(
+                    source_stream_id, v["id"], token=source_token, server_url=src_srv,
+                )
+                obj_id = operations.send(root, [dest_transport])
+                new_commit_id = _create_commit(
+                    dst_srv, dest_token, dest_project_id, obj_id, branch_name,
+                    v.get("message") or "Copied version",
+                    source_application=(
+                        commit_meta.get("source_application")
+                        or v.get("sourceApplication")
+                        or "bim-normalizer"
+                    ),
+                )
+                commit_ids.append(new_commit_id)
+                total_versions += 1
+            except Exception as exc:
+                logger.warning("copy_project_to_server: version %s on model %r failed: %s",
+                                v.get("id"), branch_name, exc)
+                errors.append(f"Model {branch_name!r} version {v.get('id')}: {exc}")
+        results.append({
+            "branch_name": branch_name,
+            "versions_copied": len(commit_ids),
+            "commit_ids": commit_ids,
+        })
+        if progress_cb:
+            progress_cb(i + 1, len(models))
+
+    return {
+        "dest_project_id": dest_project_id,
+        "dest_project_name": project_name,
+        "dest_url": f"{dst_srv}/projects/{dest_project_id}",
+        "models": results,
+        "total_versions_copied": total_versions,
+        "errors": errors,
     }

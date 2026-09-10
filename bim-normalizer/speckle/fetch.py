@@ -1141,3 +1141,98 @@ def detect_source(root: Base, source_app: str = "") -> str:
             return "Blender"
 
     return "Generic"
+
+
+def list_project_models_and_versions(
+    stream_id: str,
+    token: str | None = None,
+    server_url: str | None = None,
+    max_versions_per_model: int | None = None,
+) -> list[dict]:
+    """
+    Enumerate every model (branch) in a project and every version (commit)
+    on each, for speckle/publish.py's copy_project_to_server(). Paginates
+    both connections properly (Stream.branches/Branch.commits both take
+    limit+cursor — confirmed live via schema introspection against a
+    2.31.14 server; unlike converge_mcp.py's speckle_list_models/
+    speckle_list_versions, which only fetch one unpaginated page and don't
+    request referencedObject at all, neither of which is enough to actually
+    replay a project's contents onto another server).
+
+    Returns [{branch_name, branch_description, versions: [{id,
+    referencedObject, message, sourceApplication, authorName, createdAt},
+    ...]}, ...] — versions ordered oldest-to-newest (the GraphQL API
+    returns newest-first; reversed here so a caller replaying history
+    creates commits in the order they were originally authored).
+
+    max_versions_per_model: keep only the N most recent versions per model
+    (still returned oldest-first) — pass 1 for "latest version only", the
+    common case for a project migration that doesn't need full history.
+    """
+    tok = token or settings.SPECKLE_TOKEN
+    srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
+
+    branches: list[dict] = []
+    cursor = None
+    while True:
+        data = _gql_request(srv, tok, """
+            query($id: String!, $cursor: String) {
+                stream(id: $id) {
+                    branches(limit: 25, cursor: $cursor) {
+                        cursor
+                        items { name description }
+                    }
+                }
+            }
+        """, {"id": stream_id, "cursor": cursor})
+        stream = data.get("stream")
+        if stream is None:
+            raise ValueError(f"Project {stream_id} not found on {srv}")
+        conn = stream["branches"]
+        items = conn.get("items") or []
+        branches.extend(items)
+        cursor = conn.get("cursor")
+        if not cursor or not items:
+            break
+
+    result = []
+    for branch in branches:
+        name = branch["name"]
+        versions: list[dict] = []
+        vcursor = None
+        while True:
+            data = _gql_request(srv, tok, """
+                query($id: String!, $name: String!, $cursor: String) {
+                    stream(id: $id) {
+                        branch(name: $name) {
+                            commits(limit: 25, cursor: $cursor) {
+                                cursor
+                                items {
+                                    id referencedObject message
+                                    sourceApplication authorName createdAt
+                                }
+                            }
+                        }
+                    }
+                }
+            """, {"id": stream_id, "name": name, "cursor": vcursor})
+            branch_data = data["stream"]["branch"]
+            if branch_data is None:
+                break
+            conn = branch_data["commits"]
+            items = conn.get("items") or []
+            versions.extend(items)
+            vcursor = conn.get("cursor")
+            if not vcursor or not items:
+                break
+            if max_versions_per_model and len(versions) >= max_versions_per_model:
+                break
+        versions.reverse()
+        if max_versions_per_model:
+            versions = versions[-max_versions_per_model:]
+        result.append({
+            "branch_name": name,
+            "branch_description": branch.get("description"),
+            "versions": versions,
+        })
+    return result

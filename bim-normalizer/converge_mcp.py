@@ -3192,6 +3192,120 @@ def speckle_filter_publish(
 
 
 @mcp.tool()
+def speckle_copy_project(
+    project_id: str,
+    dest_server: str,
+    dest_project_name: str = "",
+    dest_workspace: str = "",
+    full_history: bool = False,
+    delete_source: bool = False,
+    confirm: bool = False,
+    server: str = "",
+) -> str:
+    """
+    Copy an entire Speckle project — every model/branch — to a NEW project
+    on a different Speckle server. Source and destination can be any two
+    configured servers; neither has to be the default one.
+
+    full_history: False (default) copies only each model's LATEST version —
+        the common "migrate this project's current state" case, and much
+        faster than replaying history. True walks and replays every version
+        of every model, in original order.
+    delete_source: after a successful copy, permanently delete the SOURCE
+        project (i.e. this becomes a "move" instead of a "copy"). Requires
+        confirm=True — the copy itself always runs regardless of confirm;
+        only the source-deletion step is gated, same as speckle_delete_project.
+    dest_project_name: defaults to the source project's own name.
+    dest_workspace: only needed for a destination server that requires every
+        project to belong to a workspace (e.g. app.speckle.systems) AND
+        whose account belongs to more than one — the error message will say
+        so and list the workspace id choices if this is actually required.
+
+    A failure on one model/version doesn't abort the rest — partial results
+    (with an error list) are still returned rather than losing everything
+    already copied. Can take a while for large/multi-model projects — polls
+    up to 20 minutes.
+
+    → find project_id with: speckle_list_projects()
+    → find dest_server / server with: speckle_list_servers()
+    """
+    if delete_source and not confirm:
+        return (
+            "delete_source=True requires confirm=True — copying is always safe and "
+            "proceeds regardless, but permanently deleting the SOURCE project "
+            "afterward needs explicit confirmation. Re-call with confirm=True, or "
+            "omit delete_source to just copy without touching the source."
+        )
+
+    try:
+        src_url, src_token = _resolve_server(server)
+    except ValueError as exc:
+        return str(exc)
+    try:
+        dst_url, dst_token = _resolve_server(dest_server)
+    except ValueError as exc:
+        return str(exc)
+
+    body = {
+        "source_stream_id": project_id,
+        "source_token": src_token,
+        "source_server_url": src_url,
+        "dest_server_url": dst_url,
+        "dest_token": dst_token,
+        "full_history": full_history,
+    }
+    if dest_project_name:
+        body["dest_project_name"] = dest_project_name
+    if dest_workspace:
+        body["dest_workspace_id"] = dest_workspace
+
+    try:
+        resp = _dashboard_request("POST", "/projects/copy", json=body, timeout=30)
+    except RuntimeError as exc:
+        return str(exc)
+    resp.raise_for_status()
+    job = resp.json()
+    job_id = job.get("job_id")
+    if not job_id:
+        return f"Unexpected response: {job}"
+
+    t0 = time.time()
+    for _ in range(240):
+        time.sleep(5)
+        try:
+            poll = _dashboard_request("GET", f"/projects/copy/{job_id}/status", timeout=15)
+        except RuntimeError as exc:
+            return str(exc)
+        poll.raise_for_status()
+        status = poll.json()
+        if status["status"] == "complete":
+            r = status["result"]
+            elapsed = int(time.time() - t0)
+            lines = [
+                f"Copied project {project_id} -> {dst_url} (took {elapsed}s).",
+                f"New project: {r['dest_project_name']} ({r['dest_project_id']})",
+                f"URL: {r['dest_url']}",
+                f"Models copied: {len(r['models'])}, versions copied: {r['total_versions_copied']}",
+            ]
+            for m in r["models"]:
+                lines.append(f"  - {m['branch_name']}: {m['versions_copied']} version(s)")
+            if r.get("errors"):
+                lines.append(f"Errors ({len(r['errors'])}):")
+                for e in r["errors"][:10]:
+                    lines.append(f"  ! {e}")
+
+            if delete_source:
+                delete_result = speckle_delete_project(project_id, confirm=True, server=server)
+                lines.append(f"\nMove complete — {delete_result}")
+
+            return "\n".join(lines)
+        if status["status"] == "failed":
+            return f"Project copy failed: {status.get('error')}"
+
+    return f"Timed out after 20 minutes waiting for project-copy job {job_id}."
+
+
+@mcp.tool()
 def classification_reload() -> str:
     """
     Reload mapping_revit.json and mapping_ifc_class.json from disk without restarting
