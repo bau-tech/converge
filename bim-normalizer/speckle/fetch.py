@@ -65,6 +65,26 @@ def _should_skip(speckle_type: str) -> bool:
     return any(frag in speckle_type for frag in _SKIP_FRAGMENTS)
 
 
+# IFC spatial-structure classes. Speckle's own server-side IFC
+# FileImportService (see collect_ifc_storey_collections' docstring) emits
+# each of these TWICE: once as a `Collection`-typed node that carries the
+# `elements`/`@elements` child list (correctly skipped by flatten_elements'
+# `is_container` check below), and once more as a plain leaf DataObject
+# "twin" with real Attributes/GlobalId/properties — representing the
+# container ITSELF, not a physical BIM element. flatten_elements has no
+# other way to tell that twin apart from a real element, so it was being
+# counted as one: confirmed live on a self-hosted 2.31.14 instance, this
+# spuriously inflated element_count by one row per storey/building/site,
+# and — since Site/Building sit above any storey — created a bogus
+# "Unassigned" Levels bucket that doesn't exist when the same file is
+# imported through a converter that represents each entity once (e.g.
+# app.speckle.systems' bundle-format importer: same source file, 20 real
+# storeys and no Unassigned bucket, vs. 20 real storeys + Site/Building
+# showing up as storey=None here). No physical element ever has one of
+# these as its own `ifcType`, so this is safe to exclude unconditionally.
+_IFC_SPATIAL_CONTAINER_TYPES = {"IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"}
+
+
 def _child_elements(obj: Base) -> list | None:
     """Read an object's child collection, checking both the plain `elements`
     attribute and specklepy's `@elements` "detached property" convention —
@@ -569,21 +589,29 @@ def find_original_ifc_blob_for_commit(
     → convertedCommitId) — precise per-commit, unlike find_original_ifc_blob()
     which just guesses the largest .ifc blob anywhere on the stream.
 
-    Only falls back to find_original_ifc_blob()'s stream-wide guess when the
-    fileUploads lookup itself is unavailable (older/newer Speckle server
-    schema variance, network error) — i.e. when we genuinely have no way to
-    know either way. When the lookup succeeds but no upload converted into
-    this commit (e.g. the commit came from a connector push rather than a
-    web-UI "upload file" import), that's a definitive answer: this commit
-    has no corresponding file upload, so there is no correct blob to guess
-    at. Guessing anyway previously picked the largest .ifc blob ANYWHERE on
-    the stream regardless of whether it had anything to do with this commit
-    — confirmed to silently return a completely unrelated model's IFC file
-    (mismatched element counts, no overlap with the model's own stored
-    IfcGUID parameters) on a stream with multiple unrelated .ifc uploads.
-    Returning None here is safe: callers (resolve_model_ifc_bytes) already
-    treat None as "fall back to bim-normalizer's own synthetic export",
-    which is guaranteed to actually be this model's geometry.
+    Falls back to find_original_ifc_blob()'s stream-wide guess in two cases:
+    the fileUploads lookup itself is unavailable (older/newer Speckle server
+    schema variance, network error), or fileUploads comes back an empty list
+    (confirmed on app.speckle.systems: a stream can have a genuine, fully
+    uploaded .ifc blob — e.g. from a non-web-UI ingest path such as a script
+    using the ifcopenshell converter — while fileUploads stays permanently
+    empty, because that server never wrote a convertedCommitId record for
+    it; self-hosted Speckle does populate it for every web-UI upload). In
+    both cases we have no signal either way, so it's worth a guess — but
+    only when unambiguous: find_original_ifc_blob_for_stream_unambiguous()
+    only returns a blob when every complete .ifc blob on the stream shares
+    the same filename, so there's nothing to guess between.
+
+    When fileUploads is non-empty but simply has no entry for this specific
+    commit_id, that IS a definitive answer (this commit came from a
+    connector push, not a file upload) — stays conservative and returns
+    None rather than guessing. This is the scenario that mattered originally:
+    guessing the largest .ifc blob anywhere on a stream previously returned
+    a completely unrelated model's IFC file (mismatched element counts, no
+    overlap with the model's own stored IfcGUID parameters) on a stream with
+    multiple unrelated .ifc uploads. Callers (resolve_model_ifc_bytes)
+    already treat None as "fall back to bim-normalizer's own synthetic
+    export", which is guaranteed to actually be this model's geometry.
     """
     tok = token or settings.SPECKLE_TOKEN
     srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
@@ -635,20 +663,97 @@ def find_original_ifc_blob_for_commit(
                 "filename": match["fileName"],
                 "file_size": match.get("fileSize"),
             }
+        if uploads:
+            logger.info(
+                "No file-upload matched commit %s on stream %s — this commit has no "
+                "corresponding original IFC (likely a connector push, not a file "
+                "upload); using bim-normalizer's synthetic export instead of "
+                "guessing at an unrelated blob",
+                commit_id, stream_id,
+            )
+            return None
         logger.info(
-            "No file-upload matched commit %s on stream %s — this commit has no "
-            "corresponding original IFC (likely a connector push, not a file "
-            "upload); using bim-normalizer's synthetic export instead of "
-            "guessing at an unrelated blob",
-            commit_id, stream_id,
+            "Stream %s reports no fileUploads at all (server doesn't track "
+            "convertedCommitId for this ingest path) — trying an unambiguous "
+            "stream-wide guess for commit %s",
+            stream_id, commit_id,
         )
-        return None
+        return find_original_ifc_blob_for_stream_unambiguous(stream_id, tok, srv)
     except Exception as exc:
         logger.info(
-            "fileUploads lookup unavailable for stream %s (%s) — falling back to stream-wide IFC blob search",
+            "fileUploads lookup unavailable for stream %s (%s) — falling back to unambiguous stream-wide guess",
             stream_id, exc,
         )
-        return find_original_ifc_blob(stream_id, tok, srv)
+        return find_original_ifc_blob_for_stream_unambiguous(stream_id, tok, srv)
+
+
+def find_original_ifc_blob_for_stream_unambiguous(
+    stream_id: str,
+    token: str | None = None,
+    server_url: str | None = None,
+) -> dict | None:
+    """
+    Like find_original_ifc_blob(), but only returns a blob when every
+    successfully-uploaded .ifc blob on the stream shares the same filename —
+    i.e. there is nothing to guess between. Used as a fallback when we have
+    no fileUploads/convertedCommitId signal at all (see
+    find_original_ifc_blob_for_commit's docstring): a single distinct
+    filename repeated across blob entries (e.g. re-uploaded/reprocessed) is
+    safe to treat as this stream's one original IFC, but streams that have
+    ever held multiple different original files stay ambiguous and fall
+    back to the synthetic export, same as before.
+    """
+    tok = token or settings.SPECKLE_TOKEN
+    srv = (server_url or settings.SPECKLE_SERVER_URL).rstrip("/")
+    if not tok:
+        return None
+
+    resp = requests.post(
+        f"{srv}/graphql",
+        json={
+            "query": """
+                query($id: String!) {
+                    stream(id: $id) {
+                        blobs(limit: 25) {
+                            items { id fileName fileSize uploadStatus }
+                        }
+                    }
+                }
+            """,
+            "variables": {"id": stream_id},
+        },
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if "errors" in body:
+        raise ValueError(f"GraphQL error: {body['errors'][0]['message']}")
+
+    items = ((body.get("data") or {}).get("stream") or {}).get("blobs", {}).get("items") or []
+    ifc_blobs = [
+        b for b in items if b.get("uploadStatus") == 1 and b.get("fileName", "").lower().endswith(".ifc")
+    ]
+    if not ifc_blobs:
+        return None
+
+    distinct_names = {b["fileName"] for b in ifc_blobs}
+    if len(distinct_names) != 1:
+        logger.info(
+            "Stream %s has %d distinct .ifc blob filenames with no commit tracking — "
+            "ambiguous, refusing to guess",
+            stream_id, len(distinct_names),
+        )
+        return None
+
+    blob = max(ifc_blobs, key=lambda b: b.get("fileSize", 0))
+    return {
+        "server_url": srv,
+        "token": tok,
+        "blob_id": blob["id"],
+        "filename": blob["fileName"],
+        "file_size": blob.get("fileSize"),
+    }
 
 
 def iter_original_ifc_blob(stream_id: str, blob: dict, chunk_size: int = 1024 * 1024):
@@ -779,7 +884,8 @@ def flatten_elements(
                 logger.debug("flatten: collection name=%r  next_hint=%r", child_name, next_parent)
             results.extend(flatten_elements(child, _depth + 1, _max_depth, next_parent, _seen_ids))
         else:
-            results.append((child, _parent_name))
+            if getattr(child, "ifcType", None) not in _IFC_SPATIAL_CONTAINER_TYPES:
+                results.append((child, _parent_name))
             # Do NOT recurse into TeklaObject children.
             # A TeklaObject's elements are construction operations (BooleanPart,
             # Fitting, CutPlane) — not standalone BIM elements.  All meaningful
@@ -936,6 +1042,69 @@ def collect_instance_storeys(root: Base, instance_defs: dict) -> dict[str, str]:
 
     _walk(root, [])
     logger.info("collect_instance_storeys: resolved storeys for %d geometry objects", len(storeys))
+    return storeys
+
+
+def collect_ifc_storey_collections(root: Base) -> dict[str, str]:
+    """
+    Best-effort storey lookup for Speckle's own server-side IFC
+    FileImportService (confirmed on a self-hosted 2.31.14 instance, classic
+    non-bundle commit): it encodes the IFC spatial structure (IfcProject >
+    IfcSite > IfcBuilding > IfcBuildingStorey > elements) as nested
+    `Objects.Data.Collection` nodes, each carrying the real IFC entity type
+    on its own `.ifcType` attribute (e.g. "IfcBuildingStorey") — unlike
+    Revit connector output, leaf elements here have no `.level` attribute
+    of their own, so get_storey() finds nothing and every element collapses
+    into a single (None) storey bucket.
+
+    flatten_elements()'s existing category_hint promotion can't be reused
+    for this: it only promotes a Collection's name when that name happens
+    to match a Revit category in _REVIT_CATEGORY_MAP (e.g. a storey
+    literally named "Parking" false-positives as the "Parking" Revit
+    category; most real storey names, e.g. "L5", don't match anything and
+    get silently dropped). This walks the same Collection tree
+    independently, keyed off `ifcType == "IfcBuildingStorey"` instead, which
+    correctly identifies a storey regardless of what it's named.
+
+    Returns {} for any source without Collection nodes carrying `ifcType`
+    (Revit/Tekla output), so this is purely additive — see normalize.py's
+    `get_storey(obj) or instance_storeys.get(...) or ifc_storeys.get(...)`;
+    a real `.level` attribute still wins whenever present.
+    """
+    storeys: dict[str, str] = {}
+    visited_ids: set[str] = set()
+
+    def _walk(obj: Base, current_storey: str | None):
+        for child in (_child_elements(obj) or []):
+            if not isinstance(child, Base):
+                continue
+
+            child_id = str(getattr(child, "id", "") or "")
+            if child_id:
+                if child_id in visited_ids:
+                    continue
+                visited_ids.add(child_id)
+
+            st = getattr(child, "speckle_type", "") or ""
+            if _should_skip(st):
+                continue
+
+            is_container = "Collection" in st or "Model" in st or "Folder" in st
+            if is_container:
+                next_storey = current_storey
+                if getattr(child, "ifcType", None) == "IfcBuildingStorey":
+                    name = getattr(child, "name", None)
+                    if name:
+                        next_storey = str(name).strip()
+                _walk(child, next_storey)
+            else:
+                if current_storey and child_id:
+                    storeys[child_id] = current_storey
+                if _child_elements(child):
+                    _walk(child, current_storey)
+
+    _walk(root, None)
+    logger.info("collect_ifc_storey_collections: resolved storeys for %d objects", len(storeys))
     return storeys
 
 

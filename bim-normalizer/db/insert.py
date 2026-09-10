@@ -819,7 +819,43 @@ def extract_parameters(obj, speckle_id: str | None = None, root_units: str | Non
             })
 
     # ── Derived: material_category (steel/concrete/timber/...) ────────────
-    material_val = next((r["value"] for r in all_rows if r.get("canonical_key") == "material" and r.get("value")), None)
+    # A compound/layered element (e.g. concrete poured on a corrugated metal
+    # deck) carries more than one material-tagged pset — one per layer — each
+    # independently resolving its own canonical_key='material' value (e.g.
+    # "Metal Deck" AND "Concrete, Cast-in-Place gray" for the exact same
+    # slab). Blindly taking the first material row picks whichever layer's
+    # pset the source connector happened to enumerate first — which differs
+    # between a classic-format IFC import (pset order preserved as authored)
+    # and a bundle-format one (properties re-merged into a new dict, a
+    # different order) — giving a DIFFERENT, connector-dependent
+    # classification for the exact same source IFC file (confirmed live: a
+    # "NW Concrete on Metal Deck" floor classified as 'other' when the
+    # "Metal Deck" layer's row happened to sort first, vs 'concrete' when
+    # the concrete layer's row did — same element, same file, two servers).
+    # When more than one candidate exists, prefer whichever material row's
+    # OWN pset also reports a non-zero 'volume' — the layer that's an
+    # actual, physically-real solid contribution, as opposed to e.g. a
+    # Revit "StructuralDeck" layer tracked with volume=0 (formwork, not
+    # counted as its own solid). Ties broken by the largest such volume.
+    # Deterministic regardless of connector/pset ordering.
+    def _pset_volume(pset_name):
+        return next(
+            (r.get("value_numeric") for r in all_rows
+             if r.get("pset") == pset_name and r.get("canonical_key") == "volume"
+             and r.get("value_numeric")),
+            None,
+        )
+    material_rows = [r for r in all_rows if r.get("canonical_key") == "material" and r.get("value")]
+    material_row: dict | None = None
+    if len(material_rows) > 1:
+        scored = sorted(
+            ((r, _pset_volume(r.get("pset")) or 0) for r in material_rows),
+            key=lambda pair: pair[1], reverse=True,
+        )
+        material_row = scored[0][0] if scored[0][1] > 0 else material_rows[0]
+    elif material_rows:
+        material_row = material_rows[0]
+    material_val = material_row["value"] if material_row else None
     grade_val    = next((r["value"] for r in all_rows if r.get("canonical_key") == "grade" and r.get("value")), None)
     category = classify_material_category(material_val) or classify_material_category(grade_val)
     if category:
@@ -840,14 +876,26 @@ def extract_parameters(obj, speckle_id: str | None = None, root_units: str | Non
     # concrete/timber/other volumes. Explicit source data (weight or
     # unit_mass+length, both handled above) always takes precedence.
     if category == "steel" and not any(r.get("canonical_key") == "weight" for r in all_rows):
-        # A source can expose both a Net and a Gross volume under the same
-        # canonical_key (see the collision-check comment below) — prefer a
-        # Net-labeled row, consistent with db/query.py's Net preference for
-        # every other volume/area aggregation, so this fallback doesn't
-        # quietly overestimate weight using the larger Gross figure.
+        # A source can expose more than one volume candidate under the same
+        # canonical_key — e.g. a plain material-pset 'volume' AND a separate
+        # IFC BaseQuantities 'NetVolume' — and, confirmed live, only ONE of
+        # them is present depending on the connector: a bundle-format IFC
+        # import carries an extra BaseQuantities Qto set a classic-format
+        # import of the exact same source file doesn't have at all. Blindly
+        # preferring "whichever key says Net" therefore silently switches
+        # which quantity gets used depending on which server the same file
+        # was imported through, producing a different steel weight for
+        # identical elements. Prefer instead the volume row living in the
+        # SAME pset that established this element's material/category
+        # above (material_row) — that pset's own volume is present and
+        # identical across connectors whenever the material itself is,
+        # which is the one thing guaranteed comparable here. Only fall back
+        # to a Net-labeled/first candidate when no such sibling exists.
         vol_candidates = [r for r in all_rows if r.get("canonical_key") == "volume"
                           and r.get("value_si") is not None]
-        vol_row = next((r for r in vol_candidates if "net" in (r.get("key") or "").lower()), None) \
+        sibling_pset = material_row.get("pset") if material_row else None
+        vol_row = next((r for r in vol_candidates if r.get("pset") == sibling_pset), None) \
+            or next((r for r in vol_candidates if "net" in (r.get("key") or "").lower()), None) \
             or (vol_candidates[0] if vol_candidates else None)
         if vol_row:
             weight_kg = vol_row["value_si"] * _STEEL_DENSITY_KG_M3

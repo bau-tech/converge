@@ -26,7 +26,7 @@ from ifc.schema import length_to_m, LENGTH_TO_M
 from ifc.spatial import get_storey, get_application_id
 from speckle.fetch import (
     fetch_commit, flatten_elements, detect_source, collect_instance_definitions,
-    build_object_map, collect_instance_storeys,
+    build_object_map, collect_instance_storeys, collect_ifc_storey_collections,
 )
 from speckle.publish import create_viewer_bridge, BRIDGE_BRANCH
 
@@ -198,6 +198,13 @@ def ingest_commit(
     # stays as a fallback for a bundle with no Level nodes at all (a source
     # that models storeys as plain Collections instead).
     instance_storeys = collect_instance_storeys(root, instance_defs)
+    # See collect_ifc_storey_collections' own docstring: a second, independent
+    # enrichment side-channel for Speckle's server-side IFC FileImportService,
+    # which models storeys as named Collections with `.ifcType ==
+    # "IfcBuildingStorey"` instead of either a `.level` attribute or
+    # InstanceProxy placements — get_storey() and instance_storeys above both
+    # return nothing for that shape, collapsing every element into one storey.
+    ifc_storeys = collect_ifc_storey_collections(root)
 
     # ------------------------------------------------------------------ #
     # 2. Flatten element tree                                              #
@@ -419,7 +426,11 @@ def ingest_commit(
                 classification = classify_element(speckle_type, obj, category_hint, source=source)
                 ifc_class    = classification["ifc_class"]
                 category     = classification["category"]
-                storey       = get_storey(obj) or instance_storeys.get(str(speckle_id))
+                storey       = (
+                    get_storey(obj)
+                    or instance_storeys.get(str(speckle_id))
+                    or ifc_storeys.get(str(speckle_id))
+                )
                 app_id       = get_application_id(obj)
                 elem_hash    = compute_element_hash(obj)
                 name         = _get_name(obj)
@@ -705,13 +716,28 @@ def _read_numeric_zero_ok(raw) -> float | None:
         return None
 
 
-def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_read_numeric) -> float | None:
+# IFC standard quantity-set pset names (Qto_*BaseQuantities, or a
+# "Quantities" wrapper around one) — present ONLY on a bundle-format IFC
+# import (confirmed live: app.speckle.systems's properties["Quantities"]
+# ["BaseQuantities"]["NetSideArea"]); a classic-format import of the exact
+# same source file carries no such pset at all. See _prop_volume_m3/
+# _prop_area_m2's docstrings for why this makes them connector-asymmetric
+# and thus unsafe to prefer over a portable value that both connectors
+# actually carry.
+_QTO_PSET_NAMES = ("Quantities", "BaseQuantities")
+
+
+def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_read_numeric,
+                        skip_psets: tuple = ()) -> float | None:
     """
     Recursively walk a plain dict tree looking for target_keys, in order —
     the first key in target_keys present in d wins, so target_keys' ordering
     encodes a priority (e.g. Net before Gross).
     Values that are SpecklePy Base objects are converted to dicts via __dict__.
     Geometry/element keys are skipped to avoid false positives.
+
+    skip_psets: dict keys (pset names) to never recurse into — see
+    _QTO_PSET_NAMES above for why callers pass this on a first pass.
     """
     if _depth > 8 or not d:
         return None
@@ -725,21 +751,75 @@ def _deep_find_in_dict(d: dict, target_keys: tuple, _depth: int = 0, reader=_rea
 
     # Recurse into nested containers
     for k, v in d.items():
-        if k in _DEEP_SKIP:
+        if k in _DEEP_SKIP or k in skip_psets:
             continue
         if isinstance(v, dict):
-            result = _deep_find_in_dict(v, target_keys, _depth + 1, reader)
+            result = _deep_find_in_dict(v, target_keys, _depth + 1, reader, skip_psets)
             if result is not None:
                 return result
         elif hasattr(v, "__dict__") and not isinstance(v, (str, int, float, bool, type(None), list)):
             # SpecklePy Base nested inside a dict value — convert and recurse
             inner = {ik: iv for ik, iv in v.__dict__.items() if not ik.startswith("_")}
             if inner:
-                result = _deep_find_in_dict(inner, target_keys, _depth + 1, reader)
+                result = _deep_find_in_dict(inner, target_keys, _depth + 1, reader, skip_psets)
                 if result is not None:
                     return result
 
     return None
+
+
+# Lowercase "volume"/"area" as emitted by this connector fork's per-material
+# property set (e.g. properties["Property Sets"]["Concrete, Cast-in-Place
+# gray"] = {"area": ..., "volume": ..., "materialName": ..., ...}) — never
+# matched by the capitalized keys in _VOL_KEYS/_AREA_KEYS above. Confirmed
+# live: Revit natively exposes a Volume parameter for Structural Framing
+# (beams/columns) but NOT an Area one, so this material-pset value is the
+# ONLY area quantity that exists anywhere for those categories — without
+# it, _prop_area_m2 finds nothing and the (often degenerate/profile-only,
+# not full-length) mesh-derived area silently stands uncorrected.
+#
+# Handled as a separate, ambiguity-checked last resort (_material_pset_value
+# below) rather than folded into the tuples above: a compound/layered
+# element (e.g. a concrete-on-metal-deck floor) carries this SAME lowercase
+# key once per material layer, each holding only that layer's own partial
+# quantity — picking whichever pset the tree walk reaches first would
+# silently under-report the element's real total instead of correctly
+# falling back to its mesh-derived volume/area.
+_MATERIAL_VOL_KEY  = "volume"
+_MATERIAL_AREA_KEY = "area"
+
+
+def _material_pset_value(properties: dict, key: str, reader=_read_numeric) -> float | None:
+    """Collect `key` from every direct material property set (marked by a
+    sibling 'materialCategory' key) anywhere in `properties`, and return it
+    only if every such pset agrees — see _MATERIAL_VOL_KEY's docstring above
+    for why disagreement (a compound/layered element) must not guess."""
+    found: list[float] = []
+
+    def _walk(d, _depth=0):
+        if _depth > 8 or not isinstance(d, dict):
+            return
+        if "materialCategory" in d and key in d:
+            v = reader(d[key])
+            if v is not None:
+                found.append(v)
+        for k, v in d.items():
+            if k in _DEEP_SKIP:
+                continue
+            if isinstance(v, dict):
+                _walk(v, _depth + 1)
+            elif hasattr(v, "__dict__") and not isinstance(v, (str, int, float, bool, type(None), list)):
+                inner = {ik: iv for ik, iv in v.__dict__.items() if not ik.startswith("_")}
+                if inner:
+                    _walk(inner, _depth + 1)
+
+    _walk(properties)
+    if not found:
+        return None
+    distinct = {round(v, 6) for v in found}
+    if len(distinct) > 1:
+        return None
+    return found[0]
 
 
 def _vol_factor(units: str, raw: float) -> float:
@@ -788,12 +868,31 @@ def _prop_volume_m3(obj) -> float | None:
     Scan all known property containers on a Speckle object for a volume quantity.
     Uses getattr (not __dict__) so SpecklePy's __getattr__ is respected regardless
     of internal storage implementation.
+
+    Three passes, in order — see _QTO_PSET_NAMES' docstring for why a
+    BaseQuantities Qto set is deprioritized rather than trusted outright
+    even though it's a real, valid IFC value: it's only present on a
+    bundle-format import, so preferring it over a value both connectors
+    actually carry (a native Revit parameter, or the material pset) would
+    make the SAME source IFC file report a different volume/area depending
+    on which server it went through — confirmed live for beam/column area.
+      1. Portable native parameter (e.g. Bemaßungen's "Volumen"/"Fläche") —
+         present identically on both classic and bundle-format properties.
+      2. Material pset value (ambiguity-checked) — also portable.
+      3. Anything at all, BaseQuantities included — better than nothing
+         for an element neither of the above covers.
     """
     units = getattr(obj, "units", None) or ""
     for attr in _PROP_ATTRS:
         container = getattr(obj, attr, None)
         if not isinstance(container, dict):
             continue
+        raw = _deep_find_in_dict(container, _VOL_KEYS, skip_psets=_QTO_PSET_NAMES)
+        if raw is not None:
+            return raw * _vol_factor(units, raw)
+        raw = _material_pset_value(container, _MATERIAL_VOL_KEY)
+        if raw is not None:
+            return raw * _vol_factor(units, raw)
         raw = _deep_find_in_dict(container, _VOL_KEYS)
         if raw is not None:
             return raw * _vol_factor(units, raw)
@@ -802,13 +901,21 @@ def _prop_volume_m3(obj) -> float | None:
 
 def _prop_area_m2(obj) -> float | None:
     """
-    Scan all known property containers on a Speckle object for an area quantity.
+    Scan all known property containers on a Speckle object for an area
+    quantity. Same three-pass, connector-consistency-first strategy as
+    _prop_volume_m3 above.
     """
     units = getattr(obj, "units", None) or ""
     for attr in _PROP_ATTRS:
         container = getattr(obj, attr, None)
         if not isinstance(container, dict):
             continue
+        raw = _deep_find_in_dict(container, _AREA_KEYS, skip_psets=_QTO_PSET_NAMES)
+        if raw is not None:
+            return raw * _area_factor(units, raw)
+        raw = _material_pset_value(container, _MATERIAL_AREA_KEY)
+        if raw is not None:
+            return raw * _area_factor(units, raw)
         raw = _deep_find_in_dict(container, _AREA_KEYS)
         if raw is not None:
             return raw * _area_factor(units, raw)
