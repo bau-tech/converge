@@ -1145,13 +1145,14 @@ function Dashboard({ readOnly = false }) {
     // proxied through the normalizer (browsers can't call Speckle's blob REST endpoint
     // directly due to CORS). Returns true if the download was triggered, false if no
     // IFC blob was found.
-    const _downloadOriginalIfc = async (streamId, modelName) => {
+    const _downloadOriginalIfc = async (streamId, commitId, modelName) => {
         const res = await fetch(`${CONFIG.normalizerUrl}/streams/${streamId}/original-ifc`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 server_url: activeServer.url,
                 token: activeServer.token || undefined,
+                commit_id: commitId || undefined,
             }),
         })
         if (res.status === 404) return false
@@ -1184,7 +1185,7 @@ function Dashboard({ readOnly = false }) {
         try {
             // IFC source: try to serve the original file stored on the Speckle server first
             if (isIfcSource) {
-                const served = await _downloadOriginalIfc(streamId, modelName)
+                const served = await _downloadOriginalIfc(streamId, commitId, modelName)
                 if (served) return
                 // No blob found — fall through to normalizer re-export
             }

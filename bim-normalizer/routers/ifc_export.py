@@ -509,6 +509,7 @@ async def start_export_ifcx(model_id: str, coord_unit: str = "mm"):
 class OriginalIfcRequest(BaseModel):
     token: str | None = None       # overrides env token if provided
     server_url: str | None = None  # overrides env server URL if provided
+    commit_id: str | None = None   # scopes the lookup to this exact version — see below
 
 
 @router.post("/streams/{stream_id}/original-ifc")
@@ -519,13 +520,25 @@ async def get_original_ifc(stream_id: str, request: OriginalIfcRequest | None = 
     Browsers can't call the Speckle server's /api/stream/{id}/blob/{id} REST
     endpoint directly due to CORS, so the frontend routes the download through
     this normalizer endpoint instead.
+
+    Prefers find_original_ifc_blob_for_commit (same commit-scoped resolution
+    resolve_model_ifc_bytes uses for IDS/clash check) when commit_id is given,
+    falling back to the older stream-wide find_original_ifc_blob only when the
+    caller didn't supply one. The stream-wide guess previously picked the
+    largest .ifc blob ANYWHERE on the stream with no regard for which model
+    version it actually belonged to — confirmed to return a completely
+    unrelated model's IFC file on a stream that had accumulated multiple
+    distinct originals; commit-scoping is what makes that safe.
     """
-    from speckle.fetch import find_original_ifc_blob, iter_original_ifc_blob
+    from speckle.fetch import find_original_ifc_blob, find_original_ifc_blob_for_commit, iter_original_ifc_blob
 
     token = request.token if request else None
     server_url = request.server_url if request else None
+    commit_id = request.commit_id if request else None
 
-    blob = await asyncio.to_thread(find_original_ifc_blob, stream_id, token, server_url)
+    blob = await asyncio.to_thread(
+        find_original_ifc_blob_for_commit, stream_id, commit_id, token, server_url
+    ) if commit_id else await asyncio.to_thread(find_original_ifc_blob, stream_id, token, server_url)
     if blob is None:
         raise HTTPException(status_code=404, detail="No original IFC file found for this stream")
 
