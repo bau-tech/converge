@@ -544,6 +544,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 } else if (ids.length) {
                     viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
                 }
+                // isolateByHiding/selectObjects update filter/selection state but
+                // don't paint on their own (see focusElements above) — without this
+                // the viewpoint applies internally but the canvas never repaints.
+                viewer.requestRender()
             } catch (e) { console.warn('[SpeckleViewer] restoreBcfViewpoint error:', e) }
         },
         // Paints every object by the value → colour mapping a chart panel is
@@ -1817,7 +1821,11 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 })
                 .filter(Boolean)
             if (ids.length) {
-                viewerRef.current.getExtension(FilteringExtension)?.isolateObjects(ids, 'bcf', true, true)
+                // isolateObjects's own hide-the-rest traversal silently no-ops on
+                // a large/federated combined scene (see isolateByHiding's own
+                // comment above) — use the same reliable-at-scale path
+                // restoreBcfViewpoint uses instead of the raw extension call.
+                isolateByHiding(viewerRef.current, ids, 'bcf')
                 viewerRef.current.getExtension(SelectionExtension)?.selectObjects(ids)
             }
             const cvp = topic.viewpoint.camera_view_point
@@ -1830,6 +1838,9 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                 viewerRef.current.getExtension(HybridCameraController)?.setCameraView(ids, true)
             }
             selectedBcfTopicGuidRef.current = topic.guid
+            // isolateByHiding/selectObjects update filter/selection state but
+            // don't paint on their own — see restoreBcfViewpoint's own note.
+            viewerRef.current.requestRender()
         } catch (err) {
             console.warn('BCF topic navigation error:', err)
         }
