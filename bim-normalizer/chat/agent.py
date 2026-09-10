@@ -818,7 +818,8 @@ def _is_hallucinated_tool_call_error(resp) -> bool:
 
 
 def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
-                        stream: bool = False, max_retries: int = 2):
+                        stream: bool = False, max_retries: int = 2,
+                        retry_404: bool = False):
     """POST with backoff on transient failures — connection errors/timeouts,
     429 rate limits, 5xx server errors, and a provider-side hallucinated tool
     call (see _is_hallucinated_tool_call_error). Does NOT retry other 4xx
@@ -828,7 +829,14 @@ def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
     attempt with the exact same request. Previously a single requests.post()
     meant any transient network hiccup or provider rate limit surfaced
     straight to the user as a raw error instead of the agent quietly
-    recovering."""
+    recovering.
+
+    retry_404: set only for Ollama Cloud (see its call site) — confirmed
+    live, a model that isn't currently "warm" on their serverless
+    infrastructure can 404 instead of just cold-starting slowly; the exact
+    same request succeeded seconds later with no changes. Not applied to
+    other providers by default: a 404 there is far more likely a genuinely
+    wrong URL/model name, which retrying can't fix."""
     resp = None
     for attempt in range(max_retries + 1):
         try:
@@ -838,7 +846,11 @@ def _post_with_retries(url: str, headers: dict, body: dict, timeout: int,
                 raise
             time.sleep(2 ** attempt)
             continue
-        if resp.status_code == 429 or resp.status_code >= 500 or _is_hallucinated_tool_call_error(resp):
+        if (
+            resp.status_code == 429 or resp.status_code >= 500
+            or (retry_404 and resp.status_code == 404)
+            or _is_hallucinated_tool_call_error(resp)
+        ):
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
                 continue
@@ -1059,7 +1071,10 @@ def _call_llm(provider: str, model: str, api_key: str, base_url: str,
         "temperature": 0.1,
         "max_tokens": 2048,
     }
-    resp = _post_with_retries(url, headers, body, timeout=60)
+    resp = _post_with_retries(
+        url, headers, body, timeout=60,
+        retry_404=(provider == "ollama" and "ollama.com" in url),
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -1088,7 +1103,10 @@ def _call_llm_stream(provider: str, model: str, api_key: str, base_url: str,
     # Retries only cover establishing the connection/initial response — once
     # iter_lines() below starts yielding tokens to the frontend, a retry would
     # duplicate already-sent content, so there's no retry inside that loop.
-    resp = _post_with_retries(url, headers, body, timeout=120, stream=True)
+    resp = _post_with_retries(
+        url, headers, body, timeout=120, stream=True,
+        retry_404=(provider == "ollama" and "ollama.com" in url),
+    )
     resp.raise_for_status()
 
     # Accumulate tool_call argument chunks keyed by index
