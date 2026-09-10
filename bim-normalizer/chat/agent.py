@@ -762,8 +762,23 @@ def _get_url_and_headers(provider: str, api_key: str, base_url: str) -> tuple[st
         return "https://api.groq.com/openai/v1/chat/completions", {
             "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
         }
+    if provider == "gemini":
+        # Also OpenAI-compatible (including the `tools` param) via Google's
+        # own compatibility layer — verified against ai.google.dev/gemini-api/
+        # docs/openai: same request/response shape as openai/mistral/groq,
+        # just a different endpoint + key.
+        return "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+            "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+        }
     if provider == "ollama":
-        return f"{base_url.rstrip('/')}/v1/chat/completions", {"Content-Type": "application/json"}
+        # base_url pointed at https://ollama.com (Ollama Cloud, a hosted
+        # service — not the same thing as self-hosted local Ollama) requires
+        # a Bearer token; a real local server just ignores the extra header
+        # if one happens to be set, so it's safe to add unconditionally.
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return f"{base_url.rstrip('/')}/v1/chat/completions", headers
     # lmstudio
     return f"{base_url.rstrip('/')}/chat/completions", {"Content-Type": "application/json"}
 
@@ -781,8 +796,22 @@ def _is_hallucinated_tool_call_error(resp) -> bool:
     if resp.status_code != 400:
         return False
     try:
-        err = (resp.json() or {}).get("error") or {}
+        body = resp.json()
     except (ValueError, json.JSONDecodeError):
+        return False
+    # Most OpenAI-compatible providers return a single {"error": {...}}
+    # object, but Gemini's compatibility layer wraps it in a list instead —
+    # [{"error": {...}}] — confirmed live (a 400 for an unrelated reason,
+    # "Function calling config is set without function_declarations",
+    # crashed this function entirely since .get() doesn't exist on a list).
+    # Normalize to "the first error dict found" regardless of which shape
+    # the provider used, rather than assuming one.
+    if isinstance(body, list):
+        body = body[0] if body else {}
+    if not isinstance(body, dict):
+        return False
+    err = body.get("error") or {}
+    if not isinstance(err, dict):
         return False
     haystack = f"{err.get('type', '')} {err.get('message', '')}".lower()
     return "tool call validation failed" in haystack

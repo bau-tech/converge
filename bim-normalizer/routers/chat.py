@@ -53,6 +53,7 @@ class ChatRequest(BaseModel):
     mistral_config: dict | None = None
     anthropic_config: dict | None = None
     groq_config: dict | None = None
+    gemini_config: dict | None = None
     model_context: dict | None = None  # optional frontend-supplied context (families, phases, worksets, etc.)
 
 
@@ -95,9 +96,27 @@ def _resolve_provider(request: ChatRequest) -> tuple[str, str, str, str]:
         # the tools payload, not a different free-tier model.
         model_name = cfg.get("model", "openai/gpt-oss-20b")
         base_url = ""
+    elif provider == "gemini":
+        cfg = request.gemini_config or {}
+        api_key = cfg.get("apiKey") or os.getenv("GEMINI_API_KEY", "")
+        # Free-tier headroom checked live against this app's actual per-turn
+        # cost (33-tool schema + 2 calls/turn, ~8600+ tokens — see groq's own
+        # comment above for where that number comes from): Gemini's OpenAI-
+        # compatible endpoint reports 250K-1M TPM on 2.5 Flash, ~30-100x this
+        # app's requirement, unlike Groq's flat 8000 TPM cap that structurally
+        # can't fit it regardless of model.
+        model_name = cfg.get("model", "gemini-2.5-flash")
+        base_url = ""
     elif provider == "ollama":
         cfg = request.ollama_config or {}
-        api_key = ""
+        # Empty by default (matches every other local-model provider here) —
+        # but not hardcoded empty like before: pointing base_url at
+        # https://ollama.com instead of a local address is Ollama Cloud (a
+        # real hosted service, not self-hosted), which needs a Bearer token
+        # the same way every hosted provider above does. Harmless to send an
+        # empty string against a real local server — _get_url_and_headers
+        # below only adds the header when this is non-empty.
+        api_key = cfg.get("apiKey") or os.getenv("OLLAMA_API_KEY", "")
         model_name = cfg.get("model", "llama3")
         base_url = cfg.get("baseUrl", "http://localhost:11434")
     else:  # lmstudio

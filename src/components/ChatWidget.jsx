@@ -110,7 +110,11 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
     const [provider, setProvider] = useState(() => localStorage.getItem('chat_ai_provider') || 'mistral')
     const [ollamaConfig, setOllamaConfig] = useState(() => ({
         baseUrl: localStorage.getItem('chat_ollama_url') || RUNTIME_CONFIG.OLLAMA_BASE_URL,
-        model: localStorage.getItem('chat_ollama_model') || RUNTIME_CONFIG.OLLAMA_MODEL
+        model: localStorage.getItem('chat_ollama_model') || RUNTIME_CONFIG.OLLAMA_MODEL,
+        // Only used against Ollama Cloud (baseUrl set to https://ollama.com) —
+        // a real self-hosted server ignores it. Left empty by default so the
+        // common local case sends no Authorization header, same as before.
+        apiKey: localStorage.getItem('chat_ollama_key') || RUNTIME_CONFIG.OLLAMA_API_KEY
     }))
     const [lmStudioConfig, setLmStudioConfig] = useState(() => ({
         baseUrl: localStorage.getItem('chat_lmstudio_url') || RUNTIME_CONFIG.LMSTUDIO_BASE_URL,
@@ -128,6 +132,10 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         apiKey: localStorage.getItem('chat_groq_key') || RUNTIME_CONFIG.GROQ_API_KEY,
         model: localStorage.getItem('chat_groq_model') || 'openai/gpt-oss-20b'
     }))
+    const [geminiConfig, setGeminiConfig] = useState(() => ({
+        apiKey: localStorage.getItem('chat_gemini_key') || RUNTIME_CONFIG.GEMINI_API_KEY,
+        model: localStorage.getItem('chat_gemini_model') || 'gemini-2.5-flash'
+    }))
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -143,6 +151,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         localStorage.setItem('chat_ai_provider', provider)
         localStorage.setItem('chat_ollama_url', ollamaConfig.baseUrl)
         localStorage.setItem('chat_ollama_model', ollamaConfig.model)
+        localStorage.setItem('chat_ollama_key', ollamaConfig.apiKey)
         localStorage.setItem('chat_lmstudio_url', lmStudioConfig.baseUrl)
         localStorage.setItem('chat_lmstudio_model', lmStudioConfig.model)
         localStorage.setItem('chat_mistral_key', mistralConfig.apiKey)
@@ -151,6 +160,8 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
         localStorage.setItem('chat_anthropic_model', anthropicConfig.model)
         localStorage.setItem('chat_groq_key', groqConfig.apiKey)
         localStorage.setItem('chat_groq_model', groqConfig.model)
+        localStorage.setItem('chat_gemini_key', geminiConfig.apiKey)
+        localStorage.setItem('chat_gemini_model', geminiConfig.model)
         setShowSettings(false)
     }
 
@@ -181,6 +192,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             mistral_config: provider === 'mistral' ? mistralConfig : undefined,
             anthropic_config: provider === 'anthropic' ? anthropicConfig : undefined,
             groq_config: provider === 'groq' ? groqConfig : undefined,
+            gemini_config: provider === 'gemini' ? geminiConfig : undefined,
             model_context: modelContext || undefined,
         })
 
@@ -336,7 +348,7 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                 <div>
                                     <h3 className="font-medium text-xs">AI Assistant</h3>
                                     <p className="text-[9px] text-zinc-400">
-                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'anthropic' ? `Claude (${anthropicConfig.model})` : provider === 'groq' ? `Groq (${groqConfig.model})` : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
+                                        {provider === 'openai' ? 'OpenAI' : provider === 'mistral' ? 'Mistral AI' : provider === 'anthropic' ? `Claude (${anthropicConfig.model})` : provider === 'groq' ? `Groq (${groqConfig.model})` : provider === 'gemini' ? `Gemini (${geminiConfig.model})` : provider === 'ollama' ? `Ollama (${ollamaConfig.model})` : `LM Studio (${lmStudioConfig.model})`}
                                     </p>
                                 </div>
                             </div>
@@ -420,6 +432,13 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                     Groq
                                                 </button>
                                                 <button
+                                                    onClick={() => setProvider('gemini')}
+                                                    className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'gemini' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
+                                                >
+                                                    <Cpu className="w-2.5 h-2.5" />
+                                                    Gemini
+                                                </button>
+                                                <button
                                                     onClick={() => setProvider('ollama')}
                                                     className={`flex items-center justify-center gap-1 py-1 rounded text-[11px] transition-colors ${provider === 'ollama' ? 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-400' : 'bg-zinc-800/50 border border-white/5 text-zinc-500 hover:text-zinc-300'}`}
                                                 >
@@ -455,6 +474,16 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                         value={ollamaConfig.model}
                                                         onChange={(e) => setOllamaConfig(prev => ({ ...prev, model: e.target.value }))}
                                                         placeholder="llama3"
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">API Key (Ollama Cloud only)</label>
+                                                    <input
+                                                        type="password"
+                                                        value={ollamaConfig.apiKey}
+                                                        onChange={(e) => setOllamaConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                                                        placeholder="leave blank for a local/self-hosted server"
                                                         className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
                                                     />
                                                 </div>
@@ -555,6 +584,31 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
                                                         value={groqConfig.model}
                                                         onChange={(e) => setGroqConfig(prev => ({ ...prev, model: e.target.value }))}
                                                         placeholder="openai/gpt-oss-20b"
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {provider === 'gemini' && (
+                                            <div className="space-y-1.5 pt-1">
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Gemini API Key</label>
+                                                    <input
+                                                        type="password"
+                                                        value={geminiConfig.apiKey}
+                                                        onChange={(e) => setGeminiConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                                                        placeholder="AIza..."
+                                                        className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[9px] font-medium text-zinc-400 uppercase tracking-wider">Model</label>
+                                                    <input
+                                                        type="text"
+                                                        value={geminiConfig.model}
+                                                        onChange={(e) => setGeminiConfig(prev => ({ ...prev, model: e.target.value }))}
+                                                        placeholder="gemini-2.5-flash"
                                                         className="w-full bg-zinc-800/50 border border-white/10 rounded px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 text-zinc-200"
                                                     />
                                                 </div>

@@ -218,6 +218,11 @@ services:
       OPENAI_API_KEY: ${VITE_OPENAI_API_KEY:-}
       MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       GROQ_API_KEY: ${VITE_GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
+      # Only relevant against Ollama Cloud (base_url pointed at
+      # https://ollama.com instead of a local/self-hosted server) — ignored
+      # otherwise. See routers/chat.py's ollama branch.
+      OLLAMA_API_KEY: ${VITE_OLLAMA_API_KEY:-}
       PG_HOST: postgres
       PG_PORT: 5432
       PG_USER: ${PG_USER:-speckle}
@@ -437,10 +442,12 @@ services:
       VITE_BCF_API_KEY: ${BCF_API_KEY:-}
       VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
       VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
+      VITE_OLLAMA_API_KEY: ${VITE_OLLAMA_API_KEY:-}
       VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
       VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
       VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       VITE_GROQ_API_KEY: ${VITE_GROQ_API_KEY:-}
+      VITE_GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
       VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
       VITE_DEMO_LOGIN_EMAIL: ${VITE_DEMO_LOGIN_EMAIL:-}
