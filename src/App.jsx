@@ -1443,7 +1443,28 @@ function Dashboard({ readOnly = false }) {
 
             const elements = fullData?.elements || []
             const speckleServer = { serverUrl: activeServer.url, token: activeServer.token }
-            const pulled = await pullFromSpeckle(bcfProjectId, comments, elements, speckleServer)
+            // `comments` is every thread on the whole Speckle *project* (stream),
+            // not just this model's — fetchComments() queries project(id) {
+            // commentThreads }, which spans every branch/model that shares the
+            // stream. Without this filter, a comment pushToSpeckle() created
+            // from model A (tagged with viewerResources pointing at A) got
+            // pulled right back in as a brand-new duplicate topic on every
+            // OTHER model B/C/... loaded afterward too — pullFromSpeckle's own
+            // idempotency check (bcf_speckle_sync) is scoped per-model_id, so
+            // model B's sync state has no record of a comment model A already
+            // accounted for. viewerResources is how Speckle records which
+            // model a comment's viewer state actually points at (populated
+            // from buildViewerState's resourceIdString on push) — a comment
+            // with none at all (e.g. a bare top-level comment made outside any
+            // 3D viewer state) has no model to scope it to, so it's left
+            // pullable everywhere, same as before.
+            const currentModelId = data?.model_id
+            const modelComments = comments.filter((c) => {
+                const resources = c.viewerResources || []
+                if (resources.length === 0) return true
+                return resources.some((r) => r.modelId === currentModelId)
+            })
+            const pulled = await pullFromSpeckle(bcfProjectId, modelComments, elements, speckleServer)
             let topics = [...withViewpoints, ...pulled]
 
             const pushed = await pushToSpeckle(bcfProjectId, topics, {
