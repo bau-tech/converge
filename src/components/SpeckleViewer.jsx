@@ -181,6 +181,22 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     // State
     const [objectId, setObjectId] = useState(null)
     const [isViewerReady, setIsViewerReady] = useState(false)
+    // useImperativeHandle below has an empty dep array (its methods are
+    // created once and never recreated), so a method reading `isViewerReady`
+    // directly would always see the initial `false` — same staleness
+    // darkModeRef exists to avoid. restoreBcfViewpoint needs the live value
+    // to avoid isolating against a WorldTree that hasn't finished streaming
+    // meshes in yet (see the pending-viewpoint effect further down).
+    const isViewerReadyRef = useRef(false)
+    useEffect(() => { isViewerReadyRef.current = isViewerReady }, [isViewerReady])
+    // Set by restoreBcfViewpoint when called before the viewer is ready
+    // (isolating/selecting/framing against a WorldTree that hasn't finished
+    // loading meshes yet silently hides the whole model instead of the
+    // complement — every other isolate effect in this file already gates on
+    // isViewerReady; this was the one call site that didn't, reachable
+    // whenever BCF Topics finishes its own independent fetch before the much
+    // slower 3D geometry load does). Applied by the effect below once ready.
+    const pendingBcfViewpointRef = useRef(null)
     const [loadProgress, setLoadProgress] = useState(null)
     const [viewerError, setViewerError] = useState(null)
     const [sectionBoxVisible, setSectionBoxVisible] = useState(false)
@@ -382,6 +398,85 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         }
     }
 
+    // A BCF viewpoint stores camera position + a *normalized* direction (BCF
+    // has no notion of an orbit pivot), but SmoothOrbitControls needs a
+    // target, and the distance to it becomes the orbit radius. That radius is
+    // not free: @speckle/viewer's computeMinMaxRadius() clamps it to
+    // [World.getRelativeOffset(0.01), World.getRelativeOffset(10)], both
+    // proportional to the loaded model's world size. A hardcoded offset
+    // (this used to be a flat 10 units) therefore only works for models whose
+    // coordinates happen to be "meters, building tens of units across".
+    //
+    // When the offset exceeds maximumRadius the radius is clamped but the
+    // target isn't, so the camera is recomputed as target - direction*clamped
+    // — i.e. shoved along the view direction, away from the position actually
+    // being restored. On a model whose entire extent is ~0.3 units (an IFC
+    // upload whose coordinates aren't in meters), asking for 10 put the
+    // camera ~7 units past a 0.3-unit building, leaving the whole model
+    // behind the camera: the reported "click a BCF topic and the model
+    // disappears". Clicking the canvas then reset filters + zoomed to fit,
+    // which is why it came back but without the saved view.
+    //
+    // Deriving the offset from the model's own size keeps the requested
+    // radius inside the clamp range at any scale, so the saved position and
+    // direction survive the round trip.
+    const bcfTargetOffset = (viewer) => {
+        const size = viewer?.World?.worldSize
+        const extent = size ? Math.max(size.x || 0, size.y || 0, size.z || 0) : 0
+        return extent > 0 ? extent * 0.5 : 10
+    }
+
+    // Actual restoreBcfViewpoint body, factored out so both the imperative
+    // method (called the instant a topic is clicked, possibly before the
+    // viewer is ready) and the pending-viewpoint effect (which re-applies it
+    // once isViewerReady flips true) share one implementation.
+    const applyBcfViewpoint = (viewpoint, topicGuid) => {
+        const viewer = viewerRef.current
+        if (!viewer || !viewpoint) return
+        try {
+            selectedBcfTopicGuidRef.current = topicGuid
+            const ids = (viewpoint.selection || [])
+                .map((s) => {
+                    const e = elementByAppIdRef.current.get(s.ifc_guid)
+                    return s.viewer_object_id ?? e?.id ?? s.speckle_id ?? e?.speckle_id
+                })
+                .filter(Boolean)
+            if (ids.length) {
+                isolateByHiding(viewer, ids, 'bcf')
+                viewer.getExtension(SelectionExtension)?.selectObjects(ids)
+                // Keep "Hide Selected" in sync — see selectObject() above.
+                lastSelectedSceneIdRef.current = ids[ids.length - 1]
+                lastSelectedSceneIdsRef.current = ids
+                setSelectionCount(ids.length)
+            }
+            if (viewpoint.camera_view_point && viewpoint.camera_direction) {
+                const position = new Vector3(viewpoint.camera_view_point.x, viewpoint.camera_view_point.y, viewpoint.camera_view_point.z)
+                const dir = viewpoint.camera_direction
+                const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), bcfTargetOffset(viewer))
+                viewer.getExtension(HybridCameraController)?.setCameraView({ position, target }, true)
+            } else if (ids.length) {
+                viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
+            }
+            // isolateByHiding/selectObjects update filter/selection state but
+            // don't paint on their own (see focusElements above) — without this
+            // the viewpoint applies internally but the canvas never repaints.
+            viewer.requestRender()
+        } catch (e) { console.warn('[SpeckleViewer] restoreBcfViewpoint error:', e) }
+    }
+
+    // Retries a BCF viewpoint restore that arrived before the viewer was
+    // ready (see restoreBcfViewpoint's own comment) — fires once per
+    // isViewerReady transition to true, applies whatever's pending, if
+    // anything, and clears it either way so a later topic switch or a
+    // finished-but-then-reloaded model doesn't replay a stale one.
+    useEffect(() => {
+        if (!isViewerReady) return
+        const pending = pendingBcfViewpointRef.current
+        pendingBcfViewpointRef.current = null
+        if (pending) applyBcfViewpoint(pending.viewpoint, pending.topicGuid)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isViewerReady])
+
     // Imperative API — lets App.jsx call setFilter(ids) directly, bypassing the
     // React prop/memo chain which can be unreliable for real-time filter updates.
     useImperativeHandle(ref, () => ({
@@ -517,38 +612,32 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         // Restores a previously captured BCF viewpoint: flies the camera back,
         // re-selects/isolates the referenced elements (mapped from IFC GUIDs
         // back to scene object ids), mirroring handleCommentClick below.
+        //
+        // BCF Topics has its own independent fetch, unrelated to (and usually
+        // much faster than) the 3D geometry load — clicking a topic the
+        // instant it appears clickable can land here before the viewer's
+        // WorldTree has actually finished streaming meshes in. Isolating
+        // against a half-loaded tree doesn't isolate the target, it hides the
+        // whole model: isolateByHiding hides every id in speckleIdsRef
+        // *except* the target (a static list already fully known from
+        // fullData, independent of mesh-load progress), so whatever hasn't
+        // streamed in yet — quite possibly including the target itself —
+        // never gets shown, while everything that *has* loaded gets hidden.
+        // Confirmed live: clicking a topic right after page load made the
+        // whole model vanish; clicking empty canvas afterward reset filters
+        // and brought it back, but without the saved isolation/view, since a
+        // filter reset is not the same as retrying the isolate. Deferring
+        // until isViewerReady (the same gate every other isolate effect in
+        // this file already uses) and retrying once it flips true fixes both:
+        // no more vanishing model, and the viewpoint still actually applies.
         restoreBcfViewpoint(viewpoint, topicGuid = null) {
-            const viewer = viewerRef.current
-            if (!viewer || !viewpoint) return
-            try {
-                selectedBcfTopicGuidRef.current = topicGuid
-                const ids = (viewpoint.selection || [])
-                    .map((s) => {
-                        const e = elementByAppIdRef.current.get(s.ifc_guid)
-                        return s.viewer_object_id ?? e?.id ?? s.speckle_id ?? e?.speckle_id
-                    })
-                    .filter(Boolean)
-                if (ids.length) {
-                    isolateByHiding(viewer, ids, 'bcf')
-                    viewer.getExtension(SelectionExtension)?.selectObjects(ids)
-                    // Keep "Hide Selected" in sync — see selectObject() above.
-                    lastSelectedSceneIdRef.current = ids[ids.length - 1]
-                    lastSelectedSceneIdsRef.current = ids
-                    setSelectionCount(ids.length)
-                }
-                if (viewpoint.camera_view_point && viewpoint.camera_direction) {
-                    const position = new Vector3(viewpoint.camera_view_point.x, viewpoint.camera_view_point.y, viewpoint.camera_view_point.z)
-                    const dir = viewpoint.camera_direction
-                    const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), 10)
-                    viewer.getExtension(HybridCameraController)?.setCameraView({ position, target }, true)
-                } else if (ids.length) {
-                    viewer.getExtension(HybridCameraController)?.setCameraView(ids, true)
-                }
-                // isolateByHiding/selectObjects update filter/selection state but
-                // don't paint on their own (see focusElements above) — without this
-                // the viewpoint applies internally but the canvas never repaints.
-                viewer.requestRender()
-            } catch (e) { console.warn('[SpeckleViewer] restoreBcfViewpoint error:', e) }
+            if (!viewpoint) return
+            if (!isViewerReadyRef.current) {
+                pendingBcfViewpointRef.current = { viewpoint, topicGuid }
+                return
+            }
+            pendingBcfViewpointRef.current = null
+            applyBcfViewpoint(viewpoint, topicGuid)
         },
         // Paints every object by the value → colour mapping a chart panel is
         // currently displaying (see the chart's "colour viewer by this chart"
@@ -868,6 +957,10 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         setIsViewerReady(false)
         setLoadProgress(null)
         setViewerError(null)
+        // A BCF viewpoint queued against the model being switched away from
+        // must not fire against whatever loads next — its ids belong to a
+        // different model's id space (see restoreBcfViewpoint's own comment).
+        pendingBcfViewpointRef.current = null
 
         const controller = new AbortController()
         let active = true
@@ -1832,7 +1925,8 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             const dir = topic.viewpoint.camera_direction
             if (cvp && dir) {
                 const position = new Vector3(cvp.x, cvp.y, cvp.z)
-                const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), 10)
+                // Scale-relative offset, not a flat 10 — see bcfTargetOffset.
+                const target = position.clone().addScaledVector(new Vector3(dir.x, dir.y, dir.z), bcfTargetOffset(viewerRef.current))
                 viewerRef.current.getExtension(HybridCameraController)?.setCameraView({ position, target }, true)
             } else if (ids.length) {
                 viewerRef.current.getExtension(HybridCameraController)?.setCameraView(ids, true)
