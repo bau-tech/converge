@@ -424,7 +424,7 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
                             <div className="flex items-center justify-between text-xs text-[var(--speckle-foreground-2)]">
                                 <span className="flex items-center gap-1.5">
                                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    {progress ? `Checking rule ${Math.min(progress.completed + 1, progress.total)} of ${progress.total}…` : 'Starting check…'}
+                                    {progress ? `Checking rule ${Math.min(Math.floor(progress.completed) + 1, progress.total)} of ${progress.total}…` : 'Starting check…'}
                                 </span>
                                 {progress && progress.total > 0 && (
                                     <span className="text-[var(--speckle-foreground-3)]">{Math.round((progress.completed / progress.total) * 100)}%</span>
@@ -433,7 +433,7 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
                             <div className="h-1.5 rounded-full bg-[var(--speckle-outline-3)] overflow-hidden">
                                 <div
                                     className="h-full bg-amber-500 transition-all duration-300"
-                                    style={{ width: progress && progress.total > 0 ? `${(progress.completed / progress.total) * 100}%` : '8%' }}
+                                    style={{ width: progress && progress.total > 0 ? `${(progress.completed / progress.total) * 100}%` : '0%' }}
                                 />
                             </div>
                         </div>

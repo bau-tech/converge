@@ -14,12 +14,15 @@ from routers.ifc_export import resolve_model_ifc_bytes, build_revit_guid_map
 router = APIRouter(tags=["clash-check"])
 logger = logging.getLogger(__name__)
 
-# Element-count of each retry batch once a rule's worker has segfaulted on
-# the whole-job AND the single-rule attempt (see clash_check.py's
-# _single_threaded_geometry_iterator docstring — a real, still-occurring
-# native ifcopenshell crash under certain geometry, not the threading race
-# that mitigation targets, so run_cpu_bound's built-in one retry doesn't
-# save it). Small enough that one bad element's batch is cheap to lose.
+# Starting element-count of each retry batch once a rule's worker has
+# segfaulted on the whole-job AND the single-rule attempt (see
+# clash_check.py's _single_threaded_geometry_iterator docstring — a real,
+# still-occurring native ifcopenshell crash under certain geometry, not the
+# threading race that mitigation targets, so run_cpu_bound's built-in one
+# retry doesn't save it). A batch that still crashes gets bisected by
+# _bisect_ids below rather than discarded whole, so this only bounds how
+# many top-level chunks get created up front, not how finely a genuinely
+# poisoned one gets split.
 _CRASH_BATCH_SIZE = 200
 
 
@@ -27,12 +30,73 @@ def _chunked(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def _report_progress(job_id: str, completed: int, total: int) -> None:
+async def _bisect_ids(
+    run_one_batch, rule: dict, ids: list[str], chunk_is_a: bool, other_selector: str, on_progress,
+) -> tuple[list[dict], list[str]]:
+    """
+    Run `rule` with `ids` substituted into whichever side chunk_is_a selects
+    (the other side held fixed to other_selector), via run_one_batch(rule) —
+    an async callable that returns that one rule's result dict or raises
+    BrokenProcessPool on a double-crash (run_cpu_bound's own automatic retry
+    already failed too).
+
+    On a double-crash, bisects `ids` in half and recurses instead of
+    discarding the whole slice. This matters because the previous flat
+    per-batch handling discarded an entire _CRASH_BATCH_SIZE-sized batch the
+    moment ANY element in it crashed — confirmed in production on a
+    real cross-model check where exactly one duct segment (out of 1457,
+    paired with one specific slab) crashed the native geometry kernel, and
+    the old code's response was to mark all 1457 as crashed_global_ids and
+    return zero real results, discarding 1456 elements' worth of legitimate
+    clash results along with the one actually-poisoned pairing. Bisecting
+    isolates just the element(s) that actually crash.
+
+    Base case: a lone element that still crashes alone is genuinely poison
+    and gets recorded as crashed rather than retried further.
+
+    on_progress(n) fires once per n ids that reach a final (resolved or
+    crashed) outcome, so callers can report real progress through a
+    bisection instead of the job looking stuck at 0% for its whole
+    duration — see routers/clash_check.py's _report_progress.
+    """
+    selector = ", ".join(ids)
+    batch_rule = {
+        **rule,
+        "selector_a": selector if chunk_is_a else other_selector,
+        "selector_b": other_selector if chunk_is_a else selector,
+    }
+    try:
+        result = await run_one_batch(batch_rule)
+        on_progress(len(ids))
+        return result["clashes"], []
+    except BrokenProcessPool:
+        if len(ids) == 1:
+            logger.error(
+                "Clash job: element %s crashes the clash computation itself — skipping just this element",
+                ids[0],
+            )
+            on_progress(1)
+            return [], list(ids)
+        mid = len(ids) // 2
+        left_clashes, left_crashed = await _bisect_ids(
+            run_one_batch, rule, ids[:mid], chunk_is_a, other_selector, on_progress,
+        )
+        right_clashes, right_crashed = await _bisect_ids(
+            run_one_batch, rule, ids[mid:], chunk_is_a, other_selector, on_progress,
+        )
+        return left_clashes + right_clashes, left_crashed + right_crashed
+
+
+def _report_progress(job_id: str, completed: int | float, total: int) -> None:
     """Progress checkpoint for the per-rule/per-batch fallback loops below —
     these run in the main process (unlike clash_check.py's own
     _report_progress, called from inside a worker for the common whole-job-
     in-one-call path), so a plain update_job() with a connection from this
-    process's own pool is enough; no cross-process DB access needed here."""
+    process's own pool is enough; no cross-process DB access needed here.
+    completed is a whole number of rules done except while a rule is being
+    bisected after a crash (see _bisect_ids) — for that rule's duration it's
+    fractional, e.g. 1.35, so progress keeps moving instead of sitting at
+    the last whole-rule count for however long the bisection takes."""
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
@@ -115,28 +179,30 @@ async def _run_clash_checks_resilient(
             _report_progress(job_id, len(results), len(rule_dicts))
             continue
         chunk_is_a = len(ids_a) >= len(ids_b)
-        batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
+        big_ids = ids_a if chunk_is_a else ids_b
+        other_selector = selector_b if chunk_is_a else selector_a
+
+        total_elements = len(big_ids)
+        resolved_elements = 0
+
+        def _on_progress(n: int) -> None:
+            nonlocal resolved_elements
+            resolved_elements += n
+            _report_progress(job_id, round(len(results) + resolved_elements / total_elements, 2), len(rule_dicts))
+
+        async def _run_one_batch(batch_rule: dict) -> dict:
+            return (await run_cpu_bound(
+                run_clash_checks, ifc_bytes, [batch_rule], resolve_application_ids, guid_map,
+            ))[0]
 
         merged_clashes = []
         crashed_ids: list[str] = []
-        for batch_ids in batches:
-            batch_selector = ", ".join(batch_ids)
-            batch_rule = {
-                **rule,
-                "selector_a": batch_selector if chunk_is_a else selector_a,
-                "selector_b": selector_b if chunk_is_a else batch_selector,
-            }
-            try:
-                batch_result = (await run_cpu_bound(
-                    run_clash_checks, ifc_bytes, [batch_rule], resolve_application_ids, guid_map,
-                ))[0]
-                merged_clashes.extend(batch_result["clashes"])
-            except BrokenProcessPool:
-                logger.error(
-                    "Clash job: batch of %d elements crashed twice, skipping — rule %r",
-                    len(batch_ids), rule.get("name"),
-                )
-                crashed_ids.extend(batch_ids)
+        for batch_ids in _chunked(big_ids, _CRASH_BATCH_SIZE):
+            batch_clashes, batch_crashed = await _bisect_ids(
+                _run_one_batch, rule, batch_ids, chunk_is_a, other_selector, _on_progress,
+            )
+            merged_clashes.extend(batch_clashes)
+            crashed_ids.extend(batch_crashed)
 
         results.append({
             "name": rule.get("name"), "mode": rule.get("mode", "collision"),
@@ -198,29 +264,31 @@ async def _run_cross_model_clash_checks_resilient(
             _report_progress(job_id, len(results), len(rule_dicts))
             continue
         chunk_is_a = len(ids_a) >= len(ids_b)
-        batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
+        big_ids = ids_a if chunk_is_a else ids_b
+        other_selector = selector_b if chunk_is_a else selector_a
+
+        total_elements = len(big_ids)
+        resolved_elements = 0
+
+        def _on_progress(n: int) -> None:
+            nonlocal resolved_elements
+            resolved_elements += n
+            _report_progress(job_id, round(len(results) + resolved_elements / total_elements, 2), len(rule_dicts))
+
+        async def _run_one_batch(batch_rule: dict) -> dict:
+            return (await run_cpu_bound(
+                run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, [batch_rule],
+                resolve_a, resolve_b, guid_map_a, guid_map_b,
+            ))[0]
 
         merged_clashes = []
         crashed_ids: list[str] = []
-        for batch_ids in batches:
-            batch_selector = ", ".join(batch_ids)
-            batch_rule = {
-                **rule,
-                "selector_a": batch_selector if chunk_is_a else selector_a,
-                "selector_b": selector_b if chunk_is_a else batch_selector,
-            }
-            try:
-                batch_result = (await run_cpu_bound(
-                    run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, [batch_rule],
-                    resolve_a, resolve_b, guid_map_a, guid_map_b,
-                ))[0]
-                merged_clashes.extend(batch_result["clashes"])
-            except BrokenProcessPool:
-                logger.error(
-                    "Cross-model clash job: batch of %d elements crashed twice, skipping — rule %r",
-                    len(batch_ids), rule.get("name"),
-                )
-                crashed_ids.extend(batch_ids)
+        for batch_ids in _chunked(big_ids, _CRASH_BATCH_SIZE):
+            batch_clashes, batch_crashed = await _bisect_ids(
+                _run_one_batch, rule, batch_ids, chunk_is_a, other_selector, _on_progress,
+            )
+            merged_clashes.extend(batch_clashes)
+            crashed_ids.extend(batch_crashed)
 
         results.append({
             "name": rule.get("name"), "mode": rule.get("mode", "collision"),

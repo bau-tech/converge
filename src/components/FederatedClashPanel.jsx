@@ -134,6 +134,12 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
 
     const totalClashes = pairJobs.reduce((sum, p) => sum + (p.result?.total_count || 0), 0)
     const allDone = pairJobs.length > 0 && pairJobs.every((p) => p.status === 'complete' || p.status === 'failed')
+    // `checking` only covers runCheck's own POST-and-kick-off-polling work,
+    // which finishes in ~1s — it goes false long before the jobs it started
+    // actually complete. The Run Check button's busy state needs to track
+    // the whole thing (through allDone), not just that initial burst, or it
+    // re-enables itself and looks idle while pairJobs is still polling.
+    const isRunning = checking || (pairJobs.length > 0 && !allDone)
     // Weighted by rule count, not by pair count — a 5-rule pair and a 1-rule
     // pair otherwise count equally toward "done" even though the 5-rule one
     // takes far longer. Completed/failed pairs count all their rules done
@@ -414,10 +420,10 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                             </button>
                             <button
                                 onClick={runCheck}
-                                disabled={activePairs.length === 0 || checking}
+                                disabled={activePairs.length === 0 || isRunning}
                                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-amber-500 text-black font-medium disabled:opacity-40 transition-opacity ml-auto"
                             >
-                                {checking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                                {isRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                                 Run Check ({activePairs.length} pair{activePairs.length === 1 ? '' : 's'})
                             </button>
                         </div>
@@ -454,7 +460,7 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                                     <div className="h-1.5 rounded-full bg-[var(--speckle-outline-3)] overflow-hidden">
                                         <div
                                             className="h-full bg-amber-500 transition-all duration-300"
-                                            style={{ width: overallProgress.total > 0 ? `${(overallProgress.completed / overallProgress.total) * 100}%` : '8%' }}
+                                            style={{ width: overallProgress.total > 0 ? `${(overallProgress.completed / overallProgress.total) * 100}%` : '0%' }}
                                         />
                                     </div>
                                 )}
@@ -467,7 +473,7 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                                         {pair.status === 'pending' || pair.status === 'starting' ? (
                                             <span className="flex items-center gap-1 text-[10px] text-[var(--speckle-foreground-3)]">
                                                 <Loader2 className="w-3 h-3 animate-spin" />
-                                                {pair.progress && pair.progress.total > 0 ? `${pair.progress.completed}/${pair.progress.total}` : ''}
+                                                {pair.progress && pair.progress.total > 0 ? `${Math.round((pair.progress.completed / pair.progress.total) * 100)}%` : ''}
                                             </span>
                                         ) : pair.status === 'failed' ? (
                                             <span className="text-[10px] text-red-400">{pair.error || 'failed'}</span>

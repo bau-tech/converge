@@ -54,6 +54,88 @@ def _single_threaded_geometry_iterator():
         multiprocessing.cpu_count = original
 
 
+class _PhaseProgressHandler(logging.Handler):
+    """
+    Attached to `logger` only for the duration of one clasher.clash() call
+    (see _run_one_rule/_run_one_cross_rule) to turn ifcclash's own internal
+    INFO-level phase logs ("Creating group a", "Tree finished", ...) into a
+    coarse fractional progress signal — the only progress visibility
+    available at all for a single rule, since clash() itself is one opaque
+    blocking call with no native progress callback of its own. Before this,
+    progress was rule-granularity only (see run_clash_checks/
+    run_cross_model_clash_checks): fine for a many-rule job, but the common
+    case — one rule — showed flat 0% for the rule's entire duration, however
+    long that took, then jumped straight to 100%.
+
+    Walks `markers` in order rather than matching each by distinct message
+    text, since "Tree finished" is logged once per group with identical
+    wording — each entry is matched at most once, so a duplicate message
+    only ever advances to the next marker, never re-fires the same one. A
+    missing or reordered message (e.g. a future ifcclash version rewording
+    a log line) just means later markers never fire and progress plateaus
+    early — degrades to the old flat-0%-then-100% behavior, not a crash.
+    """
+    def __init__(self, markers: list[tuple[str, float]], on_progress) -> None:
+        super().__init__()
+        self._markers = markers
+        self._on_progress = on_progress
+        self._next = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._next >= len(self._markers):
+            return
+        try:
+            message = record.getMessage()
+        except Exception:
+            return
+        text, fraction = self._markers[self._next]
+        if text in message:
+            self._next += 1
+            try:
+                self._on_progress(fraction)
+            except Exception:
+                logger.warning("Clash phase-progress callback failed (non-fatal)", exc_info=True)
+
+
+# Coarse, empirically-weighted phase markers — see _PhaseProgressHandler.
+# Two-sided (cross-group) rules get one marker set, self-clash (one group)
+# rules another, since ifcclash only logs "Creating group b"/a second "Tree
+# finished" when there's actually a second group. Group b's tree build is
+# weighted heaviest since it was consistently the dominant cost in the
+# production case this was built against (a 1457-element side took ~60s
+# vs. ~5s for a 27-element side) — the real split depends on relative
+# element counts and is a rough approximation, not a measurement. Some
+# visible movement through the slow parts beats flat 0% until the rule
+# finishes; the final stretch (the actual clash computation, which has no
+# internal logging at all) still plateaus at the last marker until done.
+_TWO_SIDED_PHASE_MARKERS = [
+    ("Creating group a", 0.02),
+    ("Tree finished", 0.15),
+    ("Creating group b", 0.18),
+    ("Tree finished", 0.70),
+    ("Found clashes:", 1.0),
+]
+_SELF_CLASH_PHASE_MARKERS = [
+    ("Creating group a", 0.05),
+    ("Tree finished", 0.60),
+    ("Found clashes:", 1.0),
+]
+
+
+@contextlib.contextmanager
+def _phase_progress(two_sided: bool, on_progress):
+    if on_progress is None:
+        yield
+        return
+    markers = _TWO_SIDED_PHASE_MARKERS if two_sided else _SELF_CLASH_PHASE_MARKERS
+    handler = _PhaseProgressHandler(markers, on_progress)
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+
+
 def _with_geometry_count(check_file, selector: str) -> int:
     # A selector matching zero elements, or matching only geometry-less
     # elements (e.g. Tekla "Connection" proxy objects with Representation=None,
@@ -167,13 +249,16 @@ def _extract_clashes(
 
 def _run_one_rule(
     check_file, tmp_path: str, rule: dict, resolve_application_ids: bool = False,
-    guid_map: dict | None = None,
+    guid_map: dict | None = None, on_progress=None,
 ) -> dict:
     """
     Run a single clash rule against an already-open ifcopenshell file backed
     by tmp_path. Returns the same result shape regardless of how many other
     rules are run alongside it — each rule gets its own fresh Clasher/BVH
     tree, matching the one-rule-at-a-time behavior this was validated against.
+
+    on_progress, when given, is called with a 0..1 fraction as ifcclash's own
+    internal phase logs fire during clasher.clash() — see _phase_progress.
     """
     selector_a = rule["selector_a"]
     selector_b = rule.get("selector_b")
@@ -198,17 +283,18 @@ def _run_one_rule(
     settings.logger = logger
     clasher = Clasher(settings)
 
+    two_sided = bool(selector_b and selector_b != selector_a)
     clash_set = {
         "name": rule.get("name") or "clash",
         "a": [{"file": tmp_path, "mode": "i", "selector": selector_a}],
         "mode": mode,
     }
-    if selector_b and selector_b != selector_a:
+    if two_sided:
         clash_set["b"] = [{"file": tmp_path, "mode": "i", "selector": selector_b}]
     _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
 
     clasher.clash_sets = [clash_set]
-    with _single_threaded_geometry_iterator():
+    with _single_threaded_geometry_iterator(), _phase_progress(two_sided, on_progress):
         clasher.clash()
 
     clashes = _extract_clashes(
@@ -218,7 +304,7 @@ def _run_one_rule(
     return {**base_result, "count": len(clashes), "clashes": clashes}
 
 
-def _report_progress(job_id: str | None, completed: int, total: int) -> None:
+def _report_progress(job_id: str | None, completed: int | float, total: int) -> None:
     """Best-effort progress checkpoint, written from inside the worker process
     (it already has its own DB connection — see process_pool.py's
     _worker_init) so the polling status endpoint can show real "N of M rules"
@@ -227,7 +313,9 @@ def _report_progress(job_id: str | None, completed: int, total: int) -> None:
     just means one missed progress tick, not a lost result. Overwrites
     `result` — safe because the router's own final update_job(status=
     "complete", result=...) call always runs after this and replaces it with
-    the real payload; nothing else writes `result` for this job in between."""
+    the real payload; nothing else writes `result` for this job in between.
+    completed is fractional (e.g. 1.35) while rule index 1 (0-based) is still
+    in progress — see _phase_progress — and a whole number once it finishes."""
     if not job_id:
         return
     try:
@@ -290,7 +378,8 @@ def run_clash_checks(
         check_file = ifcopenshell.open(tmp_path)
         results = []
         for i, rule in enumerate(rules):
-            results.append(_run_one_rule(check_file, tmp_path, rule, resolve_application_ids, guid_map))
+            on_progress = (lambda fraction, i=i: _report_progress(job_id, i + fraction, len(rules))) if job_id else None
+            results.append(_run_one_rule(check_file, tmp_path, rule, resolve_application_ids, guid_map, on_progress))
             _report_progress(job_id, i + 1, len(rules))
         return results
     finally:
@@ -304,7 +393,7 @@ def run_clash_checks(
 def _run_one_cross_rule(
     check_file_a, tmp_path_a: str, check_file_b, tmp_path_b: str, rule: dict,
     resolve_a: bool = False, resolve_b: bool = False,
-    guid_map_a: dict | None = None, guid_map_b: dict | None = None,
+    guid_map_a: dict | None = None, guid_map_b: dict | None = None, on_progress=None,
 ) -> dict:
     """
     Like _run_one_rule, but group "a" and group "b" always come from two
@@ -312,6 +401,9 @@ def _run_one_cross_rule(
     is no same-file self-clash fallback here, since A and B are never the
     same model. selector_b defaults to selector_a when omitted, meaning
     "the same IFC class on both sides" rather than "self-clash".
+
+    on_progress: see _run_one_rule's docstring — always the two-sided phase
+    markers here, since a cross-model rule always has both groups.
     """
     selector_a = rule["selector_a"]
     selector_b = rule.get("selector_b") or selector_a
@@ -345,7 +437,7 @@ def _run_one_cross_rule(
     _apply_mode_settings(clash_set, mode, tolerance, clearance, allow_touching)
 
     clasher.clash_sets = [clash_set]
-    with _single_threaded_geometry_iterator():
+    with _single_threaded_geometry_iterator(), _phase_progress(True, on_progress):
         clasher.clash()
 
     clashes = _extract_clashes(clash_set, check_file_a, resolve_a, check_file_b, resolve_b, guid_map_a, guid_map_b)
@@ -390,9 +482,10 @@ def run_cross_model_clash_checks(
         check_file_b = ifcopenshell.open(tmp_path_b)
         results = []
         for i, rule in enumerate(rules):
+            on_progress = (lambda fraction, i=i: _report_progress(job_id, i + fraction, len(rules))) if job_id else None
             results.append(_run_one_cross_rule(
                 check_file_a, tmp_path_a, check_file_b, tmp_path_b, rule,
-                resolve_a, resolve_b, guid_map_a, guid_map_b,
+                resolve_a, resolve_b, guid_map_a, guid_map_b, on_progress,
             ))
             _report_progress(job_id, i + 1, len(rules))
         return results

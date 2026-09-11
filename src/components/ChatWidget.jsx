@@ -324,7 +324,11 @@ export function ChatWidget({ onFilter, projectId, modelId, modelContext, normali
             initial={false}
             // z-[260]: above the Element panel (z-[245]) so this FAB stays clickable
             // even when the panel is covering the bottom-right corner of the viewer.
-            className="fixed bottom-[calc(6rem+env(safe-area-inset-bottom))] right-6 z-[260] flex flex-col items-end"
+            // right-[5.25rem] = BcfTopicPanel's own right-6 (1.5rem) + its button
+            // width (w-12 = 3rem) + a 0.75rem gap, so this FAB sits immediately to
+            // the left of the BCF Topics button rather than underneath/overlapping
+            // it (BcfTopicPanel.jsx uses the same bottom-6/right-6 corner anchor).
+            className="fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] right-[5.25rem] z-[260] flex flex-col items-end"
         >
 
             {/* Chat Window */}
