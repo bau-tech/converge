@@ -81,8 +81,20 @@ async def _run_clash_checks_resilient(
             })
             continue
 
-        ids_a = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes, selector_a)
-        ids_b = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes, selector_b)
+        try:
+            ids_a = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes, selector_a)
+            ids_b = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes, selector_b)
+        except BrokenProcessPool:
+            logger.error(
+                "Clash job: rule %r crashed resolving element ids for batching too — giving up on this rule",
+                rule.get("name"),
+            )
+            results.append({
+                "name": rule.get("name"), "mode": rule.get("mode", "collision"),
+                "selector_a": selector_a, "selector_b": selector_b,
+                "count": 0, "clashes": [], "crashed": True,
+            })
+            continue
         chunk_is_a = len(ids_a) >= len(ids_b)
         batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
 
@@ -149,8 +161,20 @@ async def _run_cross_model_clash_checks_resilient(
         selector_a = rule["selector_a"]
         selector_b = rule.get("selector_b") or selector_a
 
-        ids_a = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes_a, selector_a)
-        ids_b = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes_b, selector_b)
+        try:
+            ids_a = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes_a, selector_a)
+            ids_b = await run_cpu_bound(resolve_selector_global_ids, ifc_bytes_b, selector_b)
+        except BrokenProcessPool:
+            logger.error(
+                "Cross-model clash job: rule %r crashed resolving element ids for batching too — "
+                "giving up on this rule", rule.get("name"),
+            )
+            results.append({
+                "name": rule.get("name"), "mode": rule.get("mode", "collision"),
+                "selector_a": selector_a, "selector_b": selector_b,
+                "count": 0, "clashes": [], "crashed": True,
+            })
+            continue
         chunk_is_a = len(ids_a) >= len(ids_b)
         batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
 
