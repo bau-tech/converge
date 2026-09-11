@@ -28,11 +28,20 @@ through the original uploaded IFC blob when the source model came from one.
 | `ifc_write_pset(element_ids, pset_name, properties)` | Write/update a property set on one or more elements |
 
 #### Speckle server tools (GraphQL)
+Most of these take an optional `server` (and, for the copy tool, `dest_server`) — a name/URL
+from `speckle_list_servers()` — so a call can target any configured server, not just the default
+one (`VITE_EXTRA_SPECKLE_SERVERS` in `.env`).
+
 | Tool | Description |
 |------|-------------|
-| `speckle_list_projects` | List projects on the Speckle server |
-| `speckle_list_models(project_id)` | List models (branches) in a project |
-| `speckle_list_versions(project_id, model_name)` | List commits |
+| `speckle_list_servers` | Every Speckle server this MCP server knows about — pass a returned name/URL to any `server`/`dest_server` param below |
+| `speckle_list_projects(server?)` | List projects on a Speckle server |
+| `speckle_list_models(project_id, server?)` | List models (branches) in a project |
+| `speckle_list_versions(project_id, model_name, server?)` | List commits |
+| `speckle_copy_project(project_id, dest_server, ...)` | Copy an entire project — every model, latest version by default or full replayed history — to a new project on a *different* server. `delete_source=True` (+ `confirm=True`) turns it into a move |
+| `speckle_delete_project(project_id, confirm, server?)` | PERMANENTLY delete a project — all its models/versions/comments. Requires `confirm=True` |
+| `speckle_delete_model(project_id, model_name, confirm, server?)` | PERMANENTLY delete one model (branch) and its versions. Requires `confirm=True` |
+| `speckle_delete_version(project_id, version_ids, confirm, server?)` | PERMANENTLY delete one or more versions (commits) — comma-separated ids. Requires `confirm=True` |
 
 #### Normalizer tools (REST)
 | Tool | Description |

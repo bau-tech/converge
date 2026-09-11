@@ -15,7 +15,7 @@ This repository isn't an image of its own — it's the overview for the whole **
 | [`euch/converge-dashboard`](https://hub.docker.com/r/euch/converge-dashboard) | React + Vite frontend (Nginx) — viewer, charts, BCF/Documents UI, AI Assistant |
 | [`euch/converge-normalizer`](https://hub.docker.com/r/euch/converge-normalizer) | Core API — Speckle ingestion, IFC export, clash/IDS checks, documents, notifications |
 | [`euch/converge-bcf-server`](https://hub.docker.com/r/euch/converge-bcf-server) | BCF 2.1/3.0 issue-tracking API, BIMcollab OAuth shim |
-| [`euch/converge-mcp`](https://hub.docker.com/r/euch/converge-mcp) | MCP server — 86 tools exposing BIM data to Claude |
+| [`euch/converge-mcp`](https://hub.docker.com/r/euch/converge-mcp) | MCP server — 87 tools exposing BIM data to Claude |
 
 Each image repo's own page (linked above) covers its specific config variables, ports, and health checks in more detail.
 

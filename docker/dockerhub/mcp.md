@@ -4,7 +4,7 @@
 
 # Converge MCP Server
 
-The AI-copilot entry point of **Converge** — a BIM coordination, analytics, and collaboration platform built on [Speckle](https://speckle.systems/). This image runs a [FastMCP](https://github.com/jlowin/fastmcp) server (86 tools, 2 resources) so Claude Code or Claude.ai can query and reason over your BIM data in natural language, backed by an in-memory `ifcopenshell`/`ifc5d` IFC session plus a thin REST/GraphQL client over the rest of the stack.
+The AI-copilot entry point of **Converge** — a BIM coordination, analytics, and collaboration platform built on [Speckle](https://speckle.systems/). This image runs a [FastMCP](https://github.com/jlowin/fastmcp) server (87 tools, 2 resources) so Claude Code or Claude.ai can query and reason over your BIM data in natural language, backed by an in-memory `ifcopenshell`/`ifc5d` IFC session plus a thin REST/GraphQL client over the rest of the stack.
 
 Like `converge-bcf-server`, this is a deliberately slim image split out of the main normalizer build — `converge_mcp.py` never touches `fastapi`, `psycopg2`, `specklepy`, `ifctester`, `ifcclash`, `numpy`, `fastembed`, `ezdxf`, `cairosvg`, `python-docx`, `openpyxl`, or `reportlab`, so it ships its own minimal `requirements-converge-mcp.txt` instead of inheriting the ~800MB normalizer image.
 

@@ -46,7 +46,7 @@ Claude Code / Claude.ai — MCP client
   │ stdio (local)  or  HTTPS/streamable-HTTP (remote)
   ▼
 converge_mcp.py :8003  (converge-mcp server)
-  FastMCP — 86 tools + 2 resources · ifcopenshell in-memory IFC session
+  FastMCP — 87 tools + 2 resources · ifcopenshell in-memory IFC session
   │
   └─ REST ─► bim-normalizer :8002
 ```
@@ -156,7 +156,7 @@ A standalone, session-authenticated admin panel (`/admin`, linked from the "Admi
 
 ## MCP server (`converge_mcp.py`)
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server — 86 tools + 2 resources — that lets Claude read and reason over your Speckle models: an in-memory `ifcopenshell` IFC session, Speckle GraphQL, normalizer REST queries, filters/overrides, QA/diff/semantic-search intelligence tools, clash/schedule checks, report generation, Nextcloud documents + BCF, and 5D quantity/BoQ export.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server — 87 tools + 2 resources — that lets Claude read and reason over your Speckle models: an in-memory `ifcopenshell` IFC session, Speckle GraphQL, normalizer REST queries, filters/overrides, QA/diff/semantic-search intelligence tools, clash/schedule checks, report generation, Nextcloud documents + BCF, cross-server project copy/move, and 5D quantity/BoQ export.
 
 **Full tool catalog:** [`docs/MCP_REFERENCE.md`](docs/MCP_REFERENCE.md).
 

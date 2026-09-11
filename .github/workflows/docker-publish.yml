@@ -168,7 +168,7 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ vars.DOCKERHUB_USERNAME }}/converge-mcp
-          short-description: "MCP server exposing Converge BIM data to Claude: 86 tools over IFC/Speckle."
+          short-description: "MCP server exposing Converge BIM data to Claude: 87 tools over IFC/Speckle."
           readme-filepath: ./docker/dockerhub/mcp.md
 
       # Not a built image — an overview-only repo (create it once manually on
