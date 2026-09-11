@@ -41,7 +41,7 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
 
     const [rules, setRules] = useState(() => [newRule()])
     const [checking, setChecking] = useState(false)
-    const [pairJobs, setPairJobs] = useState([])  // [{ key, a, b, jobId, status, result, error }]
+    const [pairJobs, setPairJobs] = useState([])  // [{ key, a, b, jobId, status, result, error, progress }]
     const [error, setError] = useState(null)
     const [selected, setSelected] = useState(new Set())  // keys: "<pairIdx>:<ruleIdx>:<clashIdx>"
     const [pushing, setPushing] = useState(false)
@@ -134,6 +134,17 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
 
     const totalClashes = pairJobs.reduce((sum, p) => sum + (p.result?.total_count || 0), 0)
     const allDone = pairJobs.length > 0 && pairJobs.every((p) => p.status === 'complete' || p.status === 'failed')
+    // Weighted by rule count, not by pair count — a 5-rule pair and a 1-rule
+    // pair otherwise count equally toward "done" even though the 5-rule one
+    // takes far longer. Completed/failed pairs count all their rules done
+    // (their own `progress` is cleared to null once they finish).
+    const overallProgress = pairJobs.reduce((acc, p) => {
+        if (p.status === 'complete' || p.status === 'failed') {
+            const total = p.result?.rules?.length ?? p.progress?.total ?? 1
+            return { completed: acc.completed + total, total: acc.total + total }
+        }
+        return { completed: acc.completed + (p.progress?.completed || 0), total: acc.total + (p.progress?.total || 0) }
+    }, { completed: 0, total: 0 })
 
     const runCheck = async () => {
         if (activePairs.length === 0) return
@@ -162,7 +173,10 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                 }))
         )
 
-        const initialJobs = activePairs.map(([a, b]) => ({ key: pairKey(a, b), a, b, jobId: null, status: 'starting', result: null, error: null }))
+        const initialJobs = activePairs.map(([a, b], idx) => ({
+            key: pairKey(a, b), a, b, jobId: null, status: 'starting', result: null, error: null,
+            progress: { completed: 0, total: pairRuleBodies[idx].length },
+        }))
         setPairJobs(initialJobs)
 
         const started = await Promise.all(activePairs.map(async ([a, b], idx) => {
@@ -196,10 +210,11 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                     const statusRes = await fetch(`${base}/models/${a.normalizerModelId}/clash-check/${jobId}/status`)
                     const status = await statusRes.json()
                     if (status.status === 'complete') {
-                        setPairJobs((prev) => prev.map((p, i) => (i === idx ? { ...p, status: 'complete', result: status.result } : p)))
+                        setPairJobs((prev) => prev.map((p, i) => (i === idx ? { ...p, status: 'complete', result: status.result, progress: null } : p)))
                     } else if (status.status === 'failed') {
-                        setPairJobs((prev) => prev.map((p, i) => (i === idx ? { ...p, status: 'failed', error: status.error || 'Clash check failed' } : p)))
+                        setPairJobs((prev) => prev.map((p, i) => (i === idx ? { ...p, status: 'failed', error: status.error || 'Clash check failed', progress: null } : p)))
                     } else {
+                        if (status.progress) setPairJobs((prev) => prev.map((p, i) => (i === idx ? { ...p, progress: status.progress } : p)))
                         poll(idx, a, jobId)
                     }
                 } catch (err) {
@@ -423,13 +438,26 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
 
                     {pairJobs.length > 0 && (
                         <div className="space-y-3">
-                            <div className="flex items-center gap-3 rounded-xl border border-[var(--speckle-outline-3)] px-4 py-3">
-                                <AlertTriangle className={`w-4 h-4 shrink-0 ${totalClashes > 0 ? 'text-amber-400' : 'text-emerald-400'}`} />
-                                <div className="text-sm text-[var(--speckle-foreground)] font-medium">
-                                    {allDone
-                                        ? `${totalClashes} clash${totalClashes === 1 ? '' : 'es'} across ${pairJobs.length} pair${pairJobs.length === 1 ? '' : 's'}`
-                                        : `Checking ${pairJobs.length} pair${pairJobs.length === 1 ? '' : 's'}…`}
+                            <div className="rounded-xl border border-[var(--speckle-outline-3)] px-4 py-3 space-y-1.5">
+                                <div className="flex items-center gap-3">
+                                    <AlertTriangle className={`w-4 h-4 shrink-0 ${totalClashes > 0 ? 'text-amber-400' : 'text-emerald-400'}`} />
+                                    <div className="text-sm text-[var(--speckle-foreground)] font-medium flex-1">
+                                        {allDone
+                                            ? `${totalClashes} clash${totalClashes === 1 ? '' : 'es'} across ${pairJobs.length} pair${pairJobs.length === 1 ? '' : 's'}`
+                                            : `Checking ${pairJobs.length} pair${pairJobs.length === 1 ? '' : 's'}…`}
+                                    </div>
+                                    {!allDone && overallProgress.total > 0 && (
+                                        <span className="text-xs text-[var(--speckle-foreground-3)]">{Math.round((overallProgress.completed / overallProgress.total) * 100)}%</span>
+                                    )}
                                 </div>
+                                {!allDone && (
+                                    <div className="h-1.5 rounded-full bg-[var(--speckle-outline-3)] overflow-hidden">
+                                        <div
+                                            className="h-full bg-amber-500 transition-all duration-300"
+                                            style={{ width: overallProgress.total > 0 ? `${(overallProgress.completed / overallProgress.total) * 100}%` : '8%' }}
+                                        />
+                                    </div>
+                                )}
                             </div>
 
                             {pairJobs.map((pair, pairIdx) => (
@@ -437,7 +465,10 @@ export function FederatedClashPanel({ combinedModels, normalizerUrl, viewerRef, 
                                     <div className="flex items-center gap-2 px-1 pt-1">
                                         <span className="text-xs font-semibold text-[var(--speckle-foreground-2)]">{pair.key}</span>
                                         {pair.status === 'pending' || pair.status === 'starting' ? (
-                                            <Loader2 className="w-3 h-3 animate-spin text-[var(--speckle-foreground-3)]" />
+                                            <span className="flex items-center gap-1 text-[10px] text-[var(--speckle-foreground-3)]">
+                                                <Loader2 className="w-3 h-3 animate-spin" />
+                                                {pair.progress && pair.progress.total > 0 ? `${pair.progress.completed}/${pair.progress.total}` : ''}
+                                            </span>
                                         ) : pair.status === 'failed' ? (
                                             <span className="text-[10px] text-red-400">{pair.error || 'failed'}</span>
                                         ) : (

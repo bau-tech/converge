@@ -218,15 +218,42 @@ def _run_one_rule(
     return {**base_result, "count": len(clashes), "clashes": clashes}
 
 
+def _report_progress(job_id: str | None, completed: int, total: int) -> None:
+    """Best-effort progress checkpoint, written from inside the worker process
+    (it already has its own DB connection — see process_pool.py's
+    _worker_init) so the polling status endpoint can show real "N of M rules"
+    / percentage progress instead of a plain spinner for the whole job's
+    duration. Never allowed to fail the actual clash run: a DB hiccup here
+    just means one missed progress tick, not a lost result. Overwrites
+    `result` — safe because the router's own final update_job(status=
+    "complete", result=...) call always runs after this and replaces it with
+    the real payload; nothing else writes `result` for this job in between."""
+    if not job_id:
+        return
+    try:
+        from db.connection import get_conn, release_conn
+        from db.jobs import update_job
+        conn = get_conn()
+        try:
+            update_job(conn, job_id, result={"progress": {"completed": completed, "total": total}})
+        finally:
+            release_conn(conn)
+    except Exception:
+        logger.warning("Clash check job %s: progress checkpoint failed (non-fatal)", job_id, exc_info=True)
+
+
 def run_clash_checks(
     ifc_bytes: bytes, rules: list[dict], resolve_application_ids: bool = False,
-    guid_map: dict | None = None,
+    guid_map: dict | None = None, job_id: str | None = None,
 ) -> list[dict]:
     """
     Run one or more clash rules against the same IFC model in a single pass —
     the model is written to a temp file and opened with ifcopenshell exactly
     once and shared across every rule, so checking N rules costs one export
     re-read instead of N.
+
+    job_id, when given, gets a best-effort "completed/total" progress
+    checkpoint (see _report_progress) written after each rule finishes.
 
     Each rule is a dict: {name?, selector_a, selector_b?, mode?, tolerance?,
     clearance?, allow_touching?} — see run_clash_check's docstring (below,
@@ -261,7 +288,11 @@ def run_clash_checks(
             tmp_path = f.name
 
         check_file = ifcopenshell.open(tmp_path)
-        return [_run_one_rule(check_file, tmp_path, rule, resolve_application_ids, guid_map) for rule in rules]
+        results = []
+        for i, rule in enumerate(rules):
+            results.append(_run_one_rule(check_file, tmp_path, rule, resolve_application_ids, guid_map))
+            _report_progress(job_id, i + 1, len(rules))
+        return results
     finally:
         if tmp_path:
             try:
@@ -325,6 +356,7 @@ def run_cross_model_clash_checks(
     ifc_bytes_a: bytes, ifc_bytes_b: bytes, rules: list[dict],
     resolve_a: bool = False, resolve_b: bool = False,
     guid_map_a: dict | None = None, guid_map_b: dict | None = None,
+    job_id: str | None = None,
 ) -> list[dict]:
     """
     Like run_clash_checks, but checks model A's elements against model B's
@@ -334,7 +366,8 @@ def run_cross_model_clash_checks(
     selector_a again, if selector_b is omitted) within model B.
 
     Both files are written to temp files and opened with ifcopenshell once,
-    shared across every rule, same as run_clash_checks.
+    shared across every rule, same as run_clash_checks. job_id, when given,
+    reports progress the same way too (see _report_progress).
 
     resolve_a / resolve_b: pass True for whichever side's ifc_bytes came
     from bim-normalizer's own synthetic export rather than a real original
@@ -355,13 +388,14 @@ def run_cross_model_clash_checks(
 
         check_file_a = ifcopenshell.open(tmp_path_a)
         check_file_b = ifcopenshell.open(tmp_path_b)
-        return [
-            _run_one_cross_rule(
+        results = []
+        for i, rule in enumerate(rules):
+            results.append(_run_one_cross_rule(
                 check_file_a, tmp_path_a, check_file_b, tmp_path_b, rule,
                 resolve_a, resolve_b, guid_map_a, guid_map_b,
-            )
-            for rule in rules
-        ]
+            ))
+            _report_progress(job_id, i + 1, len(rules))
+        return results
     finally:
         for tmp_path in (tmp_path_a, tmp_path_b):
             if tmp_path:

@@ -48,6 +48,7 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
 
     const [rules, setRules] = useState(() => [newRule()])
     const [checking, setChecking] = useState(false)
+    const [progress, setProgress] = useState(null)   // { completed, total } while checking
     const [result, setResult] = useState(null)   // { rules: [...], total_count }
     const [ifcSource, setIfcSource] = useState(null)
     const [compareInfo, setCompareInfo] = useState(null)   // { model_b_id, ifc_source_a, ifc_source_b } | null
@@ -151,6 +152,7 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
         setChecking(true)
         setError(null)
         setResult(null)
+        setProgress(null)
         setIfcSource(null)
         setCompareInfo(null)
         setSelected(new Set())
@@ -186,11 +188,14 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
                     setCompareInfo(status.compare
                         ? { ...status.compare, label: compareModel ? compareLabel(compareModel) : status.compare.model_b_id }
                         : null)
+                    setProgress(null)
                     setChecking(false)
                 } else if (status.status === 'failed') {
                     setError(status.error || 'Clash check failed')
+                    setProgress(null)
                     setChecking(false)
                 } else {
+                    if (status.progress) setProgress(status.progress)
                     pollRef.current = setTimeout(poll, 1500)
                 }
             }
@@ -413,6 +418,26 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
                             {compareModel && ' For cross-model checks, only the side belonging to the model currently open in the viewer can be highlighted/snapshotted.'}
                         </p>
                     </div>
+
+                    {checking && (
+                        <div className="rounded-xl border border-[var(--speckle-outline-3)] px-4 py-3 space-y-1.5">
+                            <div className="flex items-center justify-between text-xs text-[var(--speckle-foreground-2)]">
+                                <span className="flex items-center gap-1.5">
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    {progress ? `Checking rule ${Math.min(progress.completed + 1, progress.total)} of ${progress.total}…` : 'Starting check…'}
+                                </span>
+                                {progress && progress.total > 0 && (
+                                    <span className="text-[var(--speckle-foreground-3)]">{Math.round((progress.completed / progress.total) * 100)}%</span>
+                                )}
+                            </div>
+                            <div className="h-1.5 rounded-full bg-[var(--speckle-outline-3)] overflow-hidden">
+                                <div
+                                    className="h-full bg-amber-500 transition-all duration-300"
+                                    style={{ width: progress && progress.total > 0 ? `${(progress.completed / progress.total) * 100}%` : '8%' }}
+                                />
+                            </div>
+                        </div>
+                    )}
 
                     {error && (
                         <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">{error}</p>

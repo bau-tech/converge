@@ -27,8 +27,22 @@ def _chunked(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _report_progress(job_id: str, completed: int, total: int) -> None:
+    """Progress checkpoint for the per-rule/per-batch fallback loops below —
+    these run in the main process (unlike clash_check.py's own
+    _report_progress, called from inside a worker for the common whole-job-
+    in-one-call path), so a plain update_job() with a connection from this
+    process's own pool is enough; no cross-process DB access needed here."""
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        update_job(conn, job_id, result={"progress": {"completed": completed, "total": total}})
+    finally:
+        release_conn(conn)
+
+
 async def _run_clash_checks_resilient(
-    ifc_bytes: bytes, rule_dicts: list[dict], resolve_application_ids: bool, guid_map: dict,
+    ifc_bytes: bytes, rule_dicts: list[dict], resolve_application_ids: bool, guid_map: dict, job_id: str,
 ) -> list[dict]:
     """
     Same-model counterpart of run_clash_checks, with a degraded fallback for
@@ -57,7 +71,9 @@ async def _run_clash_checks_resilient(
     from clash_check import run_clash_checks, resolve_selector_global_ids
 
     try:
-        return await run_cpu_bound(run_clash_checks, ifc_bytes, rule_dicts, resolve_application_ids, guid_map)
+        return await run_cpu_bound(
+            run_clash_checks, ifc_bytes, rule_dicts, resolve_application_ids, guid_map, job_id,
+        )
     except BrokenProcessPool:
         logger.warning("Clash job: whole-job run crashed twice, falling back to per-rule retry")
 
@@ -67,6 +83,7 @@ async def _run_clash_checks_resilient(
             results.append((await run_cpu_bound(
                 run_clash_checks, ifc_bytes, [rule], resolve_application_ids, guid_map,
             ))[0])
+            _report_progress(job_id, len(results), len(rule_dicts))
             continue
         except BrokenProcessPool:
             logger.warning("Clash job: rule %r crashed twice alone too", rule.get("name"))
@@ -79,6 +96,7 @@ async def _run_clash_checks_resilient(
                 "selector_a": selector_a, "selector_b": selector_b,
                 "count": 0, "clashes": [], "crashed": True,
             })
+            _report_progress(job_id, len(results), len(rule_dicts))
             continue
 
         try:
@@ -94,6 +112,7 @@ async def _run_clash_checks_resilient(
                 "selector_a": selector_a, "selector_b": selector_b,
                 "count": 0, "clashes": [], "crashed": True,
             })
+            _report_progress(job_id, len(results), len(rule_dicts))
             continue
         chunk_is_a = len(ids_a) >= len(ids_b)
         batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
@@ -125,12 +144,13 @@ async def _run_clash_checks_resilient(
             "count": len(merged_clashes), "clashes": merged_clashes,
             **({"crashed_global_ids": crashed_ids} if crashed_ids else {}),
         })
+        _report_progress(job_id, len(results), len(rule_dicts))
     return results
 
 
 async def _run_cross_model_clash_checks_resilient(
     ifc_bytes_a: bytes, ifc_bytes_b: bytes, rule_dicts: list[dict],
-    resolve_a: bool, resolve_b: bool, guid_map_a: dict, guid_map_b: dict,
+    resolve_a: bool, resolve_b: bool, guid_map_a: dict, guid_map_b: dict, job_id: str,
 ) -> list[dict]:
     """Cross-model counterpart of _run_clash_checks_resilient — see its
     docstring for the batching rationale. Cross-model rules are always
@@ -142,7 +162,7 @@ async def _run_cross_model_clash_checks_resilient(
     try:
         return await run_cpu_bound(
             run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, rule_dicts,
-            resolve_a, resolve_b, guid_map_a, guid_map_b,
+            resolve_a, resolve_b, guid_map_a, guid_map_b, job_id,
         )
     except BrokenProcessPool:
         logger.warning("Cross-model clash job: whole-job run crashed twice, falling back to per-rule retry")
@@ -154,6 +174,7 @@ async def _run_cross_model_clash_checks_resilient(
                 run_cross_model_clash_checks, ifc_bytes_a, ifc_bytes_b, [rule],
                 resolve_a, resolve_b, guid_map_a, guid_map_b,
             ))[0])
+            _report_progress(job_id, len(results), len(rule_dicts))
             continue
         except BrokenProcessPool:
             logger.warning("Cross-model clash job: rule %r crashed twice alone too", rule.get("name"))
@@ -174,6 +195,7 @@ async def _run_cross_model_clash_checks_resilient(
                 "selector_a": selector_a, "selector_b": selector_b,
                 "count": 0, "clashes": [], "crashed": True,
             })
+            _report_progress(job_id, len(results), len(rule_dicts))
             continue
         chunk_is_a = len(ids_a) >= len(ids_b)
         batches = _chunked(ids_a if chunk_is_a else ids_b, _CRASH_BATCH_SIZE)
@@ -206,6 +228,7 @@ async def _run_cross_model_clash_checks_resilient(
             "count": len(merged_clashes), "clashes": merged_clashes,
             **({"crashed_global_ids": crashed_ids} if crashed_ids else {}),
         })
+        _report_progress(job_id, len(results), len(rule_dicts))
     return results
 
 
@@ -245,6 +268,11 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
         create_job(conn, job_id, "clash_check", payload={
             "model_id": model_id, "compare_model_id": body.compare_model_id,
         })
+        # Written up front so a client's very first poll already sees a real
+        # total instead of nothing — the worker-side checkpoints (see
+        # clash_check.py's _report_progress) only start arriving once IFC
+        # resolution finishes and the actual rule loop begins.
+        update_job(conn, job_id, result={"progress": {"completed": 0, "total": len(body.rules)}})
     finally:
         release_conn(conn)
 
@@ -276,7 +304,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
                 results = await _run_cross_model_clash_checks_resilient(
                     ifc_bytes_a, ifc_bytes_b, rule_dicts,
                     ifc_source_a == "synthetic_export", ifc_source_b == "synthetic_export",
-                    guid_map_a, guid_map_b,
+                    guid_map_a, guid_map_b, job_id,
                 )
                 total = sum(r.get("count", 0) for r in results)
                 total_crashed = sum(len(r.get("crashed_global_ids", [])) for r in results)
@@ -317,7 +345,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
 
             logger.info("Clash check job %s: checking against %s (%d bytes)", job_id, ifc_source, len(ifc_bytes))
             results = await _run_clash_checks_resilient(
-                ifc_bytes, rule_dicts, ifc_source == "synthetic_export", guid_map,
+                ifc_bytes, rule_dicts, ifc_source == "synthetic_export", guid_map, job_id,
             )
             total = sum(r.get("count", 0) for r in results)
             total_crashed = sum(len(r.get("crashed_global_ids", [])) for r in results)
@@ -392,4 +420,9 @@ def clash_check_status(model_id: str, job_id: str):
         ),
         "ifc_source": full_result.get("ifc_source"),
         "compare": full_result.get("compare"),
+        # {completed, total} rules — see clash_check.py's _report_progress and
+        # this router's own copy for the fallback path. Only meaningful while
+        # still running; a completed/failed job's last checkpoint is harmless
+        # but stale, so the frontend should stop reading it once is_complete.
+        "progress": full_result.get("progress"),
     }
