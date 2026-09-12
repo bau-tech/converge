@@ -400,6 +400,10 @@ export function generateSummaryFromElements(elements) {
         by_profile: {},
         by_section_class: {},
         by_workset: {},
+        // 5D quantity fields — see sumByGroup below
+        by_ifc_class_vol: {},
+        by_storey_vol: {},
+        by_category_area: {},
         // Data quality
         by_validation_issues: {},
         steel_summary: { total_weight_kg: 0, total_length_m: 0, profiles: {} },
@@ -435,6 +439,26 @@ export function generateSummaryFromElements(elements) {
             summary[fieldMap[field]] = counts
         }
     })
+
+    // 5D quantity fields (volume/area per group) — mirrors adaptNormalizerSummary's
+    // volOnly/areaOnly over the *unfiltered* backend summary (App.jsx), which this
+    // function's caller (summaryForPool) falls through to only while no filter is
+    // active. Without this, filtering/selecting in the viewer recomputed every
+    // other by_* breakdown from the filtered pool but silently left these three
+    // absent, so the volume/area charts kept showing the full, unfiltered totals.
+    const sumByGroup = (groupField, valueField) => {
+        const sums = {}
+        elements.forEach(el => {
+            const key = el[groupField]
+            if (key === undefined || key === null || key === '') return
+            sums[key] = (sums[key] || 0) + (el[valueField] || 0)
+        })
+        Object.keys(sums).forEach(key => { if (sums[key] <= 0) delete sums[key] })
+        return sums
+    }
+    summary.by_ifc_class_vol = sumByGroup('ifc_type', 'volume_m3')
+    summary.by_storey_vol    = sumByGroup('level', 'volume_m3')
+    summary.by_category_area = sumByGroup('category', 'area_m2')
 
     // validation_issues (array) and steel_summary — computed per element
     const STEEL_GRADES = ['S235', 'S275', 'S355', 'S420', 'S460', 'S500']
