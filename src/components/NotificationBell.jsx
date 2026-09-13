@@ -67,10 +67,23 @@ export const NotificationBell = memo(function NotificationBell({ normalizerUrl }
         })
     }
 
-    const markRead = async (id) => {
-        await fetch(`${base}/notifications/${id}/read`, { method: 'POST', credentials: 'include' })
-        setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
-        setUnreadCount(c => Math.max(0, c - 1))
+    // BCF-assignment notifications carry a deep link (dispatch.py's
+    // _build_topic_seed — same "layout" seed shape App.jsx's module-load
+    // _urlSeed/_topicGuidSeed parse from an assignment email) so clicking one
+    // jumps straight to the model/topic it's about instead of just marking
+    // it read. That seed is only parsed once at page load, so reuse it via a
+    // full navigation rather than trying to re-drive App.jsx's already-
+    // mounted state from here.
+    const openNotification = (n) => {
+        if (!n.read_at) {
+            fetch(`${base}/notifications/${n.id}/read`, { method: 'POST', credentials: 'include', keepalive: true })
+        }
+        if (n.link) {
+            window.location.href = n.link
+        } else if (!n.read_at) {
+            setNotifications(prev => prev.map(x => x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x))
+            setUnreadCount(c => Math.max(0, c - 1))
+        }
     }
 
     const markAllRead = async () => {
@@ -121,7 +134,7 @@ export const NotificationBell = memo(function NotificationBell({ normalizerUrl }
                             {notifications.map(n => (
                                 <button
                                     key={n.id}
-                                    onClick={() => !n.read_at && markRead(n.id)}
+                                    onClick={() => openNotification(n)}
                                     className={`w-full text-left px-3 py-2.5 border-b border-white/5 hover:bg-white/5 transition-colors ${n.read_at ? 'opacity-50' : ''}`}
                                 >
                                     <div className="text-[11px] text-[var(--speckle-foreground)]">{n.message}</div>

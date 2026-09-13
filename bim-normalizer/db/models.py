@@ -540,6 +540,12 @@ CREATE INDEX IF NOT EXISTS idx_bim_notifications_unread ON bim_notifications(use
 -- "assigned to" notifications (see notifications/dispatch.py's
 -- notify_bcf_assignment, fired from bcf/topics.py).
 ALTER TABLE bim_notifications ADD COLUMN IF NOT EXISTS topic_guid UUID;
+-- Relative deep link (e.g. "/?layout=...&topic=...", same seed shape as a
+-- BCF-assignment email's link — see notifications/dispatch.py's
+-- _build_topic_seed) so the frontend bell can jump straight to the model a
+-- notification is about instead of just marking it read. NULL for event
+-- types that don't have a specific model/topic to land on (document events).
+ALTER TABLE bim_notifications ADD COLUMN IF NOT EXISTS link TEXT;
 
 -- Rendered-thumbnail cache for routers/documents.py's /thumbnail route.
 -- Keyed by nc_fileid (stable across renames/moves, like bim_documents' own

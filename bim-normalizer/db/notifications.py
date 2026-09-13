@@ -4,11 +4,11 @@ Write side is called from notifications.py's dispatch; read/mark-read side
 is used directly by routers/notifications.py.
 """
 
-_COLUMNS = "id, user_guid, stream_id, doc_id, topic_guid, event_type, message, read_at, created_at"
+_COLUMNS = "id, user_guid, stream_id, doc_id, topic_guid, event_type, message, link, read_at, created_at"
 
 
 def _row_to_notification(row) -> dict:
-    id_, user_guid, stream_id, doc_id, topic_guid, event_type, message, read_at, created_at = row
+    id_, user_guid, stream_id, doc_id, topic_guid, event_type, message, link, read_at, created_at = row
     return {
         "id": id_,
         "user_guid": str(user_guid),
@@ -17,6 +17,7 @@ def _row_to_notification(row) -> dict:
         "topic_guid": str(topic_guid) if topic_guid else None,
         "event_type": event_type,
         "message": message,
+        "link": link,
         "read_at": read_at.isoformat() if read_at else None,
         "created_at": created_at.isoformat(),
     }
@@ -24,17 +25,17 @@ def _row_to_notification(row) -> dict:
 
 def create_notification(
     conn, *, user_guid: str, stream_id: str, event_type: str, message: str,
-    doc_id: str | None = None, topic_guid: str | None = None,
+    doc_id: str | None = None, topic_guid: str | None = None, link: str | None = None,
 ) -> dict:
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO bim_notifications (user_guid, stream_id, doc_id, topic_guid, event_type, message)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO bim_notifications (user_guid, stream_id, doc_id, topic_guid, event_type, message, link)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING {_COLUMNS}
                 """,
-                (user_guid, stream_id, doc_id, topic_guid, event_type, message),
+                (user_guid, stream_id, doc_id, topic_guid, event_type, message, link),
             )
             row = cur.fetchone()
         conn.commit()

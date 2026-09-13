@@ -30,6 +30,7 @@ import { getNestedValue } from '../utils/propertyScanner'
 import { AlignmentPickExtension, AlignmentPickEvent } from '../utils/AlignmentPickExtension'
 import { applyAlignmentTransform } from '../utils/alignmentTransform'
 import { installNaNSafeBoundingSphere } from '../utils/patchNaNSafeBoundingSphere'
+import { isClosedTopic } from '../utils/bcfWorkflow'
 
 // Both the alignment-overlay plane and the federated (Combine Models) load
 // path build multi-batch scenes that can trip the NaN-bounding-sphere
@@ -223,8 +224,12 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
 
     const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
 
-    // BCF topic pins
+    // BCF topic pins — closed issues are resolved, so they're excluded from
+    // both the 3D pins and the toggle button's count (they're still visible
+    // in BcfTopicPanel/BcfKanbanBoard, which is where a resolved issue
+    // belongs, not floating in the viewport).
     const [showBcfTopics, setShowBcfTopics] = useState(true)
+    const openBcfTopics = useMemo(() => bcfTopics.filter((t) => !isClosedTopic(t)), [bcfTopics])
     const [bcfPinPositions, setBcfPinPositions] = useState({})
     const bcfRafRef = useRef(null)
     const lastBcfPinsRef = useRef({})
@@ -1822,7 +1827,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
     }, [containerSize])
 
     useEffect(() => {
-        if (!showBcfTopics || !isViewerReady || !bcfTopics.length) {
+        if (!showBcfTopics || !isViewerReady || !openBcfTopics.length) {
             if (bcfRafRef.current) cancelAnimationFrame(bcfRafRef.current)
             lastBcfPinsRef.current = {}
             setBcfPinPositions({})
@@ -1831,7 +1836,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
 
         const loop = () => {
             const nextPins = {}
-            for (const topic of bcfTopics) {
+            for (const topic of openBcfTopics) {
                 const cvp = topic.viewpoint?.camera_view_point
                 if (!cvp) continue
                 const pos = projectWorldPoint(cvp.x, cvp.y, cvp.z)
@@ -1848,7 +1853,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
         return () => {
             if (bcfRafRef.current) cancelAnimationFrame(bcfRafRef.current)
         }
-    }, [showBcfTopics, isViewerReady, bcfTopics, projectWorldPoint])
+    }, [showBcfTopics, isViewerReady, openBcfTopics, projectWorldPoint])
 
     useEffect(() => {
         if (!showDocumentPins || !isViewerReady || !documentPins.length) {
@@ -2086,7 +2091,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             zIndex: 140,
         }}>
             {/* BCF topics toggle button — top-right corner */}
-            {isViewerReady && bcfTopics.length > 0 && (
+            {isViewerReady && openBcfTopics.length > 0 && (
                 <button
                     style={{ position: 'absolute', top: 12, right: 12, pointerEvents: 'auto' }}
                     onClick={() => setShowBcfTopics((v) => !v)}
@@ -2097,14 +2102,14 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
                     }`}
                 >
                     <Flag className="w-3.5 h-3.5" />
-                    {bcfTopics.length}
+                    {openBcfTopics.length}
                 </button>
             )}
 
             {/* BCF topic pins */}
             {isViewerReady && showBcfTopics && (
                 <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', borderRadius: '0.75rem', pointerEvents: 'none' }}>
-                    {bcfTopics.map((topic) => {
+                    {openBcfTopics.map((topic) => {
                         const pos = bcfPinPositions[topic.guid]
                         return pos ? (
                             <button
@@ -2124,7 +2129,7 @@ const SpeckleViewer = forwardRef(function SpeckleViewer({
             {/* Document pins toggle button — stacks below the BCF toggle when both are present */}
             {isViewerReady && documentPins.length > 0 && (
                 <button
-                    style={{ position: 'absolute', top: bcfTopics.length > 0 ? 56 : 12, right: 12, pointerEvents: 'auto' }}
+                    style={{ position: 'absolute', top: openBcfTopics.length > 0 ? 56 : 12, right: 12, pointerEvents: 'auto' }}
                     onClick={() => setShowDocumentPins((v) => !v)}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium shadow transition-all ${
                         showDocumentPins

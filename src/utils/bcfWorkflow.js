@@ -19,8 +19,12 @@ export const COLUMN_HEX = {
 // column; `topic_status === 'In Progress'` is a fallback for topics created
 // by the old 3-status flow (or an external BCF-API client) that have no
 // `stage` set yet. Open with no recognized stage is fresh, unstarted work.
+export function isClosedTopic(topic) {
+    return topic.topic_status === 'Closed'
+}
+
 export function topicToColumn(topic) {
-    if (topic.topic_status === 'Closed') return 'Done'
+    if (isClosedTopic(topic)) return 'Done'
     if (topic.stage === 'Review') return 'Review'
     if (topic.stage === 'InProgress') return 'In Progress'
     if (topic.stage === 'Requested') return 'To Do'
@@ -75,6 +79,6 @@ export const PRIORITY_BORDER = {
 // rendering can't drift from that count.
 export function isOverdue(topic) {
     if (!topic.due_date) return false
-    if (topicToColumn(topic) === 'Done') return false
+    if (isClosedTopic(topic)) return false
     return new Date(topic.due_date).getTime() < Date.now()
 }
