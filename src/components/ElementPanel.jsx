@@ -146,6 +146,7 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
     const [search, setSearch] = useState('')
     const [busyId, setBusyId] = useState(null)
     const [previewDoc, setPreviewDoc] = useState(null)
+    const [actionError, setActionError] = useState(null)
 
     const base = (normalizerUrl || '').replace(/\/$/, '')
 
@@ -174,6 +175,7 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
 
     const openPicker = async () => {
         setShowPicker(true)
+        setActionError(null)
         if (!base || !streamId) return
         setLoadingAvailable(true)
         try {
@@ -187,18 +189,34 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
         }
     }
 
+    // 403 means the signed-in account has no author/reviewer/approver role on
+    // this project (routers/documents.py's require_role) — distinct from a
+    // generic failure since the fix is "get a role granted", not "retry".
+    const describeLinkError = async (res) => {
+        if (res.status === 403) return "You don't have permission to attach/unlink documents on this project."
+        try {
+            const body = await res.json()
+            if (body?.detail) return typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+        } catch { /* body wasn't JSON */ }
+        return `Request failed (${res.status})`
+    }
+
     const linkDoc = async (docId) => {
         setBusyId(docId)
+        setActionError(null)
         try {
-            await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, {
+            const res = await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ speckle_id: speckleId }),
             })
+            if (!res.ok) { setActionError(await describeLinkError(res)); return }
             setShowPicker(false)
             setSearch('')
             await loadLinked()
             onLinksChanged?.()
+        } catch {
+            setActionError('Could not reach the server.')
         } finally {
             setBusyId(null)
         }
@@ -206,10 +224,14 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
 
     const unlinkDoc = async (docId) => {
         setBusyId(docId)
+        setActionError(null)
         try {
-            await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, { method: 'DELETE' })
+            const res = await fetch(`${base}/projects/${streamId}/documents/${docId}/link-element`, { method: 'DELETE' })
+            if (!res.ok) { setActionError(await describeLinkError(res)); return }
             await loadLinked()
             onLinksChanged?.()
+        } catch {
+            setActionError('Could not reach the server.')
         } finally {
             setBusyId(null)
         }
@@ -243,6 +265,15 @@ function ElementDocumentsSection({ normalizerUrl, streamId, speckleId, onLinksCh
 
             {!loading && docs.length === 0 && (
                 <div className="text-[11px] text-zinc-600 italic py-1">No documents attached</div>
+            )}
+
+            {actionError && (
+                <div className="flex items-start gap-1.5 text-[11px] text-red-400 bg-red-500/10 rounded px-2 py-1.5 mb-1.5">
+                    <span className="flex-1">{actionError}</span>
+                    <button onClick={() => setActionError(null)} className="text-red-400/70 hover:text-red-300 shrink-0">
+                        <X className="w-3 h-3" />
+                    </button>
+                </div>
             )}
 
             <div className="space-y-1">
