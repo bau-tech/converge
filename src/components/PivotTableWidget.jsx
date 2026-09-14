@@ -31,7 +31,15 @@ function getField(el, field) {
     return el[field] ?? null
 }
 
-export default function PivotTableWidget({ fullData, paramKeys = [] }) {
+// 'param:KEY' (this widget's own group-by option value) needs translating to
+// the 'params.KEY' dot-path getNestedValue (App.jsx's chartFilters pipeline)
+// actually looks up — same 'params.<key>' convention StandaloneChartWidget's
+// backend-discovered param fields already use.
+function toFilterField(rowField) {
+    return rowField.startsWith('param:') ? `params.${rowField.slice(6)}` : rowField
+}
+
+export default function PivotTableWidget({ fullData, paramKeys = [], onValueClick, highlightedField, highlightedValue }) {
     const [rowField, setRowField]       = useState('category')
     const [valueField, setValueField]   = useState('count')
     const [showControls, setShowControls] = useState(false)
@@ -113,6 +121,8 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
 
     const currentGroupLabel = groupOptions.find(o => o.value === rowField)?.label ?? rowField
     const currentValueLabel = VALUE_OPTIONS.find(o => o.value === valueField)?.label ?? valueField
+    const filterField = toFilterField(rowField)
+    const activeRowName = highlightedField === filterField ? highlightedValue : null
 
     if (!fullData) {
         return (
@@ -197,9 +207,16 @@ export default function PivotTableWidget({ fullData, paramKeys = [] }) {
                         {pivotData.map((row) => {
                             const val = valueField === 'count' ? row.count : row.value
                             const pct = totalValue > 0 ? (val / totalValue) * 100 : 0
+                            const isActive = row.name === activeRowName
                             return (
-                                <tr key={row.name} className="hover:bg-white/5 transition-colors">
-                                    <td className="px-4 py-2 text-zinc-300 truncate max-w-[160px]" title={row.name}>
+                                <tr
+                                    key={row.name}
+                                    onClick={() => onValueClick?.(filterField, row.name)}
+                                    className={`transition-colors ${onValueClick ? 'cursor-pointer' : ''} ${
+                                        isActive ? 'bg-cyan-500/10 border-l-2 border-cyan-400' : 'hover:bg-white/5 border-l-2 border-transparent'
+                                    }`}
+                                >
+                                    <td className={`px-4 py-2 truncate max-w-[160px] ${isActive ? 'text-cyan-300' : 'text-zinc-300'}`} title={row.name}>
                                         {row.name}
                                     </td>
                                     <td className="px-4 py-2 text-right font-mono text-zinc-400">

@@ -2407,12 +2407,20 @@ function Dashboard({ readOnly = false }) {
         const content = (() => {
             if (w.type === 'text') return <MarkdownWidget content={w.content} onUpdate={c => handleUpdateWidget(w.id, { content: c })} />
             if (w.type === 'table') return <ElementTable fullData={fullData} onElementClick={handleElementClick} viewerSelectedIds={viewerSelectedIds} onFilteredIdsChange={handleTableFilteredIds} chartFilters={chartFilters} filteredIds={viewerFilteredIds} />
-            if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} />
+            if (w.type === 'pivot') return <PivotTableWidget fullData={fullData} paramKeys={paramKeys} onValueClick={handleChartValueClick} highlightedField={highlightedField} highlightedValue={highlightedValue} />
             if (w.type === 'validation') return <ValidationWidget widgetId={w.id} fullData={fullData} paramKeys={paramKeys} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} isEditing={!validationResultsView.has(w.id)} onToggleEditing={() => handleToggleValidationView(w.id)} onFilterElements={ids => setViewerFilteredIds(ids)} onHighlightElements={ids => ids ? speckleViewerRef.current?.highlightObjects(ids) : speckleViewerRef.current?.clearHover()} darkMode={darkMode} />
             if (w.type === 'filter') return <FilterWidget widgetId={w.id} fullData={fullData} paramKeys={paramKeys} title={w.title} onUpdateTitle={t => handleUpdateWidget(w.id, { title: t })} onFilterElements={ids => setViewerFilteredIds(ids)} />
-            if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} />
+            if (w.type === 'quantities') return <QuantityWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} darkMode={darkMode} onValueClick={handleChartValueClick} highlightedField={highlightedField} highlightedValue={highlightedValue} />
             if (w.type === 'video') return <VideoWidget url={w.url} onUpdateUrl={url => handleUpdateWidget(w.id, { url })} />
-            if (w.type === 'bcf_stats') return <BcfStatsWidget topics={bcfTopics} darkMode={darkMode} displayOptions={displayOptions} />
+            if (w.type === 'bcf_stats') return (
+                <BcfStatsWidget
+                    topics={bcfTopics}
+                    darkMode={darkMode}
+                    displayOptions={displayOptions}
+                    onColumnClick={(column) => { setBcfBoardFocus({ column, priority: null }); setShowBcfBoard(true) }}
+                    onPriorityClick={(priority) => { setBcfBoardFocus({ column: null, priority }); setShowBcfBoard(true) }}
+                />
+            )
             if (w.type === 'geo_map') return <GeoMapWidget normalizerModelId={data?.normalizer_model_id} normalizerUrl={CONFIG.normalizerUrl} />
             return null
         })()
@@ -2441,6 +2449,11 @@ function Dashboard({ readOnly = false }) {
     const [layoutCopied, setLayoutCopied] = useState(false)  // false | true | 'error'
 
     const [showBcfBoard, setShowBcfBoard] = useState(false)
+    // Set from BcfStatsWidget's status-slice/priority-chip clicks so the board
+    // opens scrolled to that column and/or pre-filtered to that priority,
+    // instead of always landing on the same default view. { column, priority }
+    // | null — cleared whenever the board is opened some other way.
+    const [bcfBoardFocus, setBcfBoardFocus] = useState(null)
     const [showIdsCheck, setShowIdsCheck] = useState(false)
     const [showClashCheck, setShowClashCheck] = useState(false)
     const [showDocuments, setShowDocuments] = useState(false)
@@ -2753,7 +2766,7 @@ function Dashboard({ readOnly = false }) {
                                     entirely for anonymous share visitors rather than left to 401. */}
                                 {!anonymous && (
                                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                                    onClick={() => setShowBcfBoard(true)}
+                                    onClick={() => { setBcfBoardFocus(null); setShowBcfBoard(true) }}
                                     disabled={!data?.normalizer_model_id}
                                     className="glass-card icon-btn hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
                                     title="BCF Issue Board (Kanban)"
@@ -3074,7 +3087,7 @@ function Dashboard({ readOnly = false }) {
                                     </button>
                                     {!anonymous && (
                                     <button
-                                        onClick={() => { setShowBcfBoard(true); setShowMobileActions(false) }}
+                                        onClick={() => { setBcfBoardFocus(null); setShowBcfBoard(true); setShowMobileActions(false) }}
                                         disabled={!data?.normalizer_model_id}
                                         className="flex flex-col items-center gap-1.5 py-3 rounded-xl glass-card hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
                                     >
@@ -3305,6 +3318,8 @@ function Dashboard({ readOnly = false }) {
                             onClose={() => setShowBcfBoard(false)}
                             serverUrl={activeServer.url}
                             serverToken={activeServer.token}
+                            initialColumn={bcfBoardFocus?.column ?? null}
+                            initialPriority={bcfBoardFocus?.priority ?? null}
                         />
                     )}
                 </AnimatePresence>

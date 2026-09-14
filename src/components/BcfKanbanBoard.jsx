@@ -23,13 +23,16 @@ const COLUMN_COLOR = {
     Done: { border: 'border-emerald-500/50', bg: 'bg-emerald-500/10', text: 'text-emerald-300', badge: 'bg-emerald-500/25 text-emerald-300' },
 }
 
-function Column({ id, title, count, children }) {
+function Column({ id, title, count, children, flash }) {
     const { setNodeRef, isOver } = useDroppable({ id })
     const colors = COLUMN_COLOR[title]
     return (
         <div
+            id={`bcf-col-${id}`}
             ref={setNodeRef}
             className={`flex flex-col gap-2 flex-1 min-w-[260px] rounded-xl border-2 p-3 transition-colors ${
+                flash ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-[var(--speckle-foundation-page)]' : ''
+            } ${
                 isOver ? 'border-amber-400/80 bg-amber-400/15' : (colors ? `${colors.border} ${colors.bg}` : 'border-[var(--speckle-outline-3)]')
             }`}
         >
@@ -105,8 +108,25 @@ function Card({ topic, snapshotUrl, onOpen, onDelete }) {
 // Full-screen Kanban admin view over the BCF topics already loaded by
 // BcfTopicPanel (same `topics`/`onTopicsChange` — single source of truth,
 // no separate fetch). Reachable as a web overlay, not a separate app.
-export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = null, onTopicsChange, onClose, serverUrl, serverToken }) {
+export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = null, onTopicsChange, onClose, serverUrl, serverToken, initialColumn = null, initialPriority = null }) {
     const { user } = useAuth()
+    // Board-wide priority filter — set from BcfStatsWidget's priority chips
+    // (a click there means "show me only this"), independent of per-card
+    // priority edits below. Cleared via the chip's own X, same convention as
+    // ValidationWidget/ActiveFilters' dismissible filter chips elsewhere.
+    const [priorityFilter, setPriorityFilter] = useState(initialPriority)
+    // Which column to scroll into view + briefly ring-highlight on open, so a
+    // status-slice click actually lands the user somewhere instead of just
+    // opening the same board they'd get from the header icon.
+    const [flashColumn, setFlashColumn] = useState(initialColumn)
+    useEffect(() => {
+        if (!initialColumn) return
+        const el = document.getElementById(`bcf-col-${initialColumn}`)
+        el?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+        const t = setTimeout(() => setFlashColumn(null), 1600)
+        return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
     const [snapshots, setSnapshots] = useState({})
     const [viewpoints, setViewpoints] = useState({})
     const [selectedTopic, setSelectedTopic] = useState(null)
@@ -160,7 +180,8 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
     const columns = useMemo(() => {
         const map = {}
         COLUMNS.forEach(c => { map[c] = [] })
-        topics.forEach(t => { map[topicToColumn(t)].push(t) })
+        const filtered = priorityFilter ? topics.filter(t => (t.priority || 'Unset') === priorityFilter) : topics
+        filtered.forEach(t => { map[topicToColumn(t)].push(t) })
         // Critical-first within each column; ties broken by soonest due date
         // (unset due dates sort last), then newest first.
         const dueTime = (t) => (t.due_date ? new Date(t.due_date).getTime() : Infinity)
@@ -170,7 +191,7 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
             || new Date(b.creation_date) - new Date(a.creation_date)
         ))
         return map
-    }, [topics])
+    }, [topics, priorityFilter])
 
     const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -329,6 +350,14 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
                 <div className="flex items-center gap-2">
                     <BcfLogoIcon className="w-6 h-6" />
                     <h2 className="font-semibold text-sm text-[var(--speckle-foreground)]">BCF Issue Board</h2>
+                    {priorityFilter && (
+                        <span className={`flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-[10px] ${PRIORITY_COLOR[priorityFilter] || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-2)]'}`}>
+                            Priority: {priorityFilter}
+                            <button onClick={() => setPriorityFilter(null)} className="p-0.5 rounded-full hover:bg-black/20" title="Clear priority filter">
+                                <X className="w-3 h-3" />
+                            </button>
+                        </span>
+                    )}
                 </div>
                 <div className="flex items-center gap-2">
                     <button
@@ -347,7 +376,7 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
             <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveTopic(null)}>
                 <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-4 p-5">
                     {Object.entries(columns).map(([status, items]) => (
-                        <Column key={status} id={status} title={status} count={items.length}>
+                        <Column key={status} id={status} title={status} count={items.length} flash={flashColumn === status}>
                             {items.map(t => (
                                 <Card key={t.guid} topic={t} snapshotUrl={snapshots[t.guid]} onOpen={openTopic} onDelete={removeTopic} />
                             ))}

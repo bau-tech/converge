@@ -14,7 +14,7 @@ function Tile({ label, value, warn }) {
 
 // Statistics over the same BCF topics shown in BcfTopicPanel/BcfKanbanBoard
 // — no separate fetch, just a different view over `bcfTopics`.
-export function BcfStatsWidget({ topics = [], darkMode = true, displayOptions = {} }) {
+export function BcfStatsWidget({ topics = [], darkMode = true, displayOptions = {}, onColumnClick, onPriorityClick }) {
     const showLegend = displayOptions.showLegend ?? true
     const showLabels = displayOptions.showLabels ?? true
     const donut = displayOptions.donut ?? true
@@ -81,6 +81,10 @@ export function BcfStatsWidget({ topics = [], darkMode = true, displayOptions = 
         }],
     }), [stats, darkMode, showLegend, donut, showLabels, showLeaderLine, labelFontSize, labelFontColor, showLabelName, showLabelValue, showLabelPercent])
 
+    const chartEvents = useMemo(() => (
+        onColumnClick ? { click: (params) => onColumnClick(params.name) } : undefined
+    ), [onColumnClick])
+
     if (topics.length === 0) {
         return (
             <div className="h-full flex items-center justify-center text-xs text-[var(--speckle-foreground-3)]">
@@ -99,13 +103,17 @@ export function BcfStatsWidget({ topics = [], darkMode = true, displayOptions = 
                     <Tile label="Overdue" value={stats.overdue} warn={stats.overdue > 0} />
                 </div>
             )}
-            <div className="flex-1 min-h-0">
-                <EChart option={chartOption} />
+            <div className="flex-1 min-h-0" style={{ cursor: onColumnClick ? 'pointer' : 'default' }}>
+                <EChart option={chartOption} onEvents={chartEvents} />
             </div>
             {showPriorityChips && (
                 <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                     {Object.entries(stats.byPriority).map(([p, count]) => (
-                        <span key={p} className={`text-[10px] px-1.5 py-0.5 rounded ${PRIORITY_COLOR[p] || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]'}`}>
+                        <span
+                            key={p}
+                            onClick={() => onPriorityClick?.(p)}
+                            className={`text-[10px] px-1.5 py-0.5 rounded ${onPriorityClick ? 'cursor-pointer hover:ring-1 hover:ring-white/40 transition-shadow' : ''} ${PRIORITY_COLOR[p] || 'bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)]'}`}
+                        >
                             {p}: {count}
                         </span>
                     ))}

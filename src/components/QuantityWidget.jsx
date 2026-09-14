@@ -5,6 +5,12 @@ import { Loader2, AlertCircle } from 'lucide-react'
 
 const BAR_COLORS = ['#10B981', '#34D399', '#6EE7B7', '#A7F3D0', '#059669', '#047857', '#065F46']
 const COVERAGE_COLORS = { high: '#10B981', mid: '#F59E0B', low: '#EF4444' }
+const HIGHLIGHT_COLOR = '#Facc15' // matches AdaptiveCharts' chart-filter highlight color
+
+// Which fullData.elements field (see App.jsx's adaptNormalizerElement aliases)
+// each tab's grouping corresponds to, so bar clicks feed the same
+// chartFilters pipeline every other chart in the app already drives.
+const TAB_FILTER_FIELD = { type: 'ifc_type', floor: 'level' }
 
 // Format a number for display: abbreviates large values, uses locale separators
 function fmt(n, decimals = 1) {
@@ -26,7 +32,7 @@ const METRICS = [
     { id: 'count',     label: 'Count',  unit: 'el', color: 'text-zinc-300'    },
 ]
 
-function BarChart({ rows, metric, darkMode }) {
+function BarChart({ rows, metric, darkMode, field, highlightedValue, onValueClick }) {
     const { id: valueKey, unit, label } = metric
 
     const sorted = [...rows]
@@ -42,9 +48,19 @@ function BarChart({ rows, metric, darkMode }) {
 
     const vals   = sorted.map(r => r[valueKey] ?? 0)
     const labels = sorted.map(r => r.group)
-    const colors = sorted.map((_, i) => BAR_COLORS[i % BAR_COLORS.length])
+    const colors = sorted.map((_, i) => {
+        const base = BAR_COLORS[i % BAR_COLORS.length]
+        if (!highlightedValue) return base
+        return labels[i] === highlightedValue ? HIGHLIGHT_COLOR : `${base}40`
+    })
     const hovers = vals.map(v => fmtHover(v, unit))
     const labelColor = darkMode ? '#e4e4e7' : '#000000'
+
+    const clickable = !!(field && onValueClick)
+    const handleClick = (params) => {
+        if (!clickable) return
+        onValueClick(field, params.name)
+    }
 
     return (
         <EChart
@@ -62,7 +78,8 @@ function BarChart({ rows, metric, darkMode }) {
                     label: { show: true, position: 'right', color: labelColor, formatter: (params) => fmt(params.value) },
                 }],
             }}
-            style={{ width: '100%', height: 340 }}
+            onEvents={clickable ? { click: handleClick } : undefined}
+            style={{ width: '100%', height: 340, cursor: clickable ? 'pointer' : 'default' }}
         />
     )
 }
@@ -128,7 +145,7 @@ const TABS = [
     { id: 'coverage', label: 'Coverage' },
 ]
 
-export default function QuantityWidget({ normalizerModelId, normalizerUrl, darkMode = true }) {
+export default function QuantityWidget({ normalizerModelId, normalizerUrl, darkMode = true, onValueClick, highlightedField, highlightedValue }) {
     const [tab, setTab]         = useState('type')
     const [metric, setMetric]   = useState(METRICS[0])   // volume by default
     const [byType, setByType]   = useState(null)
@@ -238,10 +255,24 @@ export default function QuantityWidget({ normalizerModelId, normalizerUrl, darkM
 
             {/* Chart area */}
             {tab === 'type' && (
-                <BarChart rows={byType.rows || []} metric={metric} darkMode={darkMode} />
+                <BarChart
+                    rows={byType.rows || []}
+                    metric={metric}
+                    darkMode={darkMode}
+                    field={TAB_FILTER_FIELD.type}
+                    highlightedValue={highlightedField === TAB_FILTER_FIELD.type ? highlightedValue : null}
+                    onValueClick={onValueClick}
+                />
             )}
             {tab === 'floor' && (
-                <BarChart rows={byFloor?.rows || []} metric={metric} darkMode={darkMode} />
+                <BarChart
+                    rows={byFloor?.rows || []}
+                    metric={metric}
+                    darkMode={darkMode}
+                    field={TAB_FILTER_FIELD.floor}
+                    highlightedValue={highlightedField === TAB_FILTER_FIELD.floor ? highlightedValue : null}
+                    onValueClick={onValueClick}
+                />
             )}
             {tab === 'coverage' && (
                 <>
