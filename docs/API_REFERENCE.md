@@ -253,6 +253,7 @@ variables below); otherwise in-app only.
 | `GET` | `/notifications/unread-count` | `{count}` — polled by the dashboard's bell icon |
 | `POST` | `/notifications/{id}/read` | Mark one notification read |
 | `POST` | `/notifications/read-all` | Mark every unread notification read |
+| `DELETE` | `/notifications/read` | Delete every already-read notification |
 
 #### Dashboard layout & sharing
 

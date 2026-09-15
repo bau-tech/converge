@@ -54,3 +54,14 @@ def mark_all_notifications_read(user: CurrentUser = Depends(require_login)):
         return {"marked_read": mark_all_read(conn, user.guid)}
     finally:
         release_conn(conn)
+
+
+@router.delete("/notifications/read")
+def clear_read_notifications(user: CurrentUser = Depends(require_login)):
+    from db.connection import get_conn, release_conn
+    from db.notifications import clear_read
+    conn = get_conn()
+    try:
+        return {"cleared": clear_read(conn, user.guid)}
+    finally:
+        release_conn(conn)

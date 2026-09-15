@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, memo } from 'react'
-import { Bell, Check } from 'lucide-react'
+import { Bell, Check, Trash2 } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 
 // Header toolbar bell for the document-workflow notification feed
@@ -92,6 +92,13 @@ export const NotificationBell = memo(function NotificationBell({ normalizerUrl }
         setUnreadCount(0)
     }
 
+    const clearRead = async () => {
+        await fetch(`${base}/notifications/read`, { method: 'DELETE', credentials: 'include' })
+        setNotifications(prev => prev.filter(n => !n.read_at))
+    }
+
+    const hasRead = notifications.some(n => n.read_at)
+
     return (
         <div ref={rootRef} className="relative">
             <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
@@ -118,11 +125,18 @@ export const NotificationBell = memo(function NotificationBell({ normalizerUrl }
                     >
                         <div className="flex items-center justify-between px-3 py-2 border-b border-white/8 shrink-0">
                             <span className="text-xs font-semibold text-[var(--speckle-foreground)]">Notifications</span>
-                            {unreadCount > 0 && (
-                                <button onClick={markAllRead} className="text-[10px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] flex items-center gap-1">
-                                    <Check className="w-3 h-3" /> Mark all read
-                                </button>
-                            )}
+                            <div className="flex items-center gap-2.5">
+                                {unreadCount > 0 && (
+                                    <button onClick={markAllRead} className="text-[10px] text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)] flex items-center gap-1">
+                                        <Check className="w-3 h-3" /> Mark all read
+                                    </button>
+                                )}
+                                {hasRead && (
+                                    <button onClick={clearRead} className="text-[10px] text-[var(--speckle-foreground-3)] hover:text-red-400 flex items-center gap-1">
+                                        <Trash2 className="w-3 h-3" /> Clear read
+                                    </button>
+                                )}
+                            </div>
                         </div>
                         <div className="overflow-y-auto flex-1">
                             {loading && (

@@ -99,3 +99,20 @@ def mark_all_read(conn, user_guid: str) -> int:
     except Exception:
         conn.rollback()
         raise
+
+
+def clear_read(conn, user_guid: str) -> int:
+    """Deletes every already-read notification for this user — scoped to
+    user_guid like mark_read, so a user can only ever clear their own."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM bim_notifications WHERE user_guid = %s AND read_at IS NOT NULL",
+                (user_guid,),
+            )
+            count = cur.rowcount
+        conn.commit()
+        return count
+    except Exception:
+        conn.rollback()
+        raise
