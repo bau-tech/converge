@@ -1,14 +1,4 @@
-# Every service below sets mem_limit — this host runs alongside ~30 other
-# LXCs sharing the same physical RAM with little slack (see process_pool.py's
-# worker-count comment), and without a cgroup cap a single runaway container
-# competes for memory against all of them rather than failing on its own.
-# Sized from observed idle usage (docker stats) plus headroom for real spikes
-# (ifcopenshell/specklepy can balloon several GB processing a large model —
-# see process_pool.py), not from a formal load test. bim-normalizer and
-# converge-mcp get the most headroom since both hold whole models in memory;
-# hitting the cap there OOM-kills the offending process (a pool worker, or,
-# worst case, the container itself, which restart: unless-stopped recovers
-# from) instead of pressuring the whole host.
+
 services:
 
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
