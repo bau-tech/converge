@@ -104,7 +104,7 @@ npm run dev                 # http://localhost:5173
 
 ### 2. Full stack (bim-normalizer + bcf-server + postgres + nextcloud + dashboard)
 
-Everything is orchestrated by the single [docker-compose.yml](docker-compose.yml) at the repo root — there is no separate compose file per service.
+Everything is orchestrated by [docker-compose.yml](docker-compose.yml) at the repo root — one file per *deployment mode* (this one for building locally, [docker-compose.release.yml](docker-compose.release.yml) for pulling published images), not per service. The one exception is Collabora Online (in-browser Office editing), which is a genuinely separate, opt-in compose file — see [Optional: Collabora Online](#optional-collabora-online-in-browser-office-editing) below.
 
 ```bash
 cp .env.example .env        # fill in SPECKLE_TOKEN, PG_*, MCP_API_KEY, BCF_API_KEY, etc.
@@ -120,6 +120,17 @@ docker compose -f docker-compose.release.yml up -d
 ```
 
 See [Deployment (Docker)](#deployment-docker) below for pinning a specific version and using GHCR instead.
+
+#### Optional: Collabora Online (in-browser Office editing)
+
+[docker-compose.collabora.yml](docker-compose.collabora.yml) adds Collabora Online (docx/xlsx/pptx/odt/ods/odp editing from the Documents panel) — it is **not** part of the stack above and is never picked up by a plain `docker compose up -d`. It must be composed on top explicitly, **every time**, including on later restarts/recreates:
+
+```bash
+# add COLLABORA_ENABLED=true, COLLABORA_ALLOWED_DOMAIN, etc. to .env first — see .env.example
+docker compose -f docker-compose.yml -f docker-compose.collabora.yml up -d
+```
+
+If a recreate is ever run with just `docker compose up -d` (no second `-f`), Compose doesn't know Collabora exists at all — it logs a `Found orphan containers ([collabora])` warning, and if that same command is ever run with `--remove-orphans`, the container is deleted outright and won't come back until the two-file command above is used again. `COLLABORA_ENABLED=true` only controls whether the *dashboard* shows an Edit button and Nextcloud installs the `richdocuments` app — it doesn't start this container, so it's possible for the Edit button to be live in the UI while Collabora itself is silently down. Same two-file pattern applies with `docker-compose.release.yml` in place of `docker-compose.yml`.
 
 ### 3. MCP server (local, Claude Code)
 
@@ -253,6 +264,8 @@ CONVERGE_VERSION=0.1.0 docker compose -f docker-compose.release.yml up -d
 To pull from GHCR instead, edit `docker-compose.release.yml` and swap the `docker.io/euch/converge-*` image names for `ghcr.io/bau-tech/converge-*` (same tags apply). Both GHCR packages are public, so no `docker login` is needed either way.
 
 Postgres and Nextcloud still come from their upstream public images either way (`postgres:16-alpine`, `nextcloud:apache`) — only the two converge-authored services change.
+
+Collabora Online is not included in either `up -d` above — see [Optional: Collabora Online](#optional-collabora-online-in-browser-office-editing) in Quick Start; the same two-`-f` pattern applies here too.
 
 ---
 
