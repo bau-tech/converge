@@ -2,7 +2,7 @@ import base64
 import binascii
 import hmac
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from config import settings
 from bcf.db import fetch_one
@@ -19,7 +19,28 @@ def _consteq(a: str, b: str) -> bool:
     return hmac.compare_digest(a, b)
 
 
-def require_bcf_auth(authorization: str | None = Header(None)) -> None:
+def _dashboard_identity(request: Request) -> dict | None:
+    """The main SPA's own login cookie — bcf_server.py is the same codebase
+    as the dashboard (just started with a different entrypoint), so it can
+    decode this directly. nginx proxies /bcf/ to bcf-server on the same
+    origin as the dashboard, so a browser that's already logged in sends
+    this cookie on every BCF fetch() automatically (default same-origin
+    credentials), with no separate bearer credential needed at all.
+    Added so the frontend no longer has to ship BCF_API_KEY — a credential
+    that fully bypasses the per-project author/reviewer/approver role model
+    — into every visitor's browser just to let logged-in users call BCF
+    routes. Real external clients (Solibri, BIMcollab) don't have this
+    cookie and fall through to the Authorization-header paths below."""
+    from dashboard_auth.session import SESSION_COOKIE, decode_session
+    payload = decode_session(request.cookies.get(SESSION_COOKIE))
+    if not payload:
+        return None
+    return {"id": payload["sub"], "name": payload["name"], "email": payload["email"]}
+
+
+def require_bcf_auth(request: Request, authorization: str | None = Header(None)) -> None:
+    if _dashboard_identity(request) is not None:
+        return
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
@@ -54,7 +75,7 @@ def require_bcf_auth(authorization: str | None = Header(None)) -> None:
     raise HTTPException(status_code=401, detail="Unsupported Authorization scheme")
 
 
-def get_current_bcf_user(authorization: str | None = Header(None)) -> dict:
+def get_current_bcf_user(request: Request, authorization: str | None = Header(None)) -> dict:
     """
     Like require_bcf_auth, but returns an identity instead of just
     validating — for /current-user and /foundation/*/current-user, which
@@ -62,10 +83,14 @@ def get_current_bcf_user(authorization: str | None = Header(None)) -> dict:
     Basic auth Solibri defaults to, got an unconditional 401) and then only
     checked _issued_tokens (populated exclusively by the OAuth code-exchange
     flow, so even a Bearer BCF_API_KEY — accepted everywhere else — 401'd
-    here too). Accepts the same three credential types require_bcf_auth
-    does, and reports a generic identity for the shared-key case since
-    BCF_API_KEY isn't tied to any one bcf_users row.
+    here too). Accepts the dashboard session cookie (see _dashboard_identity)
+    plus the same three credential types require_bcf_auth does, and reports
+    a generic identity for the shared-key case since BCF_API_KEY isn't tied
+    to any one bcf_users row.
     """
+    identity = _dashboard_identity(request)
+    if identity is not None:
+        return identity
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 

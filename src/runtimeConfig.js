@@ -22,11 +22,16 @@ export const RUNTIME_CONFIG = {
     DEMO_LOGIN_PASSWORD: pick('DEMO_LOGIN_PASSWORD', 'VITE_DEMO_LOGIN_PASSWORD', ''),
     EXTRA_SPECKLE_SERVERS: pick('EXTRA_SPECKLE_SERVERS', 'VITE_EXTRA_SPECKLE_SERVERS', ''),
     BCF_URL: pick('BCF_URL', 'VITE_BCF_URL', '/bcf'),
-    BCF_API_KEY: pick('BCF_API_KEY', 'VITE_BCF_API_KEY', ''),
     OLLAMA_BASE_URL: pick('OLLAMA_BASE_URL', 'VITE_OLLAMA_BASE_URL', 'http://localhost:11434'),
     OLLAMA_MODEL: pick('OLLAMA_MODEL', 'VITE_OLLAMA_MODEL', 'llama3'),
     LMSTUDIO_BASE_URL: pick('LMSTUDIO_BASE_URL', 'VITE_LMSTUDIO_BASE_URL', 'http://localhost:1234/v1'),
     LMSTUDIO_MODEL: pick('LMSTUDIO_MODEL', 'VITE_LMSTUDIO_MODEL', 'local-model'),
+    // These provider keys are deliberately NOT read from window.__CONFIG__ —
+    // see config.js.template's comment. A logged-in user can still set their
+    // own key via ChatWidget's Settings (stored in localStorage, read
+    // directly there rather than through RUNTIME_CONFIG); an operator's own
+    // server-wide default key stays server-side only (routers/chat.py falls
+    // back to the matching non-VITE_ env var when the request has none).
     MISTRAL_API_KEY: pick('MISTRAL_API_KEY', 'VITE_MISTRAL_API_KEY', ''),
     ANTHROPIC_API_KEY: pick('ANTHROPIC_API_KEY', 'VITE_ANTHROPIC_API_KEY', ''),
     GROQ_API_KEY: pick('GROQ_API_KEY', 'VITE_GROQ_API_KEY', ''),

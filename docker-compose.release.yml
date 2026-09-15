@@ -136,6 +136,12 @@ services:
       MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
       GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
       OLLAMA_API_KEY: ${VITE_OLLAMA_API_KEY:-}
+      # Was missing entirely — an operator-set VITE_ANTHROPIC_API_KEY/
+      # VITE_GROQ_API_KEY had no server-side route to routers/chat.py's
+      # os.getenv fallback at all, so they only ever worked by round-tripping
+      # through the (now-removed) public window.__CONFIG__ copy below.
+      ANTHROPIC_API_KEY: ${VITE_ANTHROPIC_API_KEY:-}
+      GROQ_API_KEY: ${VITE_GROQ_API_KEY:-}
       PG_HOST: postgres
       PG_PORT: 5432
       PG_USER: ${PG_USER:-speckle}
@@ -274,14 +280,18 @@ services:
       VITE_SPECKLE_TOKEN: ${VITE_SPECKLE_TOKEN}
       VITE_NORMALIZER_URL: /normalizer
       VITE_BCF_URL: /bcf
-      VITE_BCF_API_KEY: ${BCF_API_KEY:-}
+      # BCF_API_KEY/OLLAMA_API_KEY/MISTRAL_API_KEY/ANTHROPIC_API_KEY/
+      # GROQ_API_KEY/GEMINI_API_KEY deliberately NOT passed here — this
+      # container's config.js.template bakes its environment into a plain
+      # static file served to every visitor. BCF auth now uses the
+      # dashboard_session cookie instead (bcf/auth.py); the LLM provider
+      # keys stay purely server-side on bim-normalizer's own environment
+      # above, which routers/chat.py falls back to when a request doesn't
+      # supply its own key.
       VITE_OLLAMA_BASE_URL: ${VITE_OLLAMA_BASE_URL:-}
       VITE_OLLAMA_MODEL: ${VITE_OLLAMA_MODEL:-llama3}
-      VITE_OLLAMA_API_KEY: ${VITE_OLLAMA_API_KEY:-}
       VITE_LMSTUDIO_BASE_URL: ${VITE_LMSTUDIO_BASE_URL:-}
       VITE_LMSTUDIO_MODEL: ${VITE_LMSTUDIO_MODEL:-local-model}
-      VITE_MISTRAL_API_KEY: ${VITE_MISTRAL_API_KEY:-}
-      VITE_GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
       VITE_EXTRA_SPECKLE_SERVERS: ${VITE_EXTRA_SPECKLE_SERVERS:-}
       VITE_SHARE_LINK_MODE: ${VITE_SHARE_LINK_MODE:-full}
       VITE_DEMO_LOGIN_EMAIL: ${VITE_DEMO_LOGIN_EMAIL:-}

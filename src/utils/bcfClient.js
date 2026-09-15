@@ -1,6 +1,14 @@
 // REST wrapper for our self-hosted bcf-server (bim-normalizer/bcf_server.py).
-// Uses the static BCF_API_KEY shared credential — separate from the fake
-// OAuth2/OIDC shim that external clients like BIMcollab ZOOM go through.
+// Authenticates with the same `dashboard_session` cookie the main SPA login
+// already sets — bcf-server can decode it directly (same codebase, see
+// bcf/auth.py's _dashboard_identity) since nginx proxies /bcf/ on the same
+// origin, and fetch() sends same-origin cookies by default. This used to
+// send a static shared BCF_API_KEY bearer token instead, which had to be
+// baked into every visitor's browser (window.__CONFIG__) to work — that key
+// fully bypasses the per-project author/reviewer/approver role model, so
+// shipping it publicly defeated that entirely. The key still exists
+// server-side for real external clients (Solibri, BIMcollab) that don't
+// have this cookie.
 import { RUNTIME_CONFIG } from '../runtimeConfig'
 
 const BCF_URL = RUNTIME_CONFIG.BCF_URL
@@ -8,14 +16,12 @@ const BCF_URL = RUNTIME_CONFIG.BCF_URL
 // a sibling path, proxied by nginx as its own location block — see
 // nginx.conf.template's /bcf-bridge/ block.
 const BCF_BRIDGE_URL = BCF_URL.replace(/\/bcf$/, '/bcf-bridge')
-const BCF_API_KEY = RUNTIME_CONFIG.BCF_API_KEY
 const BCF_VERSION = '2.1'
 
 async function bcfFetch(baseUrl, path, options = {}) {
     const res = await fetch(`${baseUrl}${path}`, {
         ...options,
         headers: {
-            'Authorization': `Bearer ${BCF_API_KEY}`,
             ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
             ...options.headers,
         },
