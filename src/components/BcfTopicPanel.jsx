@@ -346,7 +346,11 @@ export const BcfTopicPanel = memo(function BcfTopicPanel({
             setSelectedTopic((prev) => (prev && prev.guid === topic.guid ? { ...prev, ...fields } : prev))
         }
         apply(updates)
-        updateTopic(projectId, topic.guid, updates).catch(() => apply(prevFields))
+        // modified_author identifies who made this edit — notify_bcf_assignment
+        // (bim-normalizer/notifications/dispatch.py) names the actor in the
+        // assignment notification/email using this field, falling back to
+        // "Someone" without it.
+        updateTopic(projectId, topic.guid, { ...updates, modified_author: user?.name }).catch(() => apply(prevFields))
     }
 
     const handleImportFile = async (e) => {
