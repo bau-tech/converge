@@ -141,9 +141,28 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
     const [actionError, setActionError] = useState(null)
     const [uploading, setUploading] = useState(false)
     const [uploadStatus, setUploadStatus] = useState(null)
+    const [myRoles, setMyRoles] = useState([])
     const fileInputRef = useRef(null)
 
+    // Deleting a model is gated on the same CDE role bim-normalizer's own
+    // /models/delete-cleanup requires (author/reviewer/approver) — without
+    // this, a role-less account (e.g. a read-only demo login) could delete
+    // the branch from Speckle itself via the GraphQL mutation below and only
+    // then discover the local cleanup step 403s, leaving the model gone from
+    // Speckle but its local records orphaned. Hiding the button is the fast
+    // path; removeBranch() below also reorders the two steps so a role
+    // failure can no longer cause that split-brain state at all.
+    const canDelete = myRoles.length > 0
+
     useEffect(() => { onUploadingChange?.(uploading) }, [uploading, onUploadingChange])
+
+    useEffect(() => {
+        if (!streamId || !base) return
+        fetch(`${base}/projects/${streamId}/my-roles`)
+            .then(res => res.ok ? res.json() : { roles: [] })
+            .then(data => setMyRoles(data.roles || []))
+            .catch(() => setMyRoles([]))
+    }, [streamId, base])
 
     const columns = STATUSES.reduce((acc, status) => {
         acc[status] = branches.filter(b => (statusByBranch[b.name] || 'WIP') === status)
@@ -274,12 +293,14 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
         setDeleting(true)
         setActionError(null)
         try {
-            await gqlFetch(serverUrl, serverToken, `
-                mutation DeleteBranch($branch: BranchDeleteInput!) {
-                    branchDelete(branch: $branch)
-                }
-            `, { branch: { streamId, id: branch.id } })
-
+            // Local cleanup goes FIRST and gates the whole delete (it's the
+            // step that enforces the author/reviewer/approver role check) —
+            // that way a role failure never gets past this point, instead of
+            // discarding the branch on Speckle and only then discovering
+            // cleanup isn't allowed. Local records are the recoverable side
+            // (re-ingest rebuilds them); Speckle is the source of truth, so
+            // it's the one that should only be touched once we know cleanup
+            // can actually go through.
             const res = await fetch(`${base}/projects/${streamId}/models/delete-cleanup`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -288,7 +309,17 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
             if (!res.ok) {
                 let detail = `HTTP ${res.status}`
                 try { const b = await res.json(); detail = b.detail || JSON.stringify(b) } catch {}
-                throw new Error(`Deleted from Speckle, but local cleanup failed: ${detail}`)
+                throw new Error(`Could not delete: ${detail}`)
+            }
+
+            try {
+                await gqlFetch(serverUrl, serverToken, `
+                    mutation DeleteBranch($branch: BranchDeleteInput!) {
+                        branchDelete(branch: $branch)
+                    }
+                `, { branch: { streamId, id: branch.id } })
+            } catch (err) {
+                throw new Error(`Removed locally, but the Speckle branch itself failed to delete: ${err.message}. It may still exist on Speckle — check there.`)
             }
 
             setStatusByBranch(prev => {
@@ -434,7 +465,7 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
                                         panoramaUrl={`${serverUrl}/preview/${streamId}/commits/${branch.commits.items[0]?.id}/all`}
                                         token={serverToken}
                                         onOpen={setSelectedBranch}
-                                        onDelete={setConfirmDeleteBranch}
+                                        onDelete={canDelete ? setConfirmDeleteBranch : undefined}
                                     />
                                 ))}
                             </Column>
@@ -465,9 +496,11 @@ export const SpeckleModelsList = forwardRef(function SpeckleModelsList(
                         <button onClick={() => setSelectedBranch(null)} className="flex items-center gap-1 text-xs text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]">
                             <ChevronLeft className="w-3.5 h-3.5" /> Back
                         </button>
-                        <button onClick={() => setConfirmDeleteBranch(selectedBranch)} className="text-[var(--speckle-foreground-3)] hover:text-red-400">
-                            <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {canDelete && (
+                            <button onClick={() => setConfirmDeleteBranch(selectedBranch)} className="text-[var(--speckle-foreground-3)] hover:text-red-400">
+                                <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                        )}
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
                         <div className="aspect-video bg-[var(--speckle-outline-3)] rounded-lg flex items-center justify-center overflow-hidden relative">
