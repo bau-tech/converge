@@ -30,6 +30,28 @@ def _chunked(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def _rules_reference_properties(rule_dicts: list[dict]) -> bool:
+    """
+    True if any rule's selector_a/selector_b might filter on a property/pset
+    value, per ifcopenshell.util.selector's own grammar (selector.py):
+    `property: pset "." prop comparison value` is the only facet that reads
+    a property, and it's the only facet whose syntax requires a literal "."
+    — every other facet (entity, attribute, type, material, classification,
+    location, group, parent, query) doesn't need one. So "no dot anywhere in
+    any selector this job uses" is a conservative, grammar-backed proof that
+    stripping properties from the synthetic export (see export_model()'s
+    skip_properties) can't silently break a selector match. A dot anywhere
+    — even in a selector that turns out not to need it — is treated as "yes"
+    and skips the optimization instead of trying to parse intent further.
+    """
+    for rule in rule_dicts:
+        if "." in (rule.get("selector_a") or ""):
+            return True
+        if "." in (rule.get("selector_b") or ""):
+            return True
+    return False
+
+
 async def _bisect_ids(
     run_one_batch, rule: dict, ids: list[str], chunk_is_a: bool, other_selector: str, on_progress,
 ) -> tuple[list[dict], list[str]]:
@@ -348,14 +370,22 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
         conn2 = get_conn()
         try:
             rule_dicts = [r.model_dump() for r in body.rules]
+            # See _rules_reference_properties' docstring — skip the expensive
+            # property/pset attachment in the synthetic export entirely when
+            # nothing in this job's rules could possibly need it.
+            skip_properties = not _rules_reference_properties(rule_dicts)
 
             if body.compare_model_id:
                 # Resolve both models' IFC bytes concurrently — same reasoning
                 # as the single-model path below for preferring each model's
                 # real original IFC over bim-normalizer's synthetic export.
                 (ifc_bytes_a, ifc_source_a), (ifc_bytes_b, ifc_source_b) = await asyncio.gather(
-                    resolve_model_ifc_bytes(model_id, body.token, body.server_url, body.coord_unit),
-                    resolve_model_ifc_bytes(body.compare_model_id, body.token, body.server_url, body.coord_unit),
+                    resolve_model_ifc_bytes(
+                        model_id, body.token, body.server_url, body.coord_unit, skip_properties,
+                    ),
+                    resolve_model_ifc_bytes(
+                        body.compare_model_id, body.token, body.server_url, body.coord_unit, skip_properties,
+                    ),
                 )
                 # For whichever side(s) are a real original IFC (e.g. Revit's
                 # own exporter output), resolve its GlobalIds back to
@@ -407,7 +437,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
             # path, guid_map (built below when applicable) resolves them back
             # via the computed Revit UniqueId<->GlobalId correlation instead.
             ifc_bytes, ifc_source = await resolve_model_ifc_bytes(
-                model_id, body.token, body.server_url, body.coord_unit
+                model_id, body.token, body.server_url, body.coord_unit, skip_properties,
             )
             guid_map = await build_revit_guid_map(model_id) if ifc_source == "original_ifc" else {}
 

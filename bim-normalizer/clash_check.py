@@ -42,6 +42,19 @@ def _single_threaded_geometry_iterator():
     to 1 thread for the duration of a clash check trades iterator speed
     for not crashing, which given that cost is the right tradeoff.
 
+    Re-validated 2026-09-15: re-tested with threads=4 against 5 real
+    ingested models (1,395 to 14,515 elements, IFC and Revit sources) on
+    the assumption that run_cpu_bound's retry + the per-rule/per-batch
+    bisection fallback might absorb an occasional worker crash well enough
+    to be worth the ~2x speed gain. Result: 4 of 4 completed self-clash
+    jobs crashed (fell back to the whole-rule retry, which then also
+    crashed), and one job took down the entire bim-normalizer server
+    process mid-run (uvicorn restarted, dropping every in-flight
+    request/job, not just the one clash check) — worse than the isolated
+    per-worker segfault this mitigation was originally written for. Stays
+    pinned to 1; do not re-enable without a fix upstream in ifcopenshell/
+    ifcclash's thread-safety, not just more resilience on our side.
+
     Scoped to the calling process only (a spawned process_pool.py worker,
     not the main process) and restored on exit, so it can't leak into any
     other code path that happens to run in the same worker afterward.
@@ -282,6 +295,15 @@ def _run_one_rule(
     settings = ClashSettings()
     settings.logger = logger
     clasher = Clasher(settings)
+    # Clasher.load_ifc() caches opened files on self.ifcs, keyed by path —
+    # but that cache is instance-local and we build a fresh Clasher per
+    # rule, so without this it silently re-parses the same IFC from disk
+    # on every single rule even though `check_file` already has it open in
+    # this process. Pre-seeding the cache with our already-open handle
+    # skips that reparse entirely — measured ~21s saved per rule on a
+    # 251MB/14.5k-element export (verified identical clash results with
+    # and without). See run_one_cross_rule for the two-file equivalent.
+    clasher.ifcs[tmp_path] = check_file
 
     two_sided = bool(selector_b and selector_b != selector_a)
     clash_set = {
@@ -427,6 +449,10 @@ def _run_one_cross_rule(
     settings = ClashSettings()
     settings.logger = logger
     clasher = Clasher(settings)
+    # See _run_one_rule's identical comment — avoids Clasher re-parsing
+    # both models from disk on every rule.
+    clasher.ifcs[tmp_path_a] = check_file_a
+    clasher.ifcs[tmp_path_b] = check_file_b
 
     clash_set = {
         "name": rule.get("name") or "clash",

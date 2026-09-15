@@ -198,7 +198,8 @@ def _load_relationships_for_export(model_id: str) -> list[dict]:
 
 
 async def resolve_model_ifc_bytes(
-    model_id: str, token: str | None, server_url: str | None, coord_unit: str
+    model_id: str, token: str | None, server_url: str | None, coord_unit: str,
+    skip_properties: bool = False,
 ) -> tuple[bytes, str]:
     """
     Resolve the IFC bytes to run a check (IDS/clash) against for one model:
@@ -207,6 +208,18 @@ async def resolve_model_ifc_bytes(
     synthetic export (ifc_source="synthetic_export") when none is attached
     or the lookup fails. Shared by ids_check.py and clash_check.py so both
     single- and cross-model checks resolve a model's bytes identically.
+
+    skip_properties – forwarded to export_model() for the synthetic-export
+                      fallback only (a real original IFC always has its own
+                      full property data regardless of this flag — there's
+                      nothing to skip). Defaults to False so ids_check.py
+                      (which checks property/pset facets) and every other
+                      caller keep full fidelity; only clash_check.py passes
+                      True, and only when it has confirmed the job's rule
+                      selectors don't reference any property — see
+                      ifc/export.py's export_model() docstring. Part of the
+                      cache key since a properties-stripped export must never
+                      be served to a caller that needs real properties.
     """
     from db.connection import get_conn, release_conn
     from speckle.fetch import fetch_original_ifc_bytes
@@ -232,7 +245,7 @@ async def resolve_model_ifc_bytes(
     # found".
     lookup_server_url = server_url or model_server_url
 
-    cache_key = (model_id, commit_id, coord_unit, lookup_server_url)
+    cache_key = (model_id, commit_id, coord_unit, lookup_server_url, skip_properties)
     cached = _ifc_bytes_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -260,7 +273,8 @@ async def resolve_model_ifc_bytes(
         model_row, elements, params = await asyncio.to_thread(_load_export_data, model_id, coord_unit)
         relationships = await asyncio.to_thread(_load_relationships_for_export, model_id)
         ifc_bytes = await run_cpu_bound(
-            export_model, model_row, elements, params, coord_unit, None, None, relationships
+            export_model, model_row, elements, params, coord_unit, None, None, relationships,
+            skip_properties,
         )
 
     _ifc_bytes_cache_put(cache_key, ifc_bytes, ifc_source)
