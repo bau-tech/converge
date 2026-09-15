@@ -921,7 +921,38 @@ function Dashboard({ readOnly = false }) {
                     items { id name description updatedAt }
                 }
             }`)
-            const streamList = gqlData.streams.items
+            let streamList = gqlData.streams.items
+
+            // Restrict the switcher to projects this user actually holds a
+            // CDE role on (admin panel's author/reviewer/approver grants) —
+            // applies on every server, not just the default one:
+            // bim_document_roles has no per-server column, but Speckle
+            // stream ids are unique enough in practice that a grant is
+            // meaningful regardless of which server it happens to live on
+            // (confirmed live: a grant for a project on the "SpeckleDev"
+            // extra server works exactly like one on Default). An anonymous
+            // share-link visitor has no dashboard login for this to apply to.
+            if (authUser) {
+                try {
+                    const accessRes = await fetch(`${CONFIG.normalizerUrl}/my-accessible-projects`, { credentials: 'include' })
+                    if (accessRes.ok) {
+                        const { all, stream_ids } = await accessRes.json()
+                        if (!all) {
+                            const allowed = new Set(stream_ids)
+                            streamList = streamList.filter(p => allowed.has(p.id))
+                        }
+                    }
+                    // A non-OK response (e.g. not logged in yet) falls through
+                    // to the unfiltered list rather than blocking project
+                    // selection entirely.
+                } catch {
+                    // Backend unreachable — fail open. This list is a UI
+                    // convenience, not the enforcement boundary: every
+                    // mutating endpoint independently re-checks the same
+                    // roles server-side regardless of what's shown here.
+                }
+            }
+
             setProjects(streamList)
             const pending = pendingSelectionRef.current
             if (pending?.projectId) {
@@ -3196,7 +3227,23 @@ function Dashboard({ readOnly = false }) {
                         </motion.div>
                     )}
 
-                    {!selectedProject || !selectedModel ? (
+                    {!loadingProjects && projects.length === 0 ? (
+                        // Reachable now that the project switcher is filtered by CDE
+                        // role (see loadProjects's /my-accessible-projects check) —
+                        // an account with no role grants on any project would
+                        // otherwise leave selectedProject/selectedModel permanently
+                        // null and spin on the generic "Opening..." message below
+                        // forever, with no indication of why.
+                        <motion.div
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="flex flex-col items-center justify-center h-96 text-center gap-3"
+                        >
+                            <img src="/converge-logo2-transparent.png" alt="" className="w-16 h-16 opacity-60" />
+                            <h2 className="text-lg font-semibold text-zinc-300">No projects available</h2>
+                            <p className="text-sm text-zinc-500 max-w-sm">Your account doesn&apos;t have a role on any project yet. Ask an admin to grant you access from the admin panel.</p>
+                        </motion.div>
+                    ) : !selectedProject || !selectedModel ? (
                         <motion.div
                             initial={{ opacity: 0, y: 8 }}
                             animate={{ opacity: 1, y: 0 }}

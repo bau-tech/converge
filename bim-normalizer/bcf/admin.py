@@ -35,6 +35,7 @@ from bcf.schemas import (
     UserNotifyEmailUpdate,
     UserOrgUpdate,
     UserPasswordReset,
+    UserRestrictedUpdate,
 )
 from db.purge import purge_speckle_models, purge_project_documents
 
@@ -219,7 +220,7 @@ def _admin_page_html(email: str) -> str:
     <input type="password" name="password" placeholder="Password" required>
     <button type="submit">Add user</button>
   </form>
-  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Email notifications</th><th>Admin</th><th>Created</th><th></th></tr></thead>
+  <table id="users-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Email notifications</th><th>Admin</th><th>Restricted</th><th>Created</th><th></th></tr></thead>
     <tbody></tbody></table>
 
   <h2>Document roles (ISO 19650)</h2>
@@ -347,6 +348,19 @@ async function setUserAdmin(cb) {{
     }}
 }}
 
+async function setUserRestricted(cb) {{
+    try {{
+        await api(`/admin/api/users/${{cb.dataset.guid}}/restricted`, {{
+            method: 'PATCH',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ is_restricted: cb.checked }}),
+        }});
+    }} catch (e) {{
+        cb.checked = !cb.checked;
+        alert(e.message || 'Could not update restricted status');
+    }}
+}}
+
 async function loadUsers() {{
     const users = await api('/admin/api/users');
     const tbody = document.querySelector('#users-table tbody');
@@ -359,12 +373,14 @@ async function loadUsers() {{
             ${{u.notify_email ? 'checked' : ''}} onchange="setUserNotifyEmail(this)"> Email me</label></td>
         <td><label class="checkbox-row"><input type="checkbox" data-guid="${{u.guid}}"
             ${{u.is_admin ? 'checked' : ''}} onchange="setUserAdmin(this)"> Admin</label></td>
+        <td><label class="checkbox-row"><input type="checkbox" data-guid="${{u.guid}}"
+            ${{u.is_restricted ? 'checked' : ''}} onchange="setUserRestricted(this)"> No delete/upload</label></td>
         <td>${{esc(new Date(u.created_at).toLocaleString())}}</td>
         <td>
             <button data-guid="${{u.guid}}" data-name="${{esc(u.name)}}" onclick="resetUserPassword(this)">Reset password</button>
             <button class="danger" data-guid="${{u.guid}}" onclick="deleteUser(this)">Delete</button>
         </td>
-    </tr>`).join('') || '<tr><td colspan="6" class="muted">No users yet.</td></tr>';
+    </tr>`).join('') || '<tr><td colspan="7" class="muted">No users yet.</td></tr>';
     document.getElementById('grant-role-user').innerHTML = users.map(u =>
         `<option value="${{u.guid}}">${{esc(u.name)}} &lt;${{esc(u.email)}}&gt;</option>`).join('');
 }}
@@ -672,6 +688,7 @@ def _serialize_user(row: dict) -> dict:
         "org_name": row.get("org_name"),
         "notify_email": row["notify_email"],
         "is_admin": row.get("is_admin", False),
+        "is_restricted": row.get("is_restricted", False),
     }
 
 
@@ -679,7 +696,7 @@ def _serialize_user(row: dict) -> dict:
 def admin_list_users(_email: str = Depends(require_admin_session)):
     rows = fetch_all(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, u.is_restricted, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         ORDER BY u.created_at
         """
@@ -703,7 +720,7 @@ def admin_set_user_org(user_guid: str, body: UserOrgUpdate, _email: str = Depend
     execute("UPDATE bcf_users SET org_id = %s WHERE guid = %s", (body.org_id, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, u.is_restricted, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,
@@ -725,7 +742,7 @@ def admin_set_user_notify_email(
     execute("UPDATE bcf_users SET notify_email = %s WHERE guid = %s", (body.notify_email, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, u.is_restricted, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,
@@ -748,7 +765,30 @@ def admin_set_user_admin(user_guid: str, body: UserAdminUpdate, _email: str = De
     execute("UPDATE bcf_users SET is_admin = %s WHERE guid = %s", (body.is_admin, user_guid))
     updated = fetch_one(
         """
-        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, o.name AS org_name
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, u.is_restricted, o.name AS org_name
+        FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
+        WHERE u.guid = %s
+        """,
+        (user_guid,),
+    )
+    return _serialize_user(updated)
+
+
+@router.patch("/admin/api/users/{user_guid}/restricted")
+def admin_set_user_restricted(
+    user_guid: str, body: UserRestrictedUpdate, _email: str = Depends(require_admin_session)
+):
+    """Hard, role-independent lockout — see db_schema.py's is_restricted
+    column comment. Checked in dashboard_auth.dependencies.require_project_role,
+    so this denies every document/model mutation for the account regardless
+    of any bim_document_roles grants, current or future."""
+    row = fetch_one("SELECT guid FROM bcf_users WHERE guid = %s", (user_guid,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    execute("UPDATE bcf_users SET is_restricted = %s WHERE guid = %s", (body.is_restricted, user_guid))
+    updated = fetch_one(
+        """
+        SELECT u.guid, u.email, u.name, u.created_at, u.org_id, u.notify_email, u.is_admin, u.is_restricted, o.name AS org_name
         FROM bcf_users u LEFT JOIN bcf_organizations o ON o.org_id = u.org_id
         WHERE u.guid = %s
         """,

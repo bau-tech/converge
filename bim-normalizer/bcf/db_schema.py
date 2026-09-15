@@ -170,6 +170,17 @@ ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMPT
 -- explicitly, and admin.py's own /admin/api/users/{guid}/admin endpoint
 -- lets an existing admin grant it to others from there.
 ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- A hard, role-independent lockout — checked in dashboard_auth.dependencies'
+-- require_project_role/require_role (the same gate every document/model
+-- mutation already goes through), so a restricted account is denied those
+-- actions no matter what bim_document_roles grants exist for it now or are
+-- added later. For accounts like a shared public demo login where "can
+-- browse everything, can change nothing" must hold permanently, independent
+-- of whatever roles someone accidentally grants down the line. Defaults to
+-- FALSE so no existing account is silently locked out on upgrade; toggled
+-- from admin.py's own /admin/api/users/{guid}/restricted endpoint.
+ALTER TABLE bcf_users ADD COLUMN IF NOT EXISTS is_restricted BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 # One-time (per row, via ON CONFLICT DO NOTHING) backfill: topics created by

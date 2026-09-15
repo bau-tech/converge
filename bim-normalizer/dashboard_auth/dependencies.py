@@ -67,7 +67,9 @@ def require_project_role(conn, stream_id: str, user: CurrentUser, allowed_roles)
     role is fixed for the whole endpoint."""
     if settings.DASHBOARD_AUTH_BYPASS:
         return
-    from db.roles import get_user_roles
+    from db.roles import get_user_roles, is_user_restricted
+    if is_user_restricted(conn, user.guid):
+        raise HTTPException(status_code=403, detail="This account is not permitted to make changes")
     roles = get_user_roles(conn, user.guid, stream_id)
     if not roles.intersection(allowed_roles):
         raise HTTPException(

@@ -139,5 +139,9 @@ class UserAdminUpdate(BaseModel):
     is_admin: bool
 
 
+class UserRestrictedUpdate(BaseModel):
+    is_restricted: bool
+
+
 class UserPasswordReset(BaseModel):
     password: str

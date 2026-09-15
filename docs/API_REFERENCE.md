@@ -230,6 +230,7 @@ stage independently settable/clearable and attributed to an actor, not a single 
 | `POST` | `/projects/{stream_id}/documents/backfill` | One-time bulk-index of files already in Nextcloud. Returns `{job_id}` |
 | `GET` | `/projects/{stream_id}/documents/backfill/{job_id}/status` | Poll backfill job |
 | `GET` | `/projects/{stream_id}/my-roles` | Current user's ISO 19650 author/reviewer/approver roles on this project |
+| `GET` | `/my-accessible-projects` | Every stream_id the current user holds any role on (or `{"all": true}` for a blanket grant) — filters the dashboard's project switcher |
 | `GET` | `/projects/{stream_id}/documents/linked-positions` | Positions (elements/topics) already linked to at least one document, for UI badge display |
 
 `GET .../documents` and every single-document route additionally enforce ISO 19650 contractual-container

@@ -123,6 +123,21 @@ def my_roles(stream_id: str, user: CurrentUser = Depends(require_login)):
         release_conn(conn)
 
 
+@router.get("/my-accessible-projects")
+def my_accessible_projects(user: CurrentUser = Depends(require_login)):
+    """Every Speckle stream_id this user holds a CDE role on (admin panel
+    grants), for the dashboard's project switcher to filter its Speckle
+    project list down to only what this user is actually allowed to see.
+    `{"all": true}` means a blanket '*' grant — every project is visible."""
+    from db.connection import get_conn, release_conn
+    from db.roles import get_user_accessible_streams
+    conn = get_conn()
+    try:
+        return get_user_accessible_streams(conn, user.guid)
+    finally:
+        release_conn(conn)
+
+
 @router.get("/projects/{stream_id}/documents")
 def list_documents(
     stream_id: str, status: str | None = None, linked_element: str | None = None,
