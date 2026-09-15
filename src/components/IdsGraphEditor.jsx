@@ -21,7 +21,7 @@ import { SPEC_TEMPLATES, instantiateTemplate } from '../utils/idsTemplates'
 // interop, since matching a data format isn't the same as copying code.
 // Nested inside IdsCheckPanel.jsx the same way ClashCheckPanel/IdsCheckPanel
 // themselves nest inside App.jsx.
-function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved }) {
+function IdsGraphEditorInner({ uploadSpecFile, updateSpecFile, editingSpec, initialGraph, onClose, onSaved }) {
     const [nodes, setNodes, onNodesChange] = useNodesState(initialGraph?.nodes || [])
     const [edges, setEdges, onEdgesChange] = useEdgesState(initialGraph?.edges || [])
     const [importOpen, setImportOpen] = useState(false)
@@ -76,10 +76,20 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
         setEdges(eds => addEdge({ ...connection, id: `e${idCounter.current}` }, eds))
     }, [setEdges])
 
-    const loadTemplate = (template) => {
-        if (nodes.length > 0 && !window.confirm('Replace the current canvas with this template?')) return
+    // 'add' merges the template's specification alongside whatever's already
+    // on the canvas (offset below the existing content so it doesn't land on
+    // top of anything); 'replace' wipes the canvas first, same as before.
+    const loadTemplate = (template, mode = 'add') => {
         const { nodes: tNodes, edges: tEdges } = instantiateTemplate(template)
-        replaceGraph(tNodes, tEdges)
+        if (mode === 'replace') {
+            if (nodes.length > 0 && !window.confirm('Replace the current canvas with this template?')) return
+            replaceGraph(tNodes, tEdges)
+        } else {
+            const maxY = nodes.reduce((max, n) => Math.max(max, n.position?.y || 0), 0)
+            const offset = nodes.length > 0 ? maxY + 260 : 0
+            const shifted = tNodes.map(n => ({ ...n, position: { ...n.position, y: n.position.y + offset } }))
+            replaceGraph([...nodes, ...shifted], [...edges, ...tEdges])
+        }
         setTemplatesOpen(false)
     }
 
@@ -126,6 +136,32 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
             const file = new File([xml], filename, { type: 'application/xml' })
             const spec = await uploadSpecFile(file)
             setSaveMsg(`Saved as "${filename}" and added to your spec list.`)
+            onSaved?.(spec)
+        } catch (err) {
+            setSaveError(err.message)
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    // Overwrites the template this editor session was opened from (same
+    // spec_id/filename), so specifications added or removed on the canvas
+    // land back on the original template instead of piling up as new files.
+    const updateTemplate = async () => {
+        const { valid: canSave, issues: blockingIssues } = validateGraph(nodes, edges)
+        if (!canSave) {
+            setSaveError(`Fix these issues first: ${blockingIssues.filter(i => i.severity === 'error').map(i => i.message).join('; ')}`)
+            return
+        }
+        setSaving(true)
+        setSaveError(null)
+        setSaveMsg(null)
+        try {
+            const xml = convertGraphToIdsXml(nodes, edges, { metadata })
+            const file = new File([xml], editingSpec.filename, { type: 'application/xml' })
+            const spec = await updateSpecFile(editingSpec.spec_id, file)
+            const specCount = nodes.filter(n => n.type === 'spec').length
+            setSaveMsg(`Updated "${editingSpec.filename}" — ${specCount} specification${specCount === 1 ? '' : 's'} saved.`)
             onSaved?.(spec)
         } catch (err) {
             setSaveError(err.message)
@@ -184,14 +220,27 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
                     >
                         <Download className="w-3.5 h-3.5" /> Export JSON
                     </button>
+                    {editingSpec && (
+                        <button
+                            onClick={saveAsSpec}
+                            disabled={saving || nodes.length === 0 || !valid}
+                            title={!valid ? `Resolve validation errors first:\n${issues.filter(i => i.severity === 'error').map(i => i.message).join('\n')}` : 'Save these changes as a brand-new spec, leaving the original template untouched'}
+                            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded bg-[var(--speckle-outline-3)] hover:opacity-90 disabled:opacity-40 transition-opacity"
+                        >
+                            <Save className="w-3.5 h-3.5" />
+                            Save as New
+                        </button>
+                    )}
                     <button
-                        onClick={saveAsSpec}
+                        onClick={editingSpec ? updateTemplate : saveAsSpec}
                         disabled={saving || nodes.length === 0 || !valid}
-                        title={!valid ? `Resolve validation errors first:\n${issues.filter(i => i.severity === 'error').map(i => i.message).join('\n')}` : undefined}
+                        title={!valid
+                            ? `Resolve validation errors first:\n${issues.filter(i => i.severity === 'error').map(i => i.message).join('\n')}`
+                            : (editingSpec ? `Overwrite "${editingSpec.filename}" with these changes` : undefined)}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-amber-500 text-black font-medium disabled:opacity-40 transition-opacity"
                     >
                         {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                        Save as Spec
+                        {editingSpec ? 'Update Template' : 'Save as Spec'}
                     </button>
                     <button onClick={handleClose} className="p-1.5 hover:bg-[var(--speckle-outline-3)] rounded-lg transition-colors">
                         <X className="w-4 h-4 text-[var(--speckle-foreground-3)]" />
@@ -327,6 +376,11 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
                         onClick={e => e.stopPropagation()}
                     >
                         <h3 className="text-sm font-semibold text-[var(--speckle-foreground)]">Start from a template</h3>
+                        <p className="text-xs text-[var(--speckle-foreground-3)] -mt-2">
+                            {nodes.length > 0
+                                ? 'Add appends this template\'s specification alongside what\'s already on the canvas.'
+                                : 'Pick a template to start the canvas.'}
+                        </p>
                         {Object.entries(
                             SPEC_TEMPLATES.reduce((acc, t) => {
                                 (acc[t.category] ||= []).push(t)
@@ -337,14 +391,29 @@ function IdsGraphEditorInner({ uploadSpecFile, initialGraph, onClose, onSaved })
                                 <p className="text-[10px] uppercase tracking-wider text-[var(--speckle-foreground-3)] mb-1.5">{category}</p>
                                 <div className="grid grid-cols-2 gap-2">
                                     {templates.map(t => (
-                                        <button
+                                        <div
                                             key={t.id}
-                                            onClick={() => loadTemplate(t)}
-                                            className="text-left p-2.5 rounded-lg border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors"
+                                            className="p-2.5 rounded-lg border border-[var(--speckle-outline-3)] hover:bg-[var(--speckle-outline-3)] transition-colors"
                                         >
                                             <p className="text-xs font-medium text-[var(--speckle-foreground)]">{t.name}</p>
-                                            <p className="text-[10px] text-[var(--speckle-foreground-3)]">{t.description}</p>
-                                        </button>
+                                            <p className="text-[10px] text-[var(--speckle-foreground-3)] mb-1.5">{t.description}</p>
+                                            <div className="flex gap-1.5">
+                                                <button
+                                                    onClick={() => loadTemplate(t, 'add')}
+                                                    className="px-2 py-1 text-[10px] rounded bg-amber-500 text-black font-medium"
+                                                >
+                                                    {nodes.length > 0 ? 'Add' : 'Use template'}
+                                                </button>
+                                                {nodes.length > 0 && (
+                                                    <button
+                                                        onClick={() => loadTemplate(t, 'replace')}
+                                                        className="px-2 py-1 text-[10px] rounded hover:bg-[var(--speckle-outline-2)] text-[var(--speckle-foreground-3)]"
+                                                    >
+                                                        Replace canvas
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
                                     ))}
                                 </div>
                             </div>

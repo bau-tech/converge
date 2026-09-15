@@ -127,6 +127,7 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
     const pollRef = useRef(null)
     const [showEditor, setShowEditor] = useState(false)
     const [editorInitialGraph, setEditorInitialGraph] = useState(null)
+    const [editingSpec, setEditingSpec] = useState(null) // { spec_id, filename } of the template currently open in the editor, or null when starting fresh
 
     const loadSpecs = useCallback(async () => {
         if (!projectId) return
@@ -146,42 +147,38 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
 
     useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
 
-    const uploadSpecFile = async (file) => {
+    // Large requests can fail with a bare, content-type-less 5xx that never
+    // reaches bim-normalizer at all (confirmed: a reverse-proxy layer in
+    // front of this domain returns its own HTML error page for request
+    // bodies past a size threshold, before forwarding anything). That's
+    // deterministic on size — retrying changes nothing, so detect it via the
+    // non-JSON content-type and fail immediately with a message that points
+    // at the real cause instead of looking broken. Genuine transient
+    // failures (network blip, momentary 5xx from the app itself) still get a
+    // few spaced-out retries. Shared by both the create (POST) and
+    // update-in-place (PUT) spec-file requests below.
+    const submitSpecFile = async (method, url, file) => {
         const form = new FormData()
         form.append('file', file)
 
-        // Large uploads can fail with a bare, content-type-less 5xx that
-        // never reaches bim-normalizer at all (confirmed: a reverse-proxy
-        // layer in front of this domain returns its own HTML error page for
-        // request bodies past a size threshold, before forwarding anything).
-        // That's deterministic on size — retrying changes nothing, so detect
-        // it via the non-JSON content-type and fail immediately with a
-        // message that points at the real cause instead of looking broken.
-        // Genuine transient failures (network blip, momentary 5xx from the
-        // app itself) still get a few spaced-out retries.
         let lastErr
         for (let attempt = 0; attempt < 3; attempt++) {
             if (attempt > 0) await new Promise(r => setTimeout(r, 4000 * attempt))
 
             let res
             try {
-                res = await fetch(`${base}/models/${projectId}/ids-specs`, { method: 'POST', body: form })
+                res = await fetch(url, { method, body: form })
             } catch (err) {
                 lastErr = err   // network-level failure — retryable
                 continue
             }
 
-            if (res.ok) {
-                const spec = await res.json()
-                setSpecs(prev => [spec, ...prev])
-                setSelectedSpecId(spec.spec_id)
-                return spec
-            }
+            if (res.ok) return res.json()
 
             const isJson = (res.headers.get('content-type') || '').includes('application/json')
             if (res.status >= 500 && !isJson) {
                 throw new Error(
-                    `Upload blocked by a reverse-proxy layer in front of this server (got a non-JSON ${res.status} ` +
+                    `Request blocked by a reverse-proxy layer in front of this server (got a non-JSON ${res.status} ` +
                     `before reaching the app) — this usually means the proxy's request body size limit/buffer needs ` +
                     `raising for larger files. Contact whoever manages the server's reverse proxy.`
                 )
@@ -189,11 +186,27 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
             if (res.status < 500) {
                 // Deterministic rejection from the app itself (e.g. invalid IDS XML) — retrying won't help
                 const body = await res.json().catch(() => ({}))
-                throw new Error(body.detail || `Upload failed (${res.status})`)
+                throw new Error(body.detail || `Request failed (${res.status})`)
             }
-            lastErr = new Error(`Upload failed (${res.status})`)
+            lastErr = new Error(`Request failed (${res.status})`)
         }
         throw lastErr
+    }
+
+    const uploadSpecFile = async (file) => {
+        const spec = await submitSpecFile('POST', `${base}/models/${projectId}/ids-specs`, file)
+        setSpecs(prev => [spec, ...prev])
+        setSelectedSpecId(spec.spec_id)
+        return spec
+    }
+
+    // Overwrites an existing template's content in place (same spec_id) —
+    // used when saving edits made in the visual editor back onto the
+    // template that was opened, instead of creating a duplicate file.
+    const updateSpecFile = async (specId, file) => {
+        const spec = await submitSpecFile('PUT', `${base}/models/${projectId}/ids-specs/${specId}`, file)
+        setSpecs(prev => prev.map(s => (s.spec_id === specId ? { ...s, ...spec } : s)))
+        return spec
     }
 
     const handleUpload = async (e) => {
@@ -213,6 +226,7 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
 
     const openBlankEditor = () => {
         setEditorInitialGraph(null)
+        setEditingSpec(null)
         setShowEditor(true)
     }
 
@@ -224,6 +238,7 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
             if (!res.ok) throw new Error(`Could not load spec (${res.status})`)
             const spec = await res.json()
             setEditorInitialGraph(parseIdsXmlToGraph(spec.content))
+            setEditingSpec({ spec_id: spec.spec_id, filename: spec.filename })
             setShowEditor(true)
         } catch (err) {
             setError(`Couldn't open this spec in the visual editor: ${err.message}`)
@@ -493,8 +508,10 @@ export function IdsCheckPanel({ projectId, normalizerUrl, viewerRef, topics = []
                 {showEditor && (
                     <IdsGraphEditor
                         uploadSpecFile={uploadSpecFile}
+                        updateSpecFile={updateSpecFile}
+                        editingSpec={editingSpec}
                         initialGraph={editorInitialGraph}
-                        onClose={() => setShowEditor(false)}
+                        onClose={() => { setShowEditor(false); setEditingSpec(null) }}
                     />
                 )}
             </AnimatePresence>

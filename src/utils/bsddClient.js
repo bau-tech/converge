@@ -25,7 +25,22 @@ export function searchBsddDictionaries(search, limit = 20) {
     return bsddFetch(`/dictionaries?search=${encodeURIComponent(search)}&limit=${limit}`)
 }
 
+// { resolved, types: [{ value, description }] } — PredefinedType enum
+// values bSDD knows for an IFC entity class (e.g. ELEMENTEDWALL, SOLIDWALL
+// for IFCWALL), for the Entity node's "Predefined Type" field.
+export function getBsddPredefinedTypes(ifcClass) {
+    return bsddFetch(`/ifc-predefined-types?ifc_class=${encodeURIComponent(ifcClass)}`)
+}
+
 // { classes: [{ uri, name, referenceCode, description, parentClassName }] }
 export function searchBsddClasses(dictionaryUri, search, limit = 20) {
     return bsddFetch(`/classes?dictionary_uri=${encodeURIComponent(dictionaryUri)}&search=${encodeURIComponent(search)}&limit=${limit}`)
+}
+
+// { classes: [{ name, description }] } — IFC entity class names (e.g.
+// IFCWALL) from bSDD's official IFC dictionary, for the Entity/Part-Of
+// nodes' "IFC Class" field. Unlike searchBsddClasses, no dictionary URI
+// needed — the backend hardcodes the IFC dictionary.
+export function searchBsddIfcClasses(search, limit = 30) {
+    return bsddFetch(`/ifc-classes?search=${encodeURIComponent(search)}&limit=${limit}`)
 }

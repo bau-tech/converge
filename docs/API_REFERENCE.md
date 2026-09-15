@@ -105,6 +105,7 @@ If the source is IFC, the original blob uploaded to the Speckle server is served
 | `POST` | `/models/{id}/ids-specs` | Store an IDS specification (XML, built via the graph editor or hand-authored) |
 | `GET` | `/models/{id}/ids-specs` | List stored IDS specs for a model |
 | `GET` | `/models/{id}/ids-specs/{spec_id}` | Fetch one spec |
+| `PUT` | `/models/{id}/ids-specs/{spec_id}` | Overwrite a spec's content in place (same spec_id) — used by the visual editor to save specifications added/removed onto an existing template |
 | `DELETE` | `/models/{id}/ids-specs/{spec_id}` | Delete a spec |
 | `POST` | `/models/{id}/ids-check` | Run an IDS spec against the model via `ifctester`. Returns `{job_id}` |
 | `GET` | `/models/{id}/ids-check/{job_id}/status` | Poll check job; results map failures to element `speckle_id`s for viewer highlight and optional BCF topic creation |

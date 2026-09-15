@@ -2,7 +2,7 @@ import { Handle, Position, useReactFlow, useNodes, useEdges } from '@xyflow/reac
 import { useEffect, useState } from 'react'
 import { Trash2 } from 'lucide-react'
 import { SearchableCombobox } from './SearchableCombobox'
-import { getBsddEntityProperties, searchBsddDictionaries, searchBsddClasses } from '../utils/bsddClient'
+import { getBsddEntityProperties, searchBsddDictionaries, searchBsddClasses, searchBsddIfcClasses, getBsddPredefinedTypes } from '../utils/bsddClient'
 
 // Standalone editable card per node type for the IDS visual graph editor.
 // Each node writes its own `data` via setNodes (the standard React Flow v12
@@ -110,8 +110,32 @@ function useBsddEntityProperties(entityClass) {
     return result
 }
 
-function NodeShell({ id, type, children, minWidth = 220, selected }) {
-    const remove = useRemoveNode(id)
+// bSDD's known PredefinedType enum values per entity class (e.g.
+// ELEMENTEDWALL, SOLIDWALL for IFCWALL), cached module-wide like
+// bsddEntityPropsCache above.
+const bsddPredefinedTypesCache = new Map()
+
+function useBsddPredefinedTypes(entityClass) {
+    const [result, setResult] = useState(null)
+    useEffect(() => {
+        if (!entityClass) { setResult(null); return }
+        const cached = bsddPredefinedTypesCache.get(entityClass)
+        if (cached) { setResult(cached); return }
+        let cancelled = false
+        getBsddPredefinedTypes(entityClass)
+            .then(res => {
+                bsddPredefinedTypesCache.set(entityClass, res)
+                if (!cancelled) setResult(res)
+            })
+            .catch(() => { if (!cancelled) setResult({ resolved: false, types: [] }) })
+        return () => { cancelled = true }
+    }, [entityClass])
+    return result
+}
+
+function NodeShell({ id, type, children, minWidth = 220, selected, onRemove, removeTitle = 'Delete node' }) {
+    const defaultRemove = useRemoveNode(id)
+    const remove = onRemove || defaultRemove
     const accent = ACCENTS[type] || '#888'
     return (
         <div
@@ -134,7 +158,7 @@ function NodeShell({ id, type, children, minWidth = 220, selected }) {
                 <button
                     onClick={remove}
                     className="nodrag opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--speckle-outline-3)] text-[var(--speckle-foreground-3)] hover:text-red-400 transition-opacity"
-                    title="Delete node"
+                    title={removeTitle}
                 >
                     <Trash2 className="w-3 h-3" />
                 </button>
@@ -230,6 +254,17 @@ const COMMON_IFC_CLASSES = [
     'IFCBUILDINGSTOREY', 'IFCBUILDING', 'IFCSITE', 'IFCPIPESEGMENT', 'IFCDUCTSEGMENT',
 ]
 
+// Backs the Entity/Part-Of nodes' "IFC Class" combobox: an empty query shows
+// the short hardcoded common-classes list (so the field isn't blank on
+// first focus), anything typed searches bSDD's real IFC dictionary instead
+// so any of IFC's ~800 entity classes can be found, not just the common ones.
+async function loadIfcClassOptions(query) {
+    const trimmed = (query || '').trim()
+    if (!trimmed) return COMMON_IFC_CLASSES.map(name => ({ value: name, label: name }))
+    const { classes } = await searchBsddIfcClasses(trimmed)
+    return classes.map(c => ({ value: c.name, label: c.name, meta: c.description }))
+}
+
 // Shared connection-point styling — react-flow's default handle is a bare
 // 6px square in a low-contrast grey, easy to miss against this dark theme.
 // A larger circle with a page-colored ring gives every handle a clear "this
@@ -277,10 +312,36 @@ function SpecHandleRow({ handleId, label }) {
     )
 }
 
+// Deleting a Specification node's own edges (the default NodeShell behavior)
+// would leave every facet wired into it — and any restriction wired into
+// one of those facets — stranded on the canvas: disconnected from
+// everything, invisible in the exported XML, but still cluttering the
+// graph. This removes the whole definition as one unit: the spec node, its
+// facets, and their restrictions.
+function useRemoveSpecification(id) {
+    const { setNodes, setEdges } = useReactFlow()
+    const edges = useEdges()
+    return () => {
+        const facetIds = new Set(edges.filter(e => e.target === id).map(e => e.source))
+        if (facetIds.size > 0 && !window.confirm(`Delete this specification and its ${facetIds.size} connected facet${facetIds.size === 1 ? '' : 's'}?`)) return
+        const restrictionIds = new Set(
+            edges.filter(e => facetIds.has(e.source) && e.target !== id).map(e => e.target)
+        )
+        const removeIds = new Set([id, ...facetIds, ...restrictionIds])
+        setNodes(nds => nds.filter(n => !removeIds.has(n.id)))
+        setEdges(eds => eds.filter(e => !removeIds.has(e.source) && !removeIds.has(e.target)))
+    }
+}
+
 export function SpecNode({ id, data, selected }) {
     const set = useNodeField(id)
+    const removeSpecification = useRemoveSpecification(id)
     return (
-        <NodeShell id={id} type="spec" minWidth={260} selected={selected}>
+        <NodeShell
+            id={id} type="spec" minWidth={260} selected={selected}
+            onRemove={removeSpecification}
+            removeTitle="Delete this specification (and its connected facets)"
+        >
             <div className="space-y-1 mb-1.5">
                 <SpecHandleRow handleId="applicability" label="Applicability" />
                 <SpecHandleRow handleId="requirements" label="Requirements" />
@@ -322,11 +383,30 @@ export function SpecNode({ id, data, selected }) {
 
 export function EntityNode({ id, data }) {
     const set = useNodeField(id)
+    const predefinedTypes = useBsddPredefinedTypes(data.name)
+    const predefinedTypeOptions = (predefinedTypes?.types || []).map(t => ({ value: t.value, label: t.value, meta: t.description }))
     return (
         <NodeShell id={id} type="entity">
             <SourceHandle />
-            <Field label="IFC Class" value={data.name} onChange={v => set('name', v.toUpperCase())} placeholder="IFCWALL" mono suggestions={COMMON_IFC_CLASSES} />
-            <Field label="Predefined Type (optional)" value={data.predefinedType} onChange={v => set('predefinedType', v)} placeholder="e.g. USERDEFINED" mono />
+            <SearchableCombobox
+                label="IFC Class"
+                value={data.name}
+                onChange={v => set('name', v.toUpperCase())}
+                placeholder="IFCWALL"
+                mono
+                loadOptions={loadIfcClassOptions}
+                emptyHint="No bSDD match — type freely"
+            />
+            <SearchableCombobox
+                label="Predefined Type (optional)"
+                hint={predefinedTypeOptions.length > 0 ? `${predefinedTypeOptions.length} known types` : undefined}
+                value={data.predefinedType}
+                onChange={v => set('predefinedType', v.toUpperCase())}
+                placeholder="e.g. USERDEFINED"
+                mono
+                options={predefinedTypeOptions}
+                emptyHint={data.name ? 'No bSDD match — type freely' : 'Set an IFC Class first'}
+            />
             <InstructionsField value={data.instructions} onChange={v => set('instructions', v)} />
         </NodeShell>
     )
@@ -516,7 +596,15 @@ export function PartOfNode({ id, data }) {
     return (
         <NodeShell id={id} type="partOf">
             <SourceHandle />
-            <Field label="Parent IFC Class" value={data.entity} onChange={v => set('entity', v.toUpperCase())} placeholder="IFCBUILDINGSTOREY" mono suggestions={COMMON_IFC_CLASSES} />
+            <SearchableCombobox
+                label="Parent IFC Class"
+                value={data.entity}
+                onChange={v => set('entity', v.toUpperCase())}
+                placeholder="IFCBUILDINGSTOREY"
+                mono
+                loadOptions={loadIfcClassOptions}
+                emptyHint="No bSDD match — type freely"
+            />
             <SelectField label="Relation" value={data.relation} onChange={v => set('relation', v)} options={PARTOF_RELATIONS} />
             <CardinalityField value={data.cardinality} onChange={v => set('cardinality', v)} />
             <InstructionsField value={data.instructions} onChange={v => set('instructions', v)} />

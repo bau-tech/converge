@@ -62,6 +62,56 @@ async def upload_ids_spec(model_id: str, file: UploadFile):
     return {"spec_id": str(spec_id), "filename": filename, "uploaded_at": uploaded_at.isoformat()}
 
 
+@router.put("/models/{model_id}/ids-specs/{spec_id}")
+async def update_ids_spec(model_id: str, spec_id: str, file: UploadFile):
+    """Overwrite an existing IDS spec's content in place (same spec_id) —
+    used by the visual editor to save edits (specifications added or
+    removed on the canvas) back onto the template that was opened, instead
+    of always creating a new file via POST."""
+    from ids_check import validate_ids_xml, InvalidIdsError
+    from db.connection import get_conn, release_conn
+
+    if not _is_uuid(model_id):
+        raise HTTPException(status_code=400, detail=f"Invalid model id: {model_id!r}")
+
+    raw = await file.read()
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="IDS file must be UTF-8 encoded XML")
+
+    try:
+        await asyncio.to_thread(validate_ids_xml, content)
+    except InvalidIdsError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid IDS file: {exc}")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bim_ids_specs SET filename = %s, content = %s
+                WHERE model_id = %s AND spec_id = %s
+                RETURNING spec_id, filename, uploaded_at
+                """,
+                (file.filename or "spec.ids", content, model_id, spec_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="IDS spec not found")
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error("IDS spec update failed for model %s spec %s: %s", model_id, spec_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Update failed: {exc}")
+    finally:
+        release_conn(conn)
+    return {"spec_id": str(row[0]), "filename": row[1], "uploaded_at": row[2].isoformat()}
+
+
 @router.get("/models/{model_id}/ids-specs")
 def list_ids_specs(model_id: str):
     """List previously uploaded .ids files for this model."""

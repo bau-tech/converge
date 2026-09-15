@@ -130,6 +130,92 @@ async def entity_properties(ifc_class: str = Query(..., description="IFC entity 
     return {"resolved": True, "className": class_name, "propertySets": property_sets}
 
 
+def _pascal_case(name: str) -> str:
+    """Title-cases each word of a bSDD display name (e.g. 'Curtain Wall' ->
+    'CurtainWall') while preserving words that are already all-uppercase
+    (e.g. 'SI' in 'SI Unit' -> 'SI', not 'Si') since those are typically
+    acronyms baked verbatim into the real IFC entity name."""
+    return "".join(w if w.isupper() and len(w) > 1 else w[:1].upper() + w[1:].lower() for w in name.split())
+
+
+def _is_real_ifc_entity(name: str, reference_code: str) -> bool:
+    """bSDD's IFC dictionary lists a pseudo-'class' for every (entity,
+    PredefinedType) combination too — e.g. searching 'wall' also returns
+    referenceCode 'IfcWallELEMENTEDWALL' (name 'Elemented Wall'), which is
+    NOT a valid <ids:entity> name (the real entity is IfcWall; ELEMENTEDWALL
+    belongs in the separate PredefinedType field). Those pseudo-classes are
+    detectable because bSDD's own display `name` no longer round-trips to
+    `referenceCode` once title-cased — a genuine entity's does."""
+    return f"Ifc{_pascal_case(name)}" == reference_code
+
+
+@router.get("/ifc-classes")
+async def search_ifc_classes(search: str = Query("", description="Filter text, e.g. 'wall'"), limit: int = 30):
+    """IFC entity class names (e.g. IFCWALL) from bSDD's official IFC
+    dictionary, for the Entity/Part-Of nodes' 'IFC Class' autocomplete.
+    Unlike /classes, this hardcodes the IFC dictionary URI so the frontend
+    doesn't need to know it. Empty search returns no results (200, not an
+    error) rather than listing bSDD's entire IFC dictionary — callers fall
+    back to a short hardcoded common-classes list for that case instead."""
+    query = search.strip()
+    if not query:
+        return {"classes": []}
+    # Over-fetch since _is_real_ifc_entity filters out a good chunk of
+    # matches (every PredefinedType pseudo-class) — without this a search
+    # like "wall" would return only a few real entities out of `limit` raw
+    # results even though many more genuine matches exist.
+    data = await _bsdd_get("/Class/Search/v1", {
+        "SearchText": query,
+        "DictionaryUris": IFC_DICTIONARY_URI,
+        "Limit": max(limit * 4, 100),
+    })
+    classes = [
+        {"name": c["referenceCode"], "description": c.get("description")}
+        for c in data.get("classes", [])
+        if c.get("referenceCode") and _is_real_ifc_entity(c.get("name", ""), c["referenceCode"])
+    ]
+    return {"classes": classes[:limit]}
+
+
+@router.get("/ifc-predefined-types")
+async def ifc_predefined_types(ifc_class: str = Query(..., description="IFC entity name, e.g. IFCWALL")):
+    """PredefinedType enum values bSDD associates with an IFC entity (e.g.
+    ELEMENTEDWALL, SOLIDWALL, ... for IFCWALL), for the Entity node's
+    'Predefined Type' field. This is the mirror image of the pseudo-classes
+    _is_real_ifc_entity filters out of /ifc-classes: searching bSDD for the
+    entity's own reference code returns exactly that entity plus every one
+    of its (entity, PredefinedType) pseudo-classes, whose referenceCode is
+    the entity's own code with the enum value appended verbatim
+    (IfcWall -> IfcWallELEMENTEDWALL) — so the suffix after stripping the
+    entity's code back off *is* the PredefinedType value."""
+    try:
+        resolved = await _resolve_ifc_class_uri(ifc_class)
+    except HTTPException:
+        resolved = None
+    if not resolved:
+        return {"resolved": False, "types": []}
+    _, class_reference_code = resolved
+
+    try:
+        data = await _bsdd_get("/Class/Search/v1", {
+            "SearchText": class_reference_code,
+            "DictionaryUris": IFC_DICTIONARY_URI,
+            "Limit": 100,
+        })
+    except HTTPException:
+        return {"resolved": True, "types": []}
+
+    types = []
+    for c in data.get("classes", []):
+        code = c.get("referenceCode", "")
+        if not code.startswith(class_reference_code) or code == class_reference_code:
+            continue
+        suffix = code[len(class_reference_code):]
+        if suffix.isupper():  # excludes an unrelated longer entity name sharing this prefix
+            types.append({"value": suffix, "description": c.get("description")})
+    return {"resolved": True, "types": types}
+
+
 @router.get("/dictionaries")
 async def search_dictionaries(search: str = Query("", description="Filter text, e.g. 'uniclass'"), limit: int = 20):
     """Full dictionary list is cached whole (long TTL, ~a few hundred KB) and
