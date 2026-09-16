@@ -160,25 +160,14 @@ def extract_ifc_relationship_links(
     a synthetic export (spatial hierarchy bim_relationships doesn't otherwise
     capture), so those are kept.
     """
-    import os
-    import tempfile
-
     import ifcopenshell
 
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as f:
-            f.write(ifc_bytes)
-            tmp_path = f.name
+    from process_pool import locked_temp_file
+
+    with locked_temp_file(ifc_bytes) as tmp_path:
         m = ifcopenshell.open(tmp_path)
         pairs = extract_relationship_pairs(m)
         resolved = resolve_relationship_element_ids(m, pairs, ifc_source, app_id_to_element, revit_guid_map)
         if ifc_source == "synthetic_export":
             resolved = [r for r in resolved if r[2] != "connects"]
         return resolved
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass

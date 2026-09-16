@@ -13,106 +13,16 @@ BCF topics by the frontend through the existing /bcf/2.1 REST API
 (bcfClient.createTopic), the same pattern ids_check.py uses.
 """
 import contextlib
-import fcntl
 import logging
 import multiprocessing
-import os
-import tempfile
-import time
 
 import ifcopenshell
 import ifcopenshell.util.selector
 from ifcclash.ifcclash import Clasher, ClashSettings
 
+from process_pool import locked_temp_file
+
 logger = logging.getLogger(__name__)
-
-# Every temp .ifc this module writes lives here, not the shared system temp
-# root — so cleanup_stale_temp_ifcs only ever touches files this subsystem
-# owns, never another service's (e.g. converge_mcp.py writes its own
-# long-lived "tmp*.ifc" files for an entire interactive session).
-_CLASH_TMP_DIR = os.path.join(tempfile.gettempdir(), "bim_normalizer_clash")
-os.makedirs(_CLASH_TMP_DIR, exist_ok=True)
-
-
-@contextlib.contextmanager
-def _locked_temp_ifc(data: bytes):
-    """
-    Write `data` to a fresh temp .ifc file in _CLASH_TMP_DIR and hold an
-    advisory exclusive lock (flock) on it for as long as this context
-    manager is open — however long that turns out to be, since a big
-    multi-rule job or a crash-bisected one can legitimately run well past
-    any fixed timeout. flock is tied to the process's open file descriptor
-    table, so the OS releases it automatically the instant the holding
-    process dies, segfault included, with no cleanup code of ours needing to
-    run for that release to happen. cleanup_stale_temp_ifcs uses this: it
-    only deletes a stale-looking file if it can grab the same lock itself,
-    which tells apart "still genuinely in use" from "orphaned by a crash"
-    regardless of how long the file has existed.
-    """
-    with tempfile.NamedTemporaryFile(suffix=".ifc", dir=_CLASH_TMP_DIR, delete=False) as f:
-        f.write(data)
-        tmp_path = f.name
-    lock_fd = os.open(tmp_path, os.O_RDONLY)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield tmp_path
-    finally:
-        os.close(lock_fd)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def cleanup_stale_temp_ifcs(max_age_seconds: int = 1800) -> int:
-    """
-    Sweep _CLASH_TMP_DIR for orphaned *.ifc temp files. _locked_temp_ifc
-    above cleans up after itself on every normal exit — but when the native
-    ifcopenshell/ifcclash geometry code actually segfaults (the whole reason
-    _bisect_ids/BrokenProcessPool handling exists, see routers/clash_check.py),
-    the OS kills the worker process before Python's stack unwinds, so that
-    cleanup never runs and the file is left behind. Crash bisection
-    deliberately keeps re-probing a poison element until it's isolated, so
-    this leak recurs every time a job hits degenerate geometry (confirmed in
-    production: 262 orphaned ~41MB files, 7.6GB, from one job).
-
-    A file is only ever deleted if BOTH it's older than max_age_seconds AND
-    this process can grab its flock right now — age alone isn't enough,
-    since a slow-but-legitimate job (see _locked_temp_ifc) can hold a file
-    open well past this window; the lock is what actually proves nobody's
-    using it. Called at the start of every clash-check job rather than
-    relying on per-call cleanup, since that's the site that intentionally
-    re-triggers the crash. Returns the count removed.
-    """
-    removed = 0
-    now = time.time()
-    try:
-        entries = list(os.scandir(_CLASH_TMP_DIR))
-    except OSError:
-        return 0
-    for entry in entries:
-        if not entry.name.endswith(".ifc"):
-            continue
-        try:
-            if now - entry.stat().st_mtime < max_age_seconds:
-                continue
-            fd = os.open(entry.path, os.O_RDONLY)
-        except OSError:
-            continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            continue  # still locked by a live worker, however long it's run
-        finally:
-            os.close(fd)
-        try:
-            os.unlink(entry.path)
-            removed += 1
-        except OSError:
-            pass
-    if removed:
-        logger.warning("Clash job: cleaned up %d orphaned temp .ifc file(s) left by a previous worker crash", removed)
-    return removed
 
 
 @contextlib.contextmanager
@@ -264,7 +174,7 @@ def resolve_selector_global_ids(ifc_bytes: bytes, selector: str) -> list[str]:
     to split a rule's element groups into smaller GlobalId-based selectors
     after a worker segfault, without needing to guess which element is bad.
     """
-    with _locked_temp_ifc(ifc_bytes) as tmp_path:
+    with locked_temp_file(ifc_bytes) as tmp_path:
         check_file = ifcopenshell.open(tmp_path)
         return [
             e.GlobalId for e in ifcopenshell.util.selector.filter_elements(check_file, selector)
@@ -471,7 +381,7 @@ def run_clash_checks(
     edge/face contact. True is the only setting that reliably catches
     "these two solids occupy the same space".
     """
-    with _locked_temp_ifc(ifc_bytes) as tmp_path:
+    with locked_temp_file(ifc_bytes) as tmp_path:
         check_file = ifcopenshell.open(tmp_path)
         results = []
         for i, rule in enumerate(rules):
@@ -564,7 +474,7 @@ def run_cross_model_clash_checks(
     guid_map_a / guid_map_b: for whichever side(s) are a real original IFC,
     pass that model's map from routers.ifc_export.build_revit_guid_map().
     """
-    with _locked_temp_ifc(ifc_bytes_a) as tmp_path_a, _locked_temp_ifc(ifc_bytes_b) as tmp_path_b:
+    with locked_temp_file(ifc_bytes_a) as tmp_path_a, locked_temp_file(ifc_bytes_b) as tmp_path_b:
         check_file_a = ifcopenshell.open(tmp_path_a)
         check_file_b = ifcopenshell.open(tmp_path_b)
         results = []

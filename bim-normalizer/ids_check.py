@@ -12,12 +12,12 @@ Instead, failures are reported as plain JSON and turned into BCF topics by
 the frontend through the existing /bcf/2.1 REST API (bcfClient.createTopic).
 """
 import json
-import os
-import tempfile
 
 import ifcopenshell
 from ifctester import ids as ids_module
 from ifctester import reporter
+
+from process_pool import locked_temp_file
 
 
 class InvalidIdsError(ValueError):
@@ -84,11 +84,7 @@ def run_ids_check(
     or original-IFC-checked, never both), but both are tried independently
     so passing both is harmless.
     """
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as f:
-            f.write(ifc_bytes)
-            tmp_path = f.name
+    with locked_temp_file(ifc_bytes) as tmp_path:
         ifc_file = ifcopenshell.open(tmp_path)
         spec = ids_module.from_string(ids_content)
         spec.validate(ifc_file)
@@ -111,9 +107,3 @@ def run_ids_check(
         # entity instances in particular) — round-trip through json to get a
         # plain dict back instead of a half-native/half-stringified mix.
         return json.loads(json.dumps(results, default=str))
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass

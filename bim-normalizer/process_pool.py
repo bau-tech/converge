@@ -1,9 +1,13 @@
 import asyncio
+import contextlib
+import fcntl
 import functools
 import logging
 import multiprocessing
 import os
 import pickle
+import tempfile
+import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
@@ -17,6 +21,97 @@ from concurrent.futures.process import BrokenProcessPool
 # 'spawn' (not the Linux default 'fork') so worker processes start with a
 # clean interpreter instead of inheriting this process's live DB connections
 # and thread locks, which are not safe to share across a fork.
+
+# Scratch dir for any run_cpu_bound job that needs to hand ifcopenshell a
+# real file path (ifcopenshell.open() takes a path, not bytes) — clash_check,
+# ids_check, ifc/relationship_types all do this. Deliberately its own
+# subdirectory rather than the shared system temp root, so cleanup_stale_temp_
+# files() (below) only ever touches files this pool's own workers wrote —
+# other producers of temp .ifc files (e.g. converge_mcp.py, which keeps its
+# own long-lived per-session file) never collide with it.
+_WORKER_TMP_DIR = os.path.join(tempfile.gettempdir(), "bim_normalizer_worker_tmp")
+os.makedirs(_WORKER_TMP_DIR, exist_ok=True)
+
+
+@contextlib.contextmanager
+def locked_temp_file(data: bytes, suffix: str = ".ifc"):
+    """
+    Write `data` to a fresh temp file in _WORKER_TMP_DIR and hold an advisory
+    exclusive lock (flock) on it for as long as this context manager is open
+    — however long that turns out to be, since a big multi-rule clash job or
+    a crash-bisected one can legitimately run well past any fixed timeout.
+    flock is tied to the process's open file descriptor table, so the OS
+    releases it automatically the instant the holding worker dies, segfault
+    included, with no cleanup code of ours needing to run for that release to
+    happen. cleanup_stale_temp_files (below) uses this: it only deletes a
+    stale-looking file if it can grab the same lock itself, which tells apart
+    "still genuinely in use" from "orphaned by a crash" regardless of how
+    long the file has existed. Runs inside the worker process, so the lock
+    naturally disappears with it on a crash — nothing to reconcile from the
+    main process's side.
+    """
+    f = tempfile.NamedTemporaryFile(suffix=suffix, dir=_WORKER_TMP_DIR, delete=False)
+    try:
+        f.write(data)
+        f.flush()
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield f.name
+    finally:
+        f.close()
+        try:
+            os.unlink(f.name)
+        except OSError:
+            pass
+
+
+def cleanup_stale_temp_files(max_age_seconds: int = 1800) -> int:
+    """
+    Sweep _WORKER_TMP_DIR for orphaned temp files left behind by a worker
+    that segfaulted mid-job — locked_temp_file's own cleanup only runs on a
+    normal exit; a native crash (ifcopenshell/ifcclash geometry code, per
+    _worker_init's docstring) kills the process before that code can run,
+    permanently orphaning the file (confirmed in production: one clash job
+    alone left 262 files, 7.6GB). Called from run_cpu_bound itself, right
+    after it detects a worker actually died (BrokenProcessPool) — that keeps
+    this structural rather than something each caller of run_cpu_bound has to
+    separately remember to trigger, and means it only runs when a crash
+    actually happened rather than on every job.
+
+    A file is only deleted if BOTH it's older than max_age_seconds AND this
+    process can grab its flock right now — age alone isn't enough, since a
+    slow-but-legitimate job can hold a file open well past this window; the
+    lock is what actually proves nobody's using it. Returns the count removed.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        entries = list(os.scandir(_WORKER_TMP_DIR))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if now - entry.stat().st_mtime < max_age_seconds:
+                continue
+            fd = os.open(entry.path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            continue  # still locked by a live worker, however long it's run
+        finally:
+            os.close(fd)
+        try:
+            os.unlink(entry.path)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        logging.getLogger(__name__).warning(
+            "Worker pool: cleaned up %d orphaned temp file(s) left by a crashed worker", removed,
+        )
+    return removed
+
 
 _pool: ProcessPoolExecutor | None = None
 
@@ -149,4 +244,11 @@ async def run_cpu_bound(func, *args, **kwargs):
             "Process pool broken (a worker died) — recreating and retrying once"
         )
         close_process_pool()
+        # Best-effort: a dead worker may have orphaned a locked_temp_file()
+        # (see its docstring). Never let a sweep problem block the retry —
+        # this is strictly cleanup, not part of the actual job.
+        try:
+            await asyncio.to_thread(cleanup_stale_temp_files)
+        except Exception:
+            logging.getLogger(__name__).warning("Stale temp-file sweep after a worker crash failed", exc_info=True)
         return await loop.run_in_executor(get_process_pool(), call)
