@@ -17,12 +17,54 @@ import logging
 import multiprocessing
 import os
 import tempfile
+import time
 
 import ifcopenshell
 import ifcopenshell.util.selector
 from ifcclash.ifcclash import Clasher, ClashSettings
 
 logger = logging.getLogger(__name__)
+
+
+def cleanup_stale_temp_ifcs(max_age_seconds: int = 1800) -> int:
+    """
+    Sweep the system temp dir for orphaned *.ifc temp files. Every function
+    below that writes one via tempfile.NamedTemporaryFile(delete=False)
+    cleans it up itself in a `finally: os.unlink(...)` — but when the native
+    ifcopenshell/ifcclash geometry code actually segfaults (the whole reason
+    _bisect_ids/BrokenProcessPool handling exists, see routers/clash_check.py),
+    the OS kills the worker process before Python's stack unwinds, so that
+    finally block never runs and the file is permanently orphaned. Crash
+    bisection deliberately keeps re-probing a poison element until it's
+    isolated, so this leak recurs every time a job hits degenerate geometry
+    (confirmed in production: 262 orphaned ~41MB files, 7.6GB, from one job).
+
+    Anything older than max_age_seconds is safe to treat as orphaned — every
+    legitimate caller writes, opens, and deletes its own temp file within a
+    single call, well under this window. Called at the start of every
+    clash-check job rather than relying on per-call cleanup, since that's the
+    site that intentionally re-triggers the crash. Returns the count removed.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        entries = os.scandir(tempfile.gettempdir())
+    except OSError:
+        return 0
+    with entries:
+        for entry in entries:
+            if not (entry.name.startswith("tmp") and entry.name.endswith(".ifc")):
+                continue
+            try:
+                if now - entry.stat().st_mtime < max_age_seconds:
+                    continue
+                os.unlink(entry.path)
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        logger.warning("Clash job: cleaned up %d orphaned temp .ifc file(s) left by a previous worker crash", removed)
+    return removed
 
 
 @contextlib.contextmanager

@@ -352,6 +352,9 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
     if not body.rules:
         raise HTTPException(status_code=400, detail="At least one rule is required")
 
+    from clash_check import cleanup_stale_temp_ifcs
+    cleanup_stale_temp_ifcs()
+
     job_id = str(uuid.uuid4())
     conn = get_conn()
     try:
