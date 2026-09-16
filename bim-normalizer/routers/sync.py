@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/servers")
-def list_servers():
+def list_servers(user: CurrentUser = Depends(require_login)):
     """
     Return all configured Speckle servers (name, url, token) so the dashboard
     can let users switch between them.  Tokens are returned because the
@@ -61,7 +61,7 @@ class AutoSyncServerBody(BaseModel):
 
 
 @router.get("/auto-sync/servers")
-def list_auto_sync_servers():
+def list_auto_sync_servers(user: CurrentUser = Depends(require_login)):
     """Watched servers plus how many of their streams already have a webhook registered."""
     from db.connection import get_conn, release_conn
     conn = get_conn()
@@ -136,7 +136,7 @@ async def upsert_auto_sync_server(body: AutoSyncServerBody, user: CurrentUser = 
 
 
 @router.post("/auto-sync/scan")
-async def trigger_auto_sync_scan():
+async def trigger_auto_sync_scan(user: CurrentUser = Depends(require_login)):
     """
     Fire an on-demand auto-sync scan of every enabled server, same logic as
     the periodic background loop in main.py's _auto_sync_loop. The frontend

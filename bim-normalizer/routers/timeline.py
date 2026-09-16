@@ -1,10 +1,23 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
+
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["timeline"])
+
+
+def _require_role_for_model(conn, cur, model_id: str, user: CurrentUser) -> None:
+    """Model-scoped routes need the model's own stream_id to know which
+    project to check the caller's role against — same pattern
+    routers/overrides.py and routers/filter_publish.py use."""
+    cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
 
 
 class TaskCreateRequest(BaseModel):
@@ -52,7 +65,7 @@ class GenerateScheduleRequest(BaseModel):
 
 
 @router.get("/models/{model_id}/timeline/params")
-def get_timeline_params(model_id: str):
+def get_timeline_params(model_id: str, user: CurrentUser = Depends(require_login)):
     """Discover parameters that can drive a 4D build-up animation."""
     from db.connection import get_conn, release_conn
     from db.timeline import get_timeline_params as _params
@@ -64,7 +77,7 @@ def get_timeline_params(model_id: str):
 
 
 @router.get("/models/{model_id}/timeline/data")
-def get_timeline_data(model_id: str, param_key: str):
+def get_timeline_data(model_id: str, param_key: str, user: CurrentUser = Depends(require_login)):
     """Return elements grouped by param_key, sorted chronologically."""
     from db.connection import get_conn, release_conn
     from db.timeline import get_timeline_data as _data
@@ -76,7 +89,7 @@ def get_timeline_data(model_id: str, param_key: str):
 
 
 @router.get("/models/{model_id}/schedule")
-def get_schedule(model_id: str):
+def get_schedule(model_id: str, user: CurrentUser = Depends(require_login)):
     """Return the full task tree with element speckle_ids for viewer sync."""
     from db.connection import get_conn, release_conn
     from db.schedule import get_schedule as _get
@@ -88,12 +101,14 @@ def get_schedule(model_id: str):
 
 
 @router.delete("/models/{model_id}/schedule")
-def delete_schedule(model_id: str):
+def delete_schedule(model_id: str, user: CurrentUser = Depends(require_login)):
     """Wipe the entire schedule (all tasks, dependencies, element links) for a model."""
     from db.connection import get_conn, release_conn
     from db.schedule import delete_schedule as _delete_schedule
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         deleted = _delete_schedule(conn, model_id)
         return {"deleted_tasks": deleted}
     finally:
@@ -101,7 +116,7 @@ def delete_schedule(model_id: str):
 
 
 @router.post("/models/{model_id}/schedule/import")
-async def import_schedule(model_id: str, file: UploadFile):
+async def import_schedule(model_id: str, file: UploadFile, user: CurrentUser = Depends(require_login)):
     """Import a schedule into bim_tasks, from an IFC file containing
     IfcWorkSchedule, a Microsoft Project XML (MSPDI) export, or a CSV export."""
     from db.connection import get_conn, release_conn
@@ -114,6 +129,8 @@ async def import_schedule(model_id: str, file: UploadFile):
     content = await file.read()
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         if filename.endswith('.xml'):
             return import_from_mspdi(conn, model_id, content)
         if filename.endswith('.csv'):
@@ -137,7 +154,7 @@ async def import_schedule(model_id: str, file: UploadFile):
 
 
 @router.post("/models/{model_id}/schedule/generate")
-def generate_schedule(model_id: str, body: GenerateScheduleRequest):
+def generate_schedule(model_id: str, body: GenerateScheduleRequest, user: CurrentUser = Depends(require_login)):
     """Auto-generate a schedule from the model's own storey/geometry data —
     one task per storey (or per Z-height band), elements auto-assigned,
     consecutive tasks optionally chained FINISH_START. Replaces any existing
@@ -146,6 +163,8 @@ def generate_schedule(model_id: str, body: GenerateScheduleRequest):
     from db.schedule import generate_schedule as _generate_schedule
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         return _generate_schedule(
             conn, model_id, body.strategy, body.start_date, body.days_per_group,
             lag_days=body.lag_days, order=body.order, link_sequences=body.link_sequences,
@@ -158,7 +177,7 @@ def generate_schedule(model_id: str, body: GenerateScheduleRequest):
 
 
 @router.get("/models/{model_id}/schedule/export-ifc")
-def export_schedule_ifc(model_id: str):
+def export_schedule_ifc(model_id: str, user: CurrentUser = Depends(require_login)):
     """Minimal schedule-only IFC (no geometry) for round-tripping the current
     schedule to other tools. Synchronous (unlike /export/ifc's async job)
     since a schedule-only file is small/fast."""
@@ -184,12 +203,14 @@ def export_schedule_ifc(model_id: str):
 
 
 @router.post("/models/{model_id}/schedule/tasks")
-def create_task(model_id: str, body: TaskCreateRequest):
+def create_task(model_id: str, body: TaskCreateRequest, user: CurrentUser = Depends(require_login)):
     """Manually create a 4D task (no IFC schedule import required)."""
     from db.connection import get_conn, release_conn
     from db.schedule import create_task as _create_task
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         task_id = _create_task(
             conn, model_id, body.name,
             planned_start=body.planned_start, planned_finish=body.planned_finish,
@@ -203,12 +224,14 @@ def create_task(model_id: str, body: TaskCreateRequest):
 
 
 @router.patch("/models/{model_id}/schedule/tasks/{task_id}")
-def update_task(model_id: str, task_id: str, body: TaskUpdateRequest):
+def update_task(model_id: str, task_id: str, body: TaskUpdateRequest, user: CurrentUser = Depends(require_login)):
     """Edit a task's fields. Only fields present in the request body are changed."""
     from db.connection import get_conn, release_conn
     from db.schedule import update_task as _update_task
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         updated = _update_task(conn, model_id, task_id, **body.model_dump(exclude_unset=True))
         if not updated:
             raise HTTPException(status_code=404, detail="Task not found or no fields to update")
@@ -218,11 +241,13 @@ def update_task(model_id: str, task_id: str, body: TaskUpdateRequest):
 
 
 @router.delete("/models/{model_id}/schedule/tasks/{task_id}")
-def delete_task(model_id: str, task_id: str):
+def delete_task(model_id: str, task_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     from db.schedule import delete_task as _delete_task
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         deleted = _delete_task(conn, model_id, task_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -232,12 +257,14 @@ def delete_task(model_id: str, task_id: str):
 
 
 @router.post("/models/{model_id}/schedule/tasks/{task_id}/elements")
-def link_task_elements(model_id: str, task_id: str, body: ElementLinkRequest):
+def link_task_elements(model_id: str, task_id: str, body: ElementLinkRequest, user: CurrentUser = Depends(require_login)):
     """Link the given Speckle element ids (e.g. the current viewer selection) to a task."""
     from db.connection import get_conn, release_conn
     from db.schedule import link_elements_by_speckle_id
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         linked = link_elements_by_speckle_id(conn, task_id, model_id, body.speckle_ids)
         return {"linked": linked}
     finally:
@@ -245,11 +272,13 @@ def link_task_elements(model_id: str, task_id: str, body: ElementLinkRequest):
 
 
 @router.delete("/models/{model_id}/schedule/tasks/{task_id}/elements")
-def unlink_task_elements(model_id: str, task_id: str, body: ElementLinkRequest):
+def unlink_task_elements(model_id: str, task_id: str, body: ElementLinkRequest, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     from db.schedule import unlink_elements_by_speckle_id
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         unlinked = unlink_elements_by_speckle_id(conn, task_id, model_id, body.speckle_ids)
         return {"unlinked": unlinked}
     finally:
@@ -257,7 +286,7 @@ def unlink_task_elements(model_id: str, task_id: str, body: ElementLinkRequest):
 
 
 @router.post("/models/{model_id}/schedule/dependencies")
-def create_dependency(model_id: str, body: DependencyCreateRequest):
+def create_dependency(model_id: str, body: DependencyCreateRequest, user: CurrentUser = Depends(require_login)):
     """Create (or edit the type/lag of an existing) dependency between two
     tasks in this model. Rejects a request that would create a cycle, or
     that references a task_id not belonging to this model, with HTTP 422.
@@ -266,6 +295,8 @@ def create_dependency(model_id: str, body: DependencyCreateRequest):
     from db.schedule import create_dependency as _create_dependency
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         return _create_dependency(
             conn, model_id, body.predecessor_task_id, body.successor_task_id,
             body.sequence_type, body.lag_days,
@@ -277,11 +308,13 @@ def create_dependency(model_id: str, body: DependencyCreateRequest):
 
 
 @router.delete("/models/{model_id}/schedule/dependencies/{dependency_id}")
-def delete_dependency(model_id: str, dependency_id: int):
+def delete_dependency(model_id: str, dependency_id: int, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     from db.schedule import delete_dependency as _delete_dependency
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         deleted = _delete_dependency(conn, model_id, dependency_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Dependency not found")

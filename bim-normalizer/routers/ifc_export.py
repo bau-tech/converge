@@ -5,16 +5,28 @@ import tempfile
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 from job_registry import _content_disposition, fire_and_forget
 from process_pool import run_cpu_bound
 from db.jobs import create_job, update_job, get_job, prune_jobs
 
 router = APIRouter(tags=["ifc-export"])
 logger = logging.getLogger(__name__)
+
+
+def _require_role_for_model(conn, cur, model_id: str, user: CurrentUser) -> None:
+    """Model-scoped routes need the model's own stream_id to know which
+    project to check the caller's role against — same pattern
+    routers/overrides.py and routers/filter_publish.py use."""
+    cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
 
 _EXPORT_TMP_PREFIX = "bim_export_"
 _EXPORT_TMP_PREFIX_IFCX = "bim_export_ifcx_"
@@ -349,7 +361,7 @@ async def extract_ifc_relationships(
 
 
 @router.get("/models/{model_id}/quantities")
-def get_model_quantities(model_id: str, group_by: str = "ifc_class"):
+def get_model_quantities(model_id: str, group_by: str = "ifc_class", user: CurrentUser = Depends(require_login)):
     """
     5D quantity takeoff from the database — no IFC load required.
     Returns element counts + volume (m³) + area (m²) per group.
@@ -369,7 +381,10 @@ def get_model_quantities(model_id: str, group_by: str = "ifc_class"):
 
 
 @router.post("/models/{model_id}/export/ifc")
-async def start_export_ifc(model_id: str, coord_unit: str = "mm", include_schedule: bool = False):
+async def start_export_ifc(
+    model_id: str, coord_unit: str = "mm", include_schedule: bool = False,
+    user: CurrentUser = Depends(require_login),
+):
     """
     Start an async IFC4X3 export job. Returns {job_id, status}.
     Poll GET /export/{job_id}/status, then download from GET /export/{job_id}/download.
@@ -383,6 +398,8 @@ async def start_export_ifc(model_id: str, coord_unit: str = "mm", include_schedu
     job_id = str(uuid.uuid4())
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         create_job(conn, job_id, "export", payload={
             "model_id": model_id, "coord_unit": coord_unit, "include_schedule": include_schedule,
         })
@@ -453,19 +470,19 @@ def _job_status_response(job_id: str) -> dict:
 
 
 @router.get("/models/{model_id}/export/ifc/{job_id}/status")
-def export_job_status(model_id: str, job_id: str):
+def export_job_status(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll the status of a background IFC4X3 export job."""
     return _job_status_response(job_id)
 
 
 @router.get("/models/{model_id}/export/ifcx/{job_id}/status")
-def export_job_status_ifcx(model_id: str, job_id: str):
+def export_job_status_ifcx(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll the status of a background, EXPERIMENTAL IFC5 (.ifcx) export job."""
     return _job_status_response(job_id)
 
 
 @router.post("/models/{model_id}/export/ifcx")
-async def start_export_ifcx(model_id: str, coord_unit: str = "mm"):
+async def start_export_ifcx(model_id: str, coord_unit: str = "mm", user: CurrentUser = Depends(require_login)):
     """
     Start an async, EXPERIMENTAL IFC5 (.ifcx) export job. IFC5 is an
     unratified alpha spec from buildingSMART — this covers only spatial
@@ -481,6 +498,8 @@ async def start_export_ifcx(model_id: str, coord_unit: str = "mm"):
     job_id = str(uuid.uuid4())
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         create_job(conn, job_id, "export_ifcx", payload={
             "model_id": model_id, "coord_unit": coord_unit,
         })
@@ -527,7 +546,10 @@ class OriginalIfcRequest(BaseModel):
 
 
 @router.post("/streams/{stream_id}/original-ifc")
-async def get_original_ifc(stream_id: str, request: OriginalIfcRequest | None = None):
+async def get_original_ifc(
+    stream_id: str, request: OriginalIfcRequest | None = None,
+    user: CurrentUser = Depends(require_login),
+):
     """
     Proxy-download the original IFC file blob attached to a Speckle stream.
 
@@ -627,13 +649,13 @@ def _download_export_job(job_id: str, default_filename: str, media_type: str):
 
 
 @router.get("/models/{model_id}/export/ifc/{job_id}/download")
-def export_job_download(model_id: str, job_id: str):
+def export_job_download(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Download the IFC4X3 file once the export job is complete. Cleans up the job after download."""
     return _download_export_job(job_id, f"export_{job_id[:8]}.ifc", "application/x-step")
 
 
 @router.get("/models/{model_id}/export/ifcx/{job_id}/download")
-def export_job_download_ifcx(model_id: str, job_id: str):
+def export_job_download_ifcx(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Download the EXPERIMENTAL IFC5 (.ifcx) file once the export job is
     complete. Cleans up the job after download. Media type is plain JSON —
     no IANA-registered .ifcx MIME type exists yet, and .ifcx *is* JSON."""

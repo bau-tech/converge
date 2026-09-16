@@ -29,7 +29,7 @@ _UPLOAD_STATUS_MAP = {0: "queued", 1: "processing", 2: "success", 3: "error"}
 
 
 @router.get("/models")
-def list_models():
+def list_models(user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
@@ -51,7 +51,7 @@ def list_models():
 
 
 @router.get("/models/by-stream/{stream_id}")
-def list_models_for_stream(stream_id: str):
+def list_models_for_stream(stream_id: str, user: CurrentUser = Depends(require_login)):
     """Every ingested bim_models row for one Speckle project, newest commit
     per branch first. Used to scope the federated-view / multi-model
     clash-compare pickers to the current project, unlike /models above
@@ -78,7 +78,7 @@ def list_models_for_stream(stream_id: str):
 
 
 @router.get("/models/{model_id}")
-def get_model(model_id: str):
+def get_model(model_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
@@ -134,7 +134,7 @@ def delete_model(model_id: str, user: CurrentUser = Depends(require_login)):
 
 
 @router.get("/models/trend/{stream_id}")
-def get_model_trend(stream_id: str):
+def get_model_trend(stream_id: str, user: CurrentUser = Depends(require_login)):
     """
     Version history trend for a stream.
     Returns [{model_id, commit_id, branch_name, ingested_at, source, message,
@@ -337,7 +337,10 @@ async def upload_ifc_model(
 
 
 @router.get("/projects/{stream_id}/models/upload-ifc/{upload_id}/status")
-async def upload_ifc_status(stream_id: str, upload_id: str, token: str | None = None, server_url: str | None = None):
+async def upload_ifc_status(
+    stream_id: str, upload_id: str, token: str | None = None, server_url: str | None = None,
+    user: CurrentUser = Depends(require_login),
+):
     """Poll Speckle's own Stream.fileUploads for this upload's conversion status."""
     from config import settings
 

@@ -92,7 +92,7 @@ async def copy_project(request: ProjectCopyRequest, user: CurrentUser = Depends(
 
 
 @router.get("/projects/copy/{job_id}/status")
-def copy_project_status(job_id: str):
+def copy_project_status(job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll the status of a project-copy job."""
     from db.connection import get_conn, release_conn
 

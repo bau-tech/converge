@@ -2,9 +2,10 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 from job_registry import _is_uuid, fire_and_forget
 from process_pool import run_cpu_bound
 from db.jobs import create_job, update_job, get_job, prune_jobs
@@ -14,8 +15,19 @@ router = APIRouter(tags=["ids-check"])
 logger = logging.getLogger(__name__)
 
 
+def _require_role_for_model(conn, cur, model_id: str, user: CurrentUser) -> None:
+    """Model-scoped routes need the model's own stream_id to know which
+    project to check the caller's role against — same pattern
+    routers/overrides.py and routers/filter_publish.py use."""
+    cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
+
+
 @router.post("/models/{model_id}/ids-specs")
-async def upload_ids_spec(model_id: str, file: UploadFile):
+async def upload_ids_spec(model_id: str, file: UploadFile, user: CurrentUser = Depends(require_login)):
     """Upload and store an .ids file for this model. Rejects malformed IDS XML."""
     from ids_check import validate_ids_xml, InvalidIdsError
     from db.connection import get_conn, release_conn
@@ -37,9 +49,7 @@ async def upload_ids_spec(model_id: str, file: UploadFile):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
-            if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute(
                 """
                 INSERT INTO bim_ids_specs (model_id, filename, content)
@@ -63,7 +73,7 @@ async def upload_ids_spec(model_id: str, file: UploadFile):
 
 
 @router.put("/models/{model_id}/ids-specs/{spec_id}")
-async def update_ids_spec(model_id: str, spec_id: str, file: UploadFile):
+async def update_ids_spec(model_id: str, spec_id: str, file: UploadFile, user: CurrentUser = Depends(require_login)):
     """Overwrite an existing IDS spec's content in place (same spec_id) —
     used by the visual editor to save edits (specifications added or
     removed on the canvas) back onto the template that was opened, instead
@@ -88,6 +98,7 @@ async def update_ids_spec(model_id: str, spec_id: str, file: UploadFile):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute(
                 """
                 UPDATE bim_ids_specs SET filename = %s, content = %s
@@ -113,7 +124,7 @@ async def update_ids_spec(model_id: str, spec_id: str, file: UploadFile):
 
 
 @router.get("/models/{model_id}/ids-specs")
-def list_ids_specs(model_id: str):
+def list_ids_specs(model_id: str, user: CurrentUser = Depends(require_login)):
     """List previously uploaded .ids files for this model."""
     from db.connection import get_conn, release_conn
     conn = get_conn()
@@ -133,7 +144,7 @@ def list_ids_specs(model_id: str):
 
 
 @router.get("/models/{model_id}/ids-specs/{spec_id}")
-def get_ids_spec(model_id: str, spec_id: str):
+def get_ids_spec(model_id: str, spec_id: str, user: CurrentUser = Depends(require_login)):
     """Fetch one spec's raw IDS XML — used by the visual editor to load an
     existing spec back onto the canvas."""
     from db.connection import get_conn, release_conn
@@ -153,11 +164,12 @@ def get_ids_spec(model_id: str, spec_id: str):
 
 
 @router.delete("/models/{model_id}/ids-specs/{spec_id}", status_code=204)
-def delete_ids_spec(model_id: str, spec_id: str):
+def delete_ids_spec(model_id: str, spec_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute(
                 "DELETE FROM bim_ids_specs WHERE model_id = %s AND spec_id = %s",
                 (model_id, spec_id),
@@ -178,7 +190,7 @@ class IdsCheckRequest(BaseModel):
 
 
 @router.post("/models/{model_id}/ids-check")
-async def start_ids_check(model_id: str, body: IdsCheckRequest):
+async def start_ids_check(model_id: str, body: IdsCheckRequest, user: CurrentUser = Depends(require_login)):
     """
     Start an async IDS check job: export the model to IFC, validate it
     against the stored spec, and keep the report in memory.
@@ -189,6 +201,7 @@ async def start_ids_check(model_id: str, body: IdsCheckRequest):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute(
                 "SELECT content FROM bim_ids_specs WHERE model_id = %s AND spec_id = %s",
                 (model_id, body.spec_id),
@@ -251,7 +264,7 @@ async def start_ids_check(model_id: str, body: IdsCheckRequest):
 
 
 @router.get("/models/{model_id}/ids-check/{job_id}/status")
-def ids_check_status(model_id: str, job_id: str):
+def ids_check_status(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll an IDS check job. Once status == 'complete', `result` holds the report.
     `ifc_source` indicates whether the check ran against the model's true
     original IFC file ("original_ifc") or bim-normalizer's reconstruction

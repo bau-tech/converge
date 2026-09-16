@@ -210,7 +210,7 @@ async def ingest(request: IngestRequest, user: CurrentUser = Depends(require_log
 
 
 @router.get("/ingest/status/{job_id}")
-def ingest_status(job_id: str):
+def ingest_status(job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll the status of a background ingest job."""
     from db.connection import get_conn, release_conn
 

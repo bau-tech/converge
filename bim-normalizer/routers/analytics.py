@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+
+from dashboard_auth.dependencies import CurrentUser, require_login
 
 router = APIRouter(tags=["analytics"])
 
 
 @router.get("/diff/{model_a}/{model_b}")
-def diff_models(model_a: str, model_b: str):
+def diff_models(model_a: str, model_b: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     from db.query import get_model_diff
     conn = get_conn()
@@ -37,7 +39,7 @@ def diff_models(model_a: str, model_b: str):
 
 
 @router.get("/models/{model_id}/summary")
-def get_model_summary(model_id: str):
+def get_model_summary(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     Chart-ready aggregations for one normalised model.
     Returns counts + volume + area grouped by category, ifc_class, storey,
@@ -58,7 +60,7 @@ def get_model_summary(model_id: str):
 
 
 @router.get("/models/{model_id}/location")
-def get_model_location(model_id: str):
+def get_model_location(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     Geographic location (lat/lon/elevation) derived from the model's IfcSite
     element, for the dashboard's map widget. lat/lon are None when the model
@@ -80,7 +82,7 @@ def get_model_location(model_id: str):
 
 
 @router.get("/models/{model_id}/qa")
-def get_model_qa(model_id: str):
+def get_model_qa(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     BIM data-quality assessment: missing names/storeys/geometry/materials,
     unclassified elements, duplicate application IDs, and a 0–1 quality score.
@@ -99,7 +101,7 @@ def get_model_qa(model_id: str):
 
 
 @router.get("/models/{model_id}/qa/elements")
-def get_model_qa_elements(model_id: str, issue: str, limit: int = 50):
+def get_model_qa_elements(model_id: str, issue: str, limit: int = 50, user: CurrentUser = Depends(require_login)):
     """
     Return the actual elements affected by a specific QA issue.
     issue: unclassified | no_geometry | no_name | no_storey | no_material | duplicate_ids
@@ -127,6 +129,7 @@ def export_model_csv(
     category: str = None,
     ifc_class: str = None,
     storey: str = None,
+    user: CurrentUser = Depends(require_login),
 ):
     """
     Export elements as a streaming CSV with geometry quantities and key parameter fields.

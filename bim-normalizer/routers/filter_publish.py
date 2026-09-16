@@ -123,7 +123,7 @@ async def filter_publish(model_id: str, request: FilterPublishRequest, user: Cur
 
 
 @router.get("/filter-publish/{job_id}/status")
-def filter_publish_status(job_id: str):
+def filter_publish_status(job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll the status of a filter-publish job."""
     from db.connection import get_conn, release_conn
 

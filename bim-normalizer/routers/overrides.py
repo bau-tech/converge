@@ -31,15 +31,13 @@ class OverrideItem(BaseModel):
 
 
 @router.get("/models/{model_id}/overrides")
-def list_overrides(model_id: str):
+def list_overrides(model_id: str, user: CurrentUser = Depends(require_login)):
     """Return all per-element classification overrides for a model."""
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM bim_models WHERE model_id = %s", (model_id,))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Model not found")
+            _require_role_for_model(conn, cur, model_id, user)
             cur.execute("""
                 SELECT override_id, model_id, application_id, speckle_id,
                        ifc_class, category, note, created_at

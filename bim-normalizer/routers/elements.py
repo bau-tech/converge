@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from dashboard_auth.dependencies import CurrentUser, require_login
 
 router = APIRouter(tags=["elements"])
 
@@ -6,7 +8,7 @@ router = APIRouter(tags=["elements"])
 @router.get("/models/{model_id}/elements")
 def get_elements(model_id: str, category: str = None, ifc_class: str = None,
                  storey: str = None, name: str = None, speckle_id: str = None,
-                 limit: int = 500, offset: int = 0):
+                 limit: int = 500, offset: int = 0, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
@@ -46,7 +48,7 @@ def get_elements(model_id: str, category: str = None, ifc_class: str = None,
 
 
 @router.get("/elements/{element_id}")
-def get_element(element_id: str):
+def get_element(element_id: str, user: CurrentUser = Depends(require_login)):
     from db.connection import get_conn, release_conn
     conn = get_conn()
     try:
@@ -79,7 +81,7 @@ def get_element(element_id: str):
 
 
 @router.get("/elements/{element_id}/relationships")
-def get_element_relationships_route(element_id: str):
+def get_element_relationships_route(element_id: str, user: CurrentUser = Depends(require_login)):
     """
     Elements directly related to element_id (parent/room/space references
     resolved at ingest time — see db/insert.py's build_relationships()).
@@ -100,7 +102,7 @@ def get_element_relationships_route(element_id: str):
 
 
 @router.get("/elements/{element_id}/connectivity")
-def get_element_connectivity_route(element_id: str, hops: int = 2):
+def get_element_connectivity_route(element_id: str, hops: int = 2, user: CurrentUser = Depends(require_login)):
     """
     Bounded-hop connectivity graph around element_id — structural/IFC
     relationships (see get_element_relationships_route above; now also real
@@ -131,6 +133,7 @@ def get_elements_flat(
     storey: str = None,
     limit: int = 50000,
     offset: int = 0,
+    user: CurrentUser = Depends(require_login),
 ):
     """
     Flat element list enriched with geometry quantities and key parameter fields
@@ -154,6 +157,7 @@ def get_parameter_completeness(
     category: str = None,
     ifc_class: str = None,
     min_coverage: float = 0.0,
+    user: CurrentUser = Depends(require_login),
 ):
     """
     Parameter fill-rate report for a model.
@@ -179,7 +183,7 @@ def get_parameter_completeness(
 
 
 @router.get("/models/{model_id}/parameters/keys")
-def get_parameter_keys(model_id: str):
+def get_parameter_keys(model_id: str, user: CurrentUser = Depends(require_login)):
     """Return all distinct BIM parameter keys for this model, sorted by element coverage."""
     from db.connection import get_conn, release_conn
     from db.query import get_parameter_keys as _keys
@@ -199,6 +203,7 @@ def get_elements_nearby(
     z: float = None,
     radius_m: float = 5.0,
     category: str = None,
+    user: CurrentUser = Depends(require_login),
 ):
     """
     Find elements within `radius_m` meters of a reference element (speckle_id
@@ -229,7 +234,7 @@ def get_elements_nearby(
 
 
 @router.get("/models/{model_id}/elements/semantic-search")
-def get_elements_semantic_search(model_id: str, query: str, limit: int = 10):
+def get_elements_semantic_search(model_id: str, query: str, limit: int = 10, user: CurrentUser = Depends(require_login)):
     """
     Rank elements by semantic similarity to a free-text `query` (e.g. "fire
     rated door", "load bearing column") instead of requiring an exact
@@ -255,7 +260,7 @@ def get_elements_semantic_search(model_id: str, query: str, limit: int = 10):
 
 
 @router.get("/models/{model_id}/embeddings/status")
-def get_embeddings_status(model_id: str):
+def get_embeddings_status(model_id: str, user: CurrentUser = Depends(require_login)):
     """
     How much of this model's semantic-search indexing (search/embeddings.py)
     has completed — embeddings now generate as a background step *after* the
@@ -302,6 +307,7 @@ def get_elements_by_parameter(
     value: str = "",
     op: str = "contains",
     limit: int = 100,
+    user: CurrentUser = Depends(require_login),
 ):
     """
     Filter elements by a BIM parameter key/value with optional numeric operator.

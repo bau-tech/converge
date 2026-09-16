@@ -3,13 +3,28 @@ import logging
 import uuid
 from concurrent.futures.process import BrokenProcessPool
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from dashboard_auth.dependencies import ANY_PROJECT_ROLE, CurrentUser, require_login, require_project_role
 from db.jobs import create_job, update_job, get_job, prune_jobs
 from job_registry import fire_and_forget
 from process_pool import run_cpu_bound
 from routers.ifc_export import resolve_model_ifc_bytes, build_revit_guid_map
+
+
+def _require_role_for_model(conn, cur, model_id: str, user: CurrentUser) -> str:
+    """Model-scoped routes need the model's own stream_id to know which
+    project to check the caller's role against — same pattern
+    routers/overrides.py and routers/filter_publish.py use. Returns the
+    stream_id so callers that also need it (e.g. logging) don't have to
+    re-query."""
+    cur.execute("SELECT stream_id FROM bim_models WHERE model_id = %s", (model_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    require_project_role(conn, row[0], user, ANY_PROJECT_ROLE)
+    return row[0]
 
 router = APIRouter(tags=["clash-check"])
 logger = logging.getLogger(__name__)
@@ -345,7 +360,7 @@ class ClashCheckRequest(BaseModel):
 
 
 @router.post("/models/{model_id}/clash-check")
-async def start_clash_check(model_id: str, body: ClashCheckRequest):
+async def start_clash_check(model_id: str, body: ClashCheckRequest, user: CurrentUser = Depends(require_login)):
     """Start an async clash-detection job. Poll GET /clash-check/{job_id}/status for the result."""
     from db.connection import get_conn, release_conn
 
@@ -355,6 +370,8 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
     job_id = str(uuid.uuid4())
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         create_job(conn, job_id, "clash_check", payload={
             "model_id": model_id, "compare_model_id": body.compare_model_id,
         })
@@ -473,7 +490,7 @@ async def start_clash_check(model_id: str, body: ClashCheckRequest):
 
 
 @router.get("/models/{model_id}/clash-check/{job_id}/status")
-def clash_check_status(model_id: str, job_id: str):
+def clash_check_status(model_id: str, job_id: str, user: CurrentUser = Depends(require_login)):
     """Poll a clash-detection job. Once status == 'complete', `result` holds the clash list.
     `ifc_source` indicates whether the check ran against the model's true
     original IFC file ("original_ifc") or bim-normalizer's reconstruction
@@ -494,6 +511,8 @@ def clash_check_status(model_id: str, job_id: str):
 
     conn = get_conn()
     try:
+        with conn.cursor() as cur:
+            _require_role_for_model(conn, cur, model_id, user)
         job = get_job(conn, job_id)
     finally:
         release_conn(conn)

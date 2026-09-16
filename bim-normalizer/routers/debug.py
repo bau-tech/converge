@@ -1,8 +1,9 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from dashboard_auth.dependencies import CurrentUser, require_login
 from routers.ingest import IngestRequest
 
 router = APIRouter(tags=["debug"])
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/debug/inspect/{stream_id}/{commit_id}")
-async def debug_inspect(stream_id: str, commit_id: str, limit: int = 5, offset: int = 0):
+async def debug_inspect(stream_id: str, commit_id: str, limit: int = 5, offset: int = 0, user: CurrentUser = Depends(require_login)):
     """
     Fetch a Speckle commit (without storing) and report geometry structure.
 
@@ -109,7 +110,7 @@ async def debug_inspect(stream_id: str, commit_id: str, limit: int = 5, offset: 
 
 
 @router.post("/debug/classify-inspect")
-async def debug_classify_inspect(request: IngestRequest, limit: int = 20):
+async def debug_classify_inspect(request: IngestRequest, limit: int = 20, user: CurrentUser = Depends(require_login)):
     """
     Fetch a Speckle commit (without storing) and show the raw classification
     signals on the first `limit` elements.  Use this to diagnose why Tekla

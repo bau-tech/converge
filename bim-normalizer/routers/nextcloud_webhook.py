@@ -7,6 +7,7 @@ every project) — the affected stream_id(s) are derived from the event
 payload's own node path(s).
 """
 import asyncio
+import hmac
 import logging
 import re
 
@@ -89,7 +90,7 @@ def _schedule_reconcile(stream_id: str) -> None:
 
 @router.post("/nextcloud-webhook")
 async def nextcloud_webhook(request: Request):
-    if request.headers.get(HEADER_NAME) != webhook_secret():
+    if not hmac.compare_digest(request.headers.get(HEADER_NAME) or "", webhook_secret()):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     payload = await request.json()
