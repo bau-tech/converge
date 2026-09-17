@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { X, Trash2, ImageOff, ChevronLeft, Send, ExternalLink, Camera, Pencil } from 'lucide-react'
@@ -50,19 +50,19 @@ function Column({ id, title, count, children, flash }) {
     )
 }
 
-function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing }) {
+function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing, selected, onCardClick }) {
     const overdue = isOverdue(topic)
     return (
-        <div className={`glass-card p-0 overflow-hidden group border-l-2 ${PRIORITY_BORDER[topic.priority] || 'border-l-transparent'} ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'}`}>
+        <div className={`glass-card p-0 overflow-hidden group border-l-2 ${PRIORITY_BORDER[topic.priority] || 'border-l-transparent'} ${grabbing ? 'cursor-grabbing shadow-2xl' : 'cursor-grab'} ${selected ? 'ring-2 ring-amber-400' : ''}`}>
             <div
                 className="aspect-video bg-[var(--speckle-outline-3)] flex items-center justify-center overflow-hidden"
-                onClick={() => onOpen?.(topic)}
+                onClick={e => (onCardClick ? onCardClick(topic, e) : onOpen?.(topic))}
             >
                 {snapshotUrl
                     ? <img src={snapshotUrl} className="w-full h-full object-cover" alt="" />
                     : <ImageOff className="w-5 h-5 text-[var(--speckle-foreground-disabled)]" />}
             </div>
-            <div className="p-2.5" onClick={() => onOpen?.(topic)}>
+            <div className="p-2.5" onClick={e => (onCardClick ? onCardClick(topic, e) : onOpen?.(topic))}>
                 <div className="flex items-start justify-between gap-2">
                     <p className="text-xs font-medium text-[var(--speckle-foreground)] line-clamp-2">{topic.title}</p>
                     <button
@@ -95,12 +95,12 @@ function CardContent({ topic, snapshotUrl, onOpen, onDelete, grabbing }) {
 // dragging. The visible "follows the cursor" copy is rendered separately via
 // <DragOverlay> (a body-level portal), which avoids being clipped by the
 // column's overflow-y-auto the way an in-place transform would be.
-function Card({ topic, snapshotUrl, onOpen, onDelete }) {
+function Card({ topic, snapshotUrl, onOpen, onDelete, selected, onCardClick }) {
     const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: topic.guid })
 
     return (
         <div ref={setNodeRef} {...listeners} {...attributes} className={isDragging ? 'opacity-30' : ''}>
-            <CardContent topic={topic} snapshotUrl={snapshotUrl} onOpen={onOpen} onDelete={onDelete} />
+            <CardContent topic={topic} snapshotUrl={snapshotUrl} onOpen={onOpen} onDelete={onDelete} selected={selected} onCardClick={onCardClick} />
         </div>
     )
 }
@@ -135,6 +135,20 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
     const [activeTopic, setActiveTopic] = useState(null)
     const [addingViewpoint, setAddingViewpoint] = useState(false) // markup editor open for selectedTopic
     const [addViewpointDraft, setAddViewpointDraft] = useState(null) // freshly captured viewpoint pending annotation
+
+    // Bulk move: shift-click extends a range within a column, ctrl/cmd-click
+    // toggles one card, both without opening the detail drawer (see
+    // handleCardClick below). Dragging any selected card then moves the
+    // whole selection together (handleDragEnd), and the toolbar (below the
+    // header) offers the same as explicit buttons for discoverability.
+    // Same shape as DocumentsPanel.jsx's identical feature — bulkMoveTo calls
+    // the existing single-topic updateTopic one at a time (sequentially, not
+    // Promise.all, so a large selection doesn't burst the backend) rather
+    // than adding a dedicated bulk route, since a board move is just a
+    // 1-2 field PUT per topic.
+    const [selectedIds, setSelectedIds] = useState(() => new Set())
+    const [bulkMoving, setBulkMoving] = useState(false)
+    const selectionAnchorRef = useRef(null)
 
     // Registered bcf_users, for the "Assigned to" datalist — same source as
     // BcfTopicPanel's create form.
@@ -199,6 +213,76 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
         setActiveTopic(topics.find(t => t.guid === event.active.id) || null)
     }, [topics])
 
+    const toggleSelected = useCallback((topic) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev)
+            if (next.has(topic.guid)) next.delete(topic.guid)
+            else next.add(topic.guid)
+            return next
+        })
+    }, [])
+
+    // File-explorer-style multi-select on the cards themselves: shift-click
+    // extends a range from the last-clicked card (within the same column,
+    // since that's the only order the board actually shows), ctrl/cmd-click
+    // toggles one card in/out. A plain click keeps opening the detail drawer,
+    // clearing any selection first since opening one topic implies "just
+    // this one". Mirrors DocumentsPanel.jsx's handleCardClick.
+    const handleCardClick = useCallback((topic, event) => {
+        if (event.shiftKey && selectionAnchorRef.current) {
+            const colTopics = columns[topicToColumn(topic)] || []
+            const anchorIdx = colTopics.findIndex(t => t.guid === selectionAnchorRef.current)
+            const targetIdx = colTopics.findIndex(t => t.guid === topic.guid)
+            if (anchorIdx !== -1 && targetIdx !== -1) {
+                const [lo, hi] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx]
+                const rangeIds = colTopics.slice(lo, hi + 1).map(t => t.guid)
+                setSelectedIds(prev => new Set([...prev, ...rangeIds]))
+                return
+            }
+        }
+        if (event.metaKey || event.ctrlKey) {
+            selectionAnchorRef.current = topic.guid
+            toggleSelected(topic)
+            return
+        }
+        selectionAnchorRef.current = topic.guid
+        setSelectedIds(new Set())
+        openTopic(topic)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [columns, toggleSelected])
+
+    // Moves every guid in `ids` (defaults to the current selection) to
+    // `targetColumn`, one request at a time (see the state comment above for
+    // why sequential). Guids that fail stay selected afterward so the user
+    // can see what still needs attention; everything else is dropped from
+    // the selection.
+    const bulkMoveTo = useCallback(async (targetColumn, idsOverride) => {
+        const candidateIds = idsOverride ?? Array.from(selectedIds)
+        const ids = candidateIds.filter(id => {
+            const t = topics.find(x => x.guid === id)
+            return t && topicToColumn(t) !== targetColumn
+        })
+        if (ids.length === 0 || bulkMoving) return
+        setBulkMoving(true)
+        const updates = columnToUpdates(targetColumn)
+        const failed = []
+        for (const guid of ids) {
+            const topic = topics.find(t => t.guid === guid)
+            if (!topic) continue
+            const prevFields = { topic_status: topic.topic_status, stage: topic.stage }
+            onTopicsChange(prev => prev.map(t => (t.guid === guid ? { ...t, ...updates } : t)))
+            try {
+                await updateTopic(projectId, guid, updates)
+            } catch {
+                failed.push(guid)
+                onTopicsChange(prev => prev.map(t => (t.guid === guid ? { ...t, ...prevFields } : t)))
+            }
+        }
+        setBulkMoving(false)
+        setSelectedIds(new Set(failed))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [topics, projectId, selectedIds, bulkMoving])
+
     const handleDragEnd = useCallback((event) => {
         setActiveTopic(null)
         const { active, over } = event
@@ -206,14 +290,23 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
         const topicGuid = active.id
         const newColumn = over.id
         const topic = topics.find(t => t.guid === topicGuid)
-        if (!topic || topicToColumn(topic) === newColumn) return
+        if (!topic) return
+        // Dragging a card that's part of a multi-selection moves the whole
+        // selection together, via the same bulkMoveTo the toolbar buttons
+        // use — dragging a card outside the current selection is a normal
+        // single-topic move, same as before.
+        if (selectedIds.has(topicGuid) && selectedIds.size > 1) {
+            bulkMoveTo(newColumn, Array.from(selectedIds))
+            return
+        }
+        if (topicToColumn(topic) === newColumn) return
         const prevFields = { topic_status: topic.topic_status, stage: topic.stage }
         const updates = columnToUpdates(newColumn)
         onTopicsChange(topics.map(t => (t.guid === topicGuid ? { ...t, ...updates } : t)))
         updateTopic(projectId, topicGuid, updates).catch(() => {
             onTopicsChange(topics.map(t => (t.guid === topicGuid ? { ...t, ...prevFields } : t)))
         })
-    }, [topics, projectId, onTopicsChange])
+    }, [topics, projectId, onTopicsChange, selectedIds, bulkMoveTo])
 
     // Same optimistic-update-with-rollback shape as handleDragEnd above, but
     // for arbitrary field edits (priority/due_date) made from the detail
@@ -377,20 +470,53 @@ export function BcfKanbanBoard({ projectId, viewerRef, topics = [], streamId = n
                 </div>
             </div>
 
+            {selectedIds.size > 0 && (
+                <div className="flex items-center gap-2 flex-wrap px-5 pt-3 shrink-0">
+                    <span className="text-[11px] text-[var(--speckle-foreground-3)]">
+                        {selectedIds.size} selected — shift-click to extend, ctrl/cmd-click to toggle, or drag any selected card
+                    </span>
+                    {COLUMNS.map(status => (
+                        <button
+                            key={status}
+                            onClick={() => bulkMoveTo(status)}
+                            disabled={bulkMoving}
+                            className={`text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-50 hover:opacity-80 ${COLUMN_COLOR[status].badge}`}
+                        >
+                            Move to {status}
+                        </button>
+                    ))}
+                    <button
+                        onClick={() => setSelectedIds(new Set())}
+                        className="text-[11px] px-2 py-1 rounded-lg text-[var(--speckle-foreground-3)] hover:text-[var(--speckle-foreground)]"
+                    >
+                        Clear
+                    </button>
+                </div>
+            )}
+
             <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveTopic(null)}>
                 <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-4 p-5">
                     {Object.entries(columns).map(([status, items]) => (
                         <Column key={status} id={status} title={status} count={items.length} flash={flashColumn === status}>
                             {items.map(t => (
-                                <Card key={t.guid} topic={t} snapshotUrl={snapshots[t.guid]} onOpen={openTopic} onDelete={removeTopic} />
+                                <Card
+                                    key={t.guid} topic={t} snapshotUrl={snapshots[t.guid]}
+                                    onOpen={openTopic} onDelete={removeTopic}
+                                    selected={selectedIds.has(t.guid)} onCardClick={handleCardClick}
+                                />
                             ))}
                         </Column>
                     ))}
                 </div>
                 <DragOverlay dropAnimation={null}>
                     {activeTopic && (
-                        <div className="w-[276px]">
+                        <div className="relative w-[276px]">
                             <CardContent topic={activeTopic} snapshotUrl={snapshots[activeTopic.guid]} grabbing />
+                            {selectedIds.has(activeTopic.guid) && selectedIds.size > 1 && (
+                                <div className="absolute -top-2 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-amber-400 text-black text-[10px] font-bold flex items-center justify-center">
+                                    {selectedIds.size}
+                                </div>
+                            )}
                         </div>
                     )}
                 </DragOverlay>
