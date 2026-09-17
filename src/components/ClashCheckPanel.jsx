@@ -215,6 +215,18 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
         })
     }
 
+    // All clash keys across every rule, in the same "<ruleIndex>:<clashIndex>"
+    // shape toggleClash uses — flattened once per result so the header
+    // checkbox can compare its size against `selected` to know whether
+    // everything is currently checked.
+    const allClashKeys = (result?.rules || []).flatMap((rule, ruleIdx) =>
+        rule.clashes.map((_, clashIdx) => `${ruleIdx}:${clashIdx}`))
+    const allSelected = allClashKeys.length > 0 && selected.size === allClashKeys.length
+
+    const toggleSelectAll = () => {
+        setSelected(allSelected ? new Set() : new Set(allClashKeys))
+    }
+
     const pushToBcf = async () => {
         if (!projectId || selected.size === 0 || !result) return
         setPushing(true)
@@ -457,6 +469,17 @@ export function ClashCheckPanel({ projectId, streamId, normalizerUrl, viewerRef,
                                     {result.total_count} clash{result.total_count === 1 ? '' : 'es'} across {result.rules.length} rule{result.rules.length === 1 ? '' : 's'}
                                     {compareInfo && <span className="text-[var(--speckle-foreground-3)] font-normal"> · vs {compareInfo.label}</span>}
                                 </div>
+                                {result.total_count > 0 && (
+                                    <label className="flex items-center gap-1.5 ml-auto text-xs text-[var(--speckle-foreground-3)] cursor-pointer shrink-0">
+                                        <input
+                                            type="checkbox"
+                                            checked={allSelected}
+                                            ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
+                                            onChange={toggleSelectAll}
+                                        />
+                                        Select all
+                                    </label>
+                                )}
                             </div>
                             {compareInfo && (
                                 <p className="text-[11px] text-[var(--speckle-foreground-3)] -mt-1">
