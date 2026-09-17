@@ -80,6 +80,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # No healthcheck on nextcloud-redis (valkey has none defined below) —
+      # service_started just orders container creation so a fresh boot's
+      # post-installation hooks/first requests don't race an entirely
+      # missing container; occ's own memcache/redis config writes don't
+      # themselves need Redis reachable, only later requests reading it do.
+      nextcloud-redis:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       # status.php returns 200 with "installed":false throughout Nextcloud's
@@ -148,6 +155,25 @@ services:
     depends_on:
       nextcloud:
         condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - speckle-net
+
+  # ── Nextcloud Redis (distributed cache + transactional file locking) ──────
+  # Admin panel flagged transactional file locking falling back to the
+  # database (no memcache.locking configured) — under concurrent Collabora
+  # edits + webhook_listeners file events this adds avoidable Postgres
+  # contention (a deadlock already showed up in nextcloud.log). Dedicated
+  # instance rather than reusing speckle-redis-1 from the Speckle-server
+  # compose stack, to keep Nextcloud's cache/locking traffic isolated from
+  # Speckle's own Redis workload. memcache.local stays APCu (already set);
+  # this only backs memcache.distributed/memcache.locking, wired via occ
+  # (config:system:set redis host/port, memcache.distributed, memcache.locking
+  # -- not env-var driven, REDIS_HOST only configures the PHP session backend).
+  nextcloud-redis:
+    image: valkey/valkey:8-alpine
+    container_name: nextcloud-redis
+    mem_limit: 128m
     restart: unless-stopped
     networks:
       - speckle-net
