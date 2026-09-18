@@ -56,6 +56,18 @@ ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_stream_id TEXT;
 ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_commit_id TEXT;
 ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS bridge_server_url TEXT;
 
+-- Geo-reference from the model's IfcSite (RefLatitude/RefLongitude/
+-- RefElevation), captured once at ingest time by speckle/fetch.py's
+-- find_site_info() — see its docstring for why this isn't sourced from
+-- bim_elements/bim_parameters like other element attributes. NULL for
+-- models with no IfcSite geo-reference (e.g. live Revit/Tekla connector
+-- ingests), which the dashboard's location widget renders as "no location
+-- data" rather than an error.
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS site_lat DOUBLE PRECISION;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS site_lon DOUBLE PRECISION;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS site_elevation DOUBLE PRECISION;
+ALTER TABLE bim_models ADD COLUMN IF NOT EXISTS site_name TEXT;
+
 CREATE TABLE IF NOT EXISTS bim_elements (
     element_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id        UUID NOT NULL REFERENCES bim_models(model_id) ON DELETE CASCADE,

@@ -84,7 +84,11 @@ def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
                  viewer_available: bool = True,
                  bridge_stream_id: str | None = None,
                  bridge_commit_id: str | None = None,
-                 bridge_server_url: str | None = None) -> str:
+                 bridge_server_url: str | None = None,
+                 site_lat: float | None = None,
+                 site_lon: float | None = None,
+                 site_elevation: float | None = None,
+                 site_name: str | None = None) -> str:
     """Insert or update a bim_model row. Returns model_id (UUID string).
 
     ingest_status is explicitly reset to 'in_progress' on both the insert
@@ -94,13 +98,17 @@ def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
 
     viewer_available/bridge_* default to "no bridge needed" — every caller
     except ingest_commit's bundle-format path (see db/models.py's column
-    comments) leaves these at their defaults."""
+    comments) leaves these at their defaults.
+
+    site_* come from speckle/fetch.py's find_site_info() and default to
+    None — "no IfcSite geo-reference in this model", not "unknown"."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO bim_models (stream_id, commit_id, branch_name, source, author, message,
                                      server_url, viewer_available, bridge_stream_id,
-                                     bridge_commit_id, bridge_server_url, ingest_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'in_progress')
+                                     bridge_commit_id, bridge_server_url, ingest_status,
+                                     site_lat, site_lon, site_elevation, site_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'in_progress', %s, %s, %s, %s)
             ON CONFLICT (stream_id, commit_id) DO UPDATE SET
                 branch_name        = EXCLUDED.branch_name,
                 source             = EXCLUDED.source,
@@ -112,10 +120,15 @@ def upsert_model(conn, stream_id: str, commit_id: str, branch_name: str,
                 bridge_commit_id   = EXCLUDED.bridge_commit_id,
                 bridge_server_url  = EXCLUDED.bridge_server_url,
                 ingested_at        = NOW(),
-                ingest_status      = 'in_progress'
+                ingest_status      = 'in_progress',
+                site_lat           = EXCLUDED.site_lat,
+                site_lon           = EXCLUDED.site_lon,
+                site_elevation     = EXCLUDED.site_elevation,
+                site_name          = EXCLUDED.site_name
             RETURNING model_id
         """, (stream_id, commit_id, branch_name, source, author, message, server_url,
-              viewer_available, bridge_stream_id, bridge_commit_id, bridge_server_url))
+              viewer_available, bridge_stream_id, bridge_commit_id, bridge_server_url,
+              site_lat, site_lon, site_elevation, site_name))
         return str(cur.fetchone()[0])
 
 

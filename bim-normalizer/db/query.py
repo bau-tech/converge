@@ -3,7 +3,6 @@ Read-side queries for chart and table endpoints.
 All functions take an open psycopg2 connection and return plain dicts/lists.
 """
 
-import json
 import logging
 
 from ifc.classify import classify_material_category, classify_section_family, normalize_profile_label
@@ -1563,68 +1562,29 @@ def semantic_search_elements(conn, model_id: str, query: str, limit: int = 10) -
 # Model geo-location — IfcSite.RefLatitude/RefLongitude
 # ---------------------------------------------------------------------------
 
-def _compound_angle_to_decimal(raw_value) -> float | None:
-    """
-    Convert an IFC IfcCompoundPlaneAngleMeasure — [degrees, minutes, seconds,
-    (optional) millionths-of-a-second] — to decimal degrees.
-
-    Per the IFC spec only the first (degrees) component carries the sign of
-    the whole angle; the rest are magnitudes. Live ingested data (Speckle's
-    own IFC importer, confirmed against 4 real sample files spanning Revit/
-    ArchiCAD/Autodesk sources) instead puts the sign on every component
-    (e.g. longitude -71°15'29.5" stored as [-71,-15,-29,-58837], not
-    [-71,15,29,58837]) — summing absolute values and re-applying the sign of
-    the first non-zero component handles both conventions correctly.
-    """
-    try:
-        parts = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
-        if not isinstance(parts, list) or len(parts) < 3:
-            return None
-        deg, minute, sec = float(parts[0]), float(parts[1]), float(parts[2])
-        micro = float(parts[3]) if len(parts) > 3 else 0.0
-        first_nonzero = next((v for v in (deg, minute, sec, micro) if v != 0), 0.0)
-        sign = -1.0 if first_nonzero < 0 else 1.0
-        return sign * (abs(deg) + abs(minute) / 60 + abs(sec) / 3600 + abs(micro) / 3_600_000_000)
-    except (ValueError, TypeError, json.JSONDecodeError, IndexError):
-        return None
-
-
 def get_model_location(conn, model_id: str) -> dict:
     """
-    Geographic location of a model, derived from its IfcSite element's
-    RefLatitude/RefLongitude/RefElevation — standard IFC site geo-reference,
-    captured today as ordinary bim_parameters rows via the generic property
-    scan (no dedicated extraction needed). Only present for models sourced
-    from an actual IFC file; models pushed directly from a live Revit/other
-    connector (no IfcSite in Speckle's own object model) return all-None,
-    which callers should render as "no location data" rather than an error.
+    Geographic location of a model, captured once at ingest time from its
+    IfcSite element (see speckle/fetch.py's find_site_info() for why this
+    isn't a live bim_elements/bim_parameters lookup — IfcSite is a spatial
+    container, deliberately never stored as its own element row). lat/lon
+    are None when the model has no IfcSite geo-reference (e.g. ingested
+    directly from a live Revit connector rather than an uploaded IFC file)
+    — not a 404, since "no location data" is an expected, valid state for
+    the widget to render.
     """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT p.key, p.value
-            FROM bim_elements e
-            JOIN bim_parameters p ON p.element_id = e.element_id
-            WHERE e.model_id = %s AND e.ifc_class = 'IfcSite'
-              AND p.key IN ('RefLatitude', 'RefLongitude', 'RefElevation', 'Name')
+            SELECT site_lat, site_lon, site_elevation, site_name
+            FROM bim_models WHERE model_id = %s
         """, (model_id,))
-        by_key = dict(cur.fetchall())
+        row = cur.fetchone()
 
-    if "RefLatitude" not in by_key or "RefLongitude" not in by_key:
+    if not row:
         return {"lat": None, "lon": None, "elevation": None, "site_name": None}
 
-    elevation = None
-    if by_key.get("RefElevation") is not None:
-        try:
-            elevation = float(by_key["RefElevation"])
-        except (TypeError, ValueError):
-            pass
-
-    return {
-        "lat":       _compound_angle_to_decimal(by_key["RefLatitude"]),
-        "lon":       _compound_angle_to_decimal(by_key["RefLongitude"]),
-        "elevation": elevation,
-        "site_name": by_key.get("Name"),
-    }
+    lat, lon, elevation, site_name = row
+    return {"lat": lat, "lon": lon, "elevation": elevation, "site_name": site_name}
 
 
 def to_viewer_ids(conn, model_id: str, speckle_ids: list[str]) -> list[str]:

@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import re
 
 import requests
 from specklepy.api import operations
@@ -97,6 +99,193 @@ def _child_elements(obj: Base) -> list | None:
     for every aggregated child, dropping them from flatten_elements' results
     entirely (no error, no fallback — they just never appeared)."""
     return getattr(obj, "elements", None) or getattr(obj, "@elements", None)
+
+
+def _compound_angle_to_decimal(raw_value) -> float | None:
+    """
+    Convert an IFC IfcCompoundPlaneAngleMeasure — (degrees, minutes, seconds,
+    (optional) millionths-of-a-second) — to decimal degrees.
+
+    Per the IFC spec only the first (degrees) component carries the sign of
+    the whole angle; the rest are magnitudes. Real-world files (confirmed
+    against 4 sample files spanning Revit/ArchiCAD/Autodesk sources) instead
+    put the sign on every component (e.g. longitude -71°15'29.5" stored as
+    [-71,-15,-29,-58837], not [-71,15,29,58837]) — summing absolute values
+    and re-applying the sign of the first non-zero component handles both
+    conventions correctly.
+    """
+    try:
+        parts = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+        if not isinstance(parts, (list, tuple)) or len(parts) < 3:
+            return None
+        deg, minute, sec = float(parts[0]), float(parts[1]), float(parts[2])
+        micro = float(parts[3]) if len(parts) > 3 else 0.0
+        first_nonzero = next((v for v in (deg, minute, sec, micro) if v != 0), 0.0)
+        sign = -1.0 if first_nonzero < 0 else 1.0
+        return sign * (abs(deg) + abs(minute) / 60 + abs(sec) / 3600 + abs(micro) / 3_600_000_000)
+    except (ValueError, TypeError, IndexError, json.JSONDecodeError):
+        return None
+
+
+def _split_step_args(inner: str) -> list[str]:
+    """Split a STEP entity's parenthesized argument list on top-level
+    commas, respecting quoted strings and nested parens (tuple-valued
+    attributes like RefLatitude's compound-angle list, e.g. "(48,11,14,700000)")."""
+    args: list[str] = []
+    depth = 0
+    in_string = False
+    current: list[str] = []
+    for ch in inner:
+        if ch == "'":
+            in_string = not in_string
+            current.append(ch)
+        elif in_string:
+            current.append(ch)
+        elif ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    args.append("".join(current))
+    return args
+
+
+def _find_matching_paren_end(text: str, open_idx: int) -> int:
+    """Return the index just past the ')' matching the '(' at open_idx,
+    respecting quoted strings (so a ')' inside a quoted STEP string literal
+    is never mistaken for the entity's own terminator). -1 if `text` doesn't
+    contain the matching close yet (caller should wait for more data)."""
+    depth = 0
+    in_string = False
+    for i in range(open_idx, len(text)):
+        ch = text[i]
+        if ch == "'":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+    return -1
+
+
+def _step_tuple_to_floats(raw: str) -> list[float] | None:
+    raw = raw.strip()
+    if not (raw.startswith("(") and raw.endswith(")")):
+        return None
+    try:
+        return [float(p) for p in raw[1:-1].split(",") if p.strip() != ""]
+    except ValueError:
+        return None
+
+
+_STEP_HEX_ESCAPE = re.compile(r"\\X\\([0-9A-Fa-f]{2})")
+
+
+def _unescape_step_string(raw: str) -> str | None:
+    """
+    Best-effort STEP string unescape for a site name shown in a map popup:
+    doubled '' -> ' and the common single-byte \\X\\HH hex-escape form
+    (e.g. 'ä' as \\X\\E4, as seen in real ArchiCAD/Revit IFC exports —
+    note: no trailing backslash after the hex digits, unlike the \\X2\\
+    ...\\X0\\ multi-byte form below). Doesn't handle that rarer \\X2\\...
+    \\X0\\ UTF-16 escape form — acceptable for a display label, not
+    something anything else parses.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.startswith("'") and raw.endswith("'"):
+        raw = raw[1:-1]
+    if raw in ("$", "*"):
+        return None
+    raw = raw.replace("''", "'")
+    return _STEP_HEX_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), raw)
+
+
+def find_site_info(
+    stream_id: str, commit_id: str, token: str | None = None, server_url: str | None = None,
+) -> dict | None:
+    """
+    Read RefLatitude/RefLongitude/RefElevation/Name off the model's IfcSite,
+    by streaming and regex-scanning the *original* uploaded IFC file — not
+    from the Speckle object tree flatten_elements() walks.
+
+    Confirmed live (self-hosted Speckle server 2.31.14, server-side IFC
+    FileImportService): that converter emits IfcSite twice in the Speckle
+    object graph (once as a `Collection` container with no attributes at
+    all, once more as a plain leaf "twin" DataObject) but drops
+    RefLatitude/RefLongitude/RefElevation entirely from both — even though
+    the source .ifc file has them. So this can never be sourced from
+    bim_elements/bim_parameters or the Speckle tree; the original file is
+    the only place it survives.
+
+    Streams the blob via iter_original_ifc_blob (same helper
+    fetch_original_ifc_bytes wraps) and stops as soon as an IFCSITE entity
+    with usable RefLatitude/RefLongitude is found, rather than buffering the
+    whole file — an ifcopenshell.open() of a large uploaded IFC (real
+    example: 480MB) was confirmed live to OOM-kill this deployment's already
+    memory-tight ingest process (see _EMBED_BATCH_SIZE's comment above for
+    the same container's other documented memory ceiling), so this
+    deliberately avoids fully parsing the file at all.
+
+    Only touches the network at all when an original .ifc blob actually
+    exists for this commit — find_original_ifc_blob*'s own GraphQL lookup
+    returns None immediately, with no download, for anything that isn't a
+    file-upload-sourced commit (e.g. a live Revit/Tekla connector push),
+    matching this widget's "no location data" fallback for exactly that case.
+    """
+    blob = (
+        find_original_ifc_blob_for_commit(stream_id, commit_id, token, server_url)
+        if commit_id
+        else find_original_ifc_blob(stream_id, token, server_url)
+    )
+    if blob is None:
+        return None
+
+    OVERLAP = 4096
+    buf = ""
+    try:
+        for chunk in iter_original_ifc_blob(stream_id, blob):
+            buf += chunk.decode("latin-1", errors="replace")
+            while True:
+                idx = buf.find("IFCSITE(")
+                if idx == -1:
+                    if len(buf) > OVERLAP:
+                        buf = buf[-OVERLAP:]
+                    break
+                open_paren = idx + len("IFCSITE")
+                end = _find_matching_paren_end(buf, open_paren)
+                if end == -1:
+                    buf = buf[idx:]  # entity not fully buffered yet — wait for more chunks
+                    break
+                args = _split_step_args(buf[open_paren + 1:end - 1])
+                buf = buf[end:]
+                if len(args) < 12:
+                    continue
+                lat_parts = _step_tuple_to_floats(args[9])
+                lon_parts = _step_tuple_to_floats(args[10])
+                lat = _compound_angle_to_decimal(lat_parts) if lat_parts else None
+                lon = _compound_angle_to_decimal(lon_parts) if lon_parts else None
+                if lat is None or lon is None:
+                    continue
+                try:
+                    elevation = float(args[11].strip())
+                except ValueError:
+                    elevation = None
+                return {"lat": lat, "lon": lon, "elevation": elevation, "site_name": _unescape_step_string(args[2])}
+    except Exception:
+        logger.warning("find_site_info: failed streaming original IFC for %s/%s", stream_id, commit_id, exc_info=True)
+        return None
+    return None
 
 
 def _gql_request(url: str, token: str, query: str, variables: dict) -> dict:

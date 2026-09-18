@@ -27,6 +27,7 @@ from ifc.spatial import get_storey, get_application_id
 from speckle.fetch import (
     fetch_commit, flatten_elements, detect_source, collect_instance_definitions,
     build_object_map, collect_instance_storeys, collect_ifc_storey_collections,
+    find_site_info,
 )
 from speckle.publish import create_viewer_bridge, BRIDGE_BRANCH
 
@@ -277,6 +278,8 @@ def ingest_commit(
             else:
                 viewer_available = False
 
+        site_info = find_site_info(stream_id, commit_id, token=token, server_url=resolved_server_url) or {}
+
         model_id = upsert_model(
             conn,
             stream_id=stream_id,
@@ -290,6 +293,10 @@ def ingest_commit(
             bridge_stream_id=bridge_stream_id,
             bridge_commit_id=bridge_commit_id,
             bridge_server_url=bridge_server_url,
+            site_lat=site_info.get("lat"),
+            site_lon=site_info.get("lon"),
+            site_elevation=site_info.get("elevation"),
+            site_name=site_info.get("site_name"),
         )
 
         element_count = 0
